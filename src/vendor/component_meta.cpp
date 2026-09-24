@@ -436,6 +436,59 @@ struct VariantTraits {
     static constexpr bool kIsVariant = false;
 };
 
+// The engine's layout for a type this compiler does not lay out the same way.
+//
+// Everywhere else in this file the layout comes from the type itself --
+// offsetof for a member, the container's own accessors for a length -- and
+// that is right because the declaration and the engine agree. std::variant
+// is the exception: its size and where it keeps its discriminant are the
+// standard library's business, not bg3se's, and this libc++ does not agree
+// with whatever built the game.
+//
+// So for those, the numbers are measured from the engine's own memory and
+// written down here. See reference/REFERENCE-DIFFS.md for the measurement:
+// a 52-character stats expression whose fifteen parameters wrote only their
+// payload and their discriminant, leaving the pool's previous contents
+// showing through the padding, which made the stride visible.
+template <class T>
+struct EngineLayout {
+    static constexpr std::size_t Size = sizeof(T);
+    // Where the discriminant is, or -1 to use the type's own index().
+    static constexpr int IndexAt = -1;
+};
+
+// 32 rather than the 40 this libc++ produces, with the discriminant one byte
+// at +24 and the payload at +0. Confirmed by decoding: "Placeholder0" reads
+// as StatsExpressionType[7] then int32 0, which is upstream's
+// ["Placeholder", 0], and label 7 is "Placeholder".
+template <>
+struct EngineLayout<bg3se::StatsExpressionInternal::Param> {
+    static constexpr std::size_t Size = 32;
+    static constexpr int IndexAt = 24;
+};
+
+template <class V>
+std::size_t variant_alternative_count();
+
+// The discriminant read at the engine's offset rather than through index().
+template <class V>
+std::size_t variant_index_at_thunk(void const* v) {
+    std::uint8_t held = 0;
+    std::memcpy(&held, (char const*)v + EngineLayout<V>::IndexAt,
+                sizeof(held));
+    const std::size_t count = variant_alternative_count<V>();
+    // Out of range is a valueless variant as far as a reader is concerned,
+    // and saying so beats decoding the bytes as an alternative they are not.
+    return held >= count ? (std::size_t)-1 : (std::size_t)held;
+}
+
+// The payload sits at the start, which is what leaves room for the
+// discriminant after it.
+template <class V>
+void* variant_payload_thunk(void const* v) {
+    return const_cast<void*>(v);
+}
+
 template <class V>
 std::size_t variant_index_thunk(void const* v) {
     auto const* var = static_cast<V const*>(v);
@@ -581,7 +634,13 @@ struct VariantTraits<std::variant<Ts...>> {
     static constexpr bool kIsVariant = true;
     static inline constexpr FieldDesc const* kAlternatives[] = {
         &kElementDesc<Ts>..., nullptr};
+    static constexpr std::size_t kCount = sizeof...(Ts);
 };
+
+template <class V>
+std::size_t variant_alternative_count() {
+    return VariantTraits<V>::kCount;
+}
 
 // Builds a field descriptor from its type. Having every kind decision here
 // rather than spelled out in each macro means adding a kind is one edit.
@@ -590,7 +649,7 @@ constexpr FieldDesc make_field(char const* name, std::size_t offset) {
     FieldDesc f{};
     f.Name = name;
     f.Offset = (std::uint32_t)offset;
-    f.Size = (std::uint16_t)sizeof(T);
+    f.Size = (std::uint16_t)EngineLayout<T>::Size;
     f.Kind = kind_of<T>();
     f.ElemKind = FieldKind::Unsupported;
     f.ElemCount = 0;
@@ -604,7 +663,7 @@ constexpr FieldDesc make_field(char const* name, std::size_t offset) {
     // named so it can be descended into, exactly as a struct field is.
     auto describe_elements = [&f]<class E>() {
         f.ElemKind = scalar_kind_of<E>();
-        f.ElemSize = (std::uint16_t)sizeof(E);
+        f.ElemSize = (std::uint16_t)EngineLayout<E>::Size;
         f.ElemDesc = &kElementDesc<E>;
         if constexpr (std::is_class_v<E>) {
             f.ElemTypeName = type_name<E>().data();
@@ -644,8 +703,14 @@ constexpr FieldDesc make_field(char const* name, std::size_t offset) {
         }
     } else if constexpr (VariantTraits<T>::kIsVariant) {
         f.Alternatives = VariantTraits<T>::kAlternatives;
-        f.ActiveIndex = &variant_index_thunk<T>;
-        f.Data = &variant_data_thunk<T>;
+        if constexpr (EngineLayout<T>::IndexAt >= 0) {
+            // Measured, not compiled. See EngineLayout.
+            f.ActiveIndex = &variant_index_at_thunk<T>;
+            f.Data = &variant_payload_thunk<T>;
+        } else {
+            f.ActiveIndex = &variant_index_thunk<T>;
+            f.Data = &variant_data_thunk<T>;
+        }
     } else if constexpr (MapTraits<T>::kIsMap) {
         using K = typename MapTraits<T>::Key;
         using V = typename MapTraits<T>::Value;

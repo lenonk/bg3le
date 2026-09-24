@@ -208,7 +208,29 @@ And it decodes `"Placeholder0"` to upstream's answer exactly:
 parameters are the code's tokens in prefix order, which is also why the
 52-character code produces `Add, Placeholder, 0, Max, 2, Variable, …`.
 
-### What is left, and it is not a mystery
+### Fixed
+
+`EngineLayout<T>` in `src/vendor/component_meta.cpp` is the override, and
+`Param` is its one entry: size 32, discriminant at +24. Everywhere else the
+layout still comes from the type itself, which is right because the
+declaration and the engine agree there.
+
+    Code    Placeholder0
+    Params  ["Placeholder", 0]
+
+which is what the captured reference says, byte for byte. The 52-character
+expression reads as a token stream in prefix order:
+
+    Add, Placeholder, 0, Max, 2, Variable, AbilityOverride, …
+
+Thirteen of its fifteen parameters decode; two read nil, and both are nested
+`Variant2`s whose own discriminant is still read through `index()` on
+bg3le's compiled type. That is the same class of problem one level down and
+the same fix if it turns out to need one — but `Variant2` measures 24 in both
+bg3le and the engine, so it may be something else, and it is not worth
+guessing at before measuring.
+
+### Why the compiled size disagrees, and it is not a mystery
 
 bg3le compiles `sizeof(Param)` as **40**, not 32. Every alternative is small
 enough for 32 — `RollDefinition` 12, `ResourceRollDefinition` 24,
