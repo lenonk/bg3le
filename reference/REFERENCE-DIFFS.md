@@ -145,21 +145,50 @@ fragments of unrelated text — `"scriptio"`, `"n" "h58f"`, `"sitionEffect"
 look like pointers into that same allocation (`0x5b5440b3f07` at +0 and
 `0x5b5440b3c00` at +64).
 
-So the next question is not the stride. It is whether this is the array
-upstream reads at all. Two readings fit the bytes:
+### The object, which settles the header
 
-- the pooled expression bg3le resolved is not the one the functor's
-  `StatsExpressionRef` points at, and `Code` matching is a coincidence of
-  two expressions sharing the placeholder code — testable, since
-  `RefCount` differs between them and the reference captured 961 against
-  this reading's 1555; or
-- `Array<Param>`'s header is not a pointer, a capacity and a size on this
-  build, and `buf` is being read from the wrong eight bytes. The 64-byte
-  spacing between the two pointer-shaped values is suggestive here: a
-  `Param` whose union is 56 bytes with a one-byte discriminant at +56 would
-  be 64 bytes with alignment 8, and `07` and `04` do sit at +56 and +120.
-  Those are not the alternatives upstream reports (1 then 7), but they are
-  in range for a nine-alternative variant.
+Dumping the pooled expression itself rather than its buffer, with
+`"Placeholder0"` as a known anchor — twelve characters, so inline, with `0c`
+in the sixteenth byte:
 
-Settling it wants the functor's `StatsExpressionRef` bytes next, and the
-`RefCount` comparison, before any more attention goes on the stride.
+      +  0  40 83 0b 44 b5 05 00 00  02 00 00 00 02 00 00 00  |@..D............|
+      + 16  50 6c 61 63 65 68 6f 6c  64 65 72 30 00 55 00 0c  |Placeholder0.U..|
+      + 32  13 06 00 00 4f 4e 45 5f  41 55 52 41 22 00 00 00  |....ONE_AURA"...|
+      + 48  80 a4 0b 44 b5 05 00 00  02 00 00 00 02 00 00 00  |...D............|
+
+Every declared offset is confirmed, and none of it needed guessing:
+
+- `+0` `Array<Param>` = buffer `0x5b5440b8340`, capacity 2, size 2 — the
+  pointer, capacity and size in the order bg3se declares them
+- `+16` `Code`, inline, `0c` long: `"Placeholder0"`
+- `+32` `RefCount` = `0x613` = 1555, which is what bg3le reports
+- `+48` the next pooled expression's own header, so the object is 40 bytes
+  and the pool packs them at 48
+
+So the earlier reading was wrong on both counts: the header is right, the
+buffer pointer is right, and the pooled expression bg3le resolved is the
+right one. `"ONE_AURA"` at +36 is the next object's `Code`, not a stray.
+
+### Where it actually stands
+
+The buffer is a genuine two-element `Param[]`, and it does not contain
+`"Placeholder"`. The one real lead in it is symmetry at a 64-byte stride:
+
+    +  0  07 3f 0b 44 b5 05 00 00     -> 0x5b5440b3f07
+    + 64  00 3c 0b 44 b5 05 00 00     -> 0x5b5440b3c00
+
+two pointer-shaped values into the same pool, 64 bytes apart, with the byte
+at `+56` reading `07` and the one at `+120` reading `04` — in range for a
+nine-alternative discriminant sitting after a 56-byte union. That would make
+`sizeof(Param)` 64 against the 40 bg3le compiles.
+
+It does not fit upstream's answer, though. `["Placeholder", 0]` is
+alternative 1 then alternative 7, and the tokens are derived from the code
+itself, so any expression whose `Code` is `"Placeholder0"` must have those
+two parameters. Something between the buffer and that answer is still
+unaccounted for, and the 64-byte reading is a lead rather than a conclusion.
+
+The next thing to try is the other direction: an expression whose `Code` is
+long and distinctive, so its parameters are identifiable in the bytes on
+sight. `"Placeholder0"` was a poor choice of subject precisely because its
+parameters are a word and a zero.
