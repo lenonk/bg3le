@@ -9078,7 +9078,8 @@ local function read_attribute(addr, i)
       end
       value = list
     else
-      value = Ext._Internal.StatsAttrLabel(addr, i, raw) or raw
+      -- Upstream's GetString gives "" for a value no label matches.
+      value = Ext._Internal.StatsAttrLabel(addr, i, raw) or ""
     end
   elseif kind == 10 then
     -- Object::Requirements, as upstream's serializer presents it.

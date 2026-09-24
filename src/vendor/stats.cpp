@@ -1774,14 +1774,17 @@ extern "C" bool bg3le_stats_attr_at(void const* object, std::size_t index,
     ModifierMeta const* meta = meta_of(mod);
     if (meta == nullptr) return false;
 
-    // The attribute's position is its index into the object's values.
+    // The attribute's position is its index into the object's values. An
+    // object the engine made at runtime can carry fewer values than its
+    // modifier list has attributes; a missing one reads as unset (-1), so it
+    // takes the same default upstream's getters give an unset value.
     std::vector<std::int32_t> const* values = properties_of(object);
-    if (values == nullptr || index >= values->size()) return false;
+    if (values == nullptr) return false;
 
     if (nameOut != nullptr) *nameOut = meta->Name;
     if (typeNameOut != nullptr) *typeNameOut = meta->TypeName;
     if (kindOut != nullptr) *kindOut = meta->Kind;
-    if (rawOut != nullptr) *rawOut = (*values)[index];
+    if (rawOut != nullptr) *rawOut = index < values->size() ? (*values)[index] : -1;
     return true;
 }
 
