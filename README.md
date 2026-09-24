@@ -162,8 +162,12 @@ component's declared size with the size the engine recorded, and
   an entity, anything else refused; a string that parses for a GUID, with
   upstream's own error for one that does not. An `EntityRef` keeps the world
   the engine paired it with, and gets the server world only when it has none.
-  There is one entity object per handle while anything holds it, so an
-  entity works as a table key, as upstream's value-compared proxies do
+  An entity is a userdata, as upstream's are, so `type(entity)` is
+  `"userdata"`, and there is one per handle while anything holds it, so it
+  works as a table key and compares raw-equal the way upstream's
+  value-compared proxies do. `Ext.Types.GetValueType` answers as upstream's
+  does: `"Entity"`, a struct's name (base type `"CppObject"`), or Lua's own
+  type name
 - **An entity has upstream's methods**: `IsAlive`, `GetAllComponents` and
   `GetAllComponentNames` from the entity's own storage (146 components for
   Lae'zel, in 2 ms), `HasRawComponent`, `GetChangedComponents`,

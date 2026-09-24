@@ -1424,6 +1424,21 @@ bool push_field(lua_State* L, const void* address, FieldKind kind,
 
 extern "C" bool bg3le_meta_parse_guid(const char* text, void* out);
 
+// An entity is a full userdata holding its handle, with the "EntityProxy"
+// metatable, as upstream's entities are userdata. False for anything else.
+bool entity_proxy_handle(lua_State* L, int index, std::uint64_t* handle) {
+    if (lua_type(L, index) != LUA_TUSERDATA || !lua_getmetatable(L, index)) {
+        return false;
+    }
+    lua_getfield(L, -1, "__name");
+    const bool isEntity = lua_isstring(L, -1)
+                          && std::strcmp(lua_tostring(L, -1), "EntityProxy") == 0;
+    lua_pop(L, 2);
+    if (!isEntity) return false;
+    std::memcpy(handle, lua_touserdata(L, index), sizeof(*handle));
+    return true;
+}
+
 // Writes a field, converting the Lua value the way upstream's get<T> does.
 //
 // This used to refuse GUIDs and entity handles on purpose, as "not something
@@ -1455,23 +1470,10 @@ bool write_field(lua_State* L, int index, void* address, FieldKind kind,
             // else, a bare number included -- a handle's bits are not
             // something to type in.
             std::uint64_t handle = 0xFFC0000000000000ull;  // NullHandle
-            if (!lua_isnil(L, index)) {
-                bool isEntity = false;
-                if (lua_istable(L, index) && lua_getmetatable(L, index)) {
-                    lua_getfield(L, -1, "__name");
-                    isEntity = lua_isstring(L, -1)
-                               && std::strcmp(lua_tostring(L, -1),
-                                              "EntityProxy") == 0;
-                    lua_pop(L, 2);
-                }
-                if (!isEntity) {
-                    luaL_error(L, "Param %d: expected an entity or nil, got %s",
-                               index, luaL_typename(L, index));
-                    return false;
-                }
-                lua_getfield(L, index, "Handle");
-                handle = (std::uint64_t)lua_tointeger(L, -1);
-                lua_pop(L, 1);
+            if (!lua_isnil(L, index) && !entity_proxy_handle(L, index, &handle)) {
+                luaL_error(L, "Param %d: expected an entity or nil, got %s",
+                           index, luaL_typename(L, index));
+                return false;
             }
             std::memcpy(address, &handle, sizeof(handle));
             return true;
@@ -4805,6 +4807,25 @@ extern "C" bool bg3le_entity_replication_flags(void* container,
                                                std::uint32_t qword,
                                                std::uint64_t* flags);
 
+// Ext._Internal.NewEntityProxy(handle, metatable) -> the entity's userdata
+int l_new_entity_proxy(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    luaL_checktype(L, 2, LUA_TTABLE);
+    auto* block = static_cast<std::uint64_t*>(lua_newuserdata(L, sizeof(handle)));
+    *block = handle;
+    lua_pushvalue(L, 2);
+    lua_setmetatable(L, -2);
+    return 1;
+}
+
+// Ext._Internal.EntityProxyHandle(value) -> handle, or nil for a non-entity
+int l_entity_proxy_handle(lua_State* L) {
+    std::uint64_t handle = 0;
+    if (!entity_proxy_handle(L, 1, &handle)) return 0;
+    lua_pushinteger(L, (lua_Integer)handle);
+    return 1;
+}
+
 // Ext._Internal.EntityAlive(handle) -> whether the entity has a storage
 int l_entity_alive(lua_State* L) {
     const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
@@ -5288,6 +5309,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "RegisteredComponentTypes");
     lua_pushcfunction(g_lua, l_entity_alive);
     lua_setfield(g_lua, -2, "EntityAlive");
+    lua_pushcfunction(g_lua, l_new_entity_proxy);
+    lua_setfield(g_lua, -2, "NewEntityProxy");
+    lua_pushcfunction(g_lua, l_entity_proxy_handle);
+    lua_setfield(g_lua, -2, "EntityProxyHandle");
     lua_pushcfunction(g_lua, l_entity_component_names);
     lua_setfield(g_lua, -2, "EntityComponentNames");
     lua_pushcfunction(g_lua, l_entity_was_changed);
@@ -6235,11 +6260,6 @@ end
 -- info.Members or info.Kind finds what it expects.
 Ext.Types = {}
 
-local LUA_TYPE_ID = {
-  ["nil"] = "Unknown", boolean = "Boolean", number = "Float",
-  string = "String", table = "Object", ["function"] = "Function",
-  userdata = "Object", thread = "Unknown",
-}
 
 local type_names_cache
 
@@ -6657,9 +6677,9 @@ function Ext.Types.GetTypeInfo(typeName)
 end
 
 function Ext.Types.GetObjectType(object)
-  if type(object) ~= "table" then return nil end
-  -- bg3le hands out plain tables, so the only objects that carry a type
-  -- are the ones it tagged.
+  local t = type(object)
+  if t ~= "table" and t ~= "userdata" then return nil end
+  -- Only the objects bg3le tagged carry a type: its views, and entities.
   local meta = getmetatable(object)
   if meta ~= nil and meta.__name ~= nil then return meta.__name end
   return nil
@@ -6675,12 +6695,28 @@ function Ext.Types.IsA(object, typeName)
   return Ext.Types.GetObjectType(object) == typeName
 end
 
+-- Upstream's GetDebugName: an entity is "Entity", an object its struct's
+-- name (base type "CppObject"), and anything else Lua's own type name.
+local function value_type(object, base)
+  local t = type(object)
+  if t == "userdata" and Ext._Internal.EntityProxyHandle(object) ~= nil then
+    return "Entity"
+  elseif t == "table" then
+    local meta = getmetatable(object)
+    if type(meta) == "table" and type(meta.__name) == "string"
+       and meta.__name ~= "EntityProxy" then
+      return base and "CppObject" or meta.__name
+    end
+  end
+  return t
+end
+
 function Ext.Types.GetValueType(object)
-  return LUA_TYPE_ID[type(object)] or "Unknown"
+  return value_type(object, false)
 end
 
 function Ext.Types.GetBaseValueType(object)
-  return Ext.Types.GetValueType(object)
+  return value_type(object, true)
 end
 
 function Ext.Types.Validate(object)
@@ -8396,17 +8432,22 @@ local function get_component(handle, name)
   return make_component(handle, name, fields)
 end
 
+-- An entity is a userdata holding its handle, as upstream's are.
+local function handle_of(entity)
+  return Ext._Internal.EntityProxyHandle(entity)
+end
+
 local entity_methods = {}
 
 function entity_methods:GetComponent(name)
-  return get_component(self.Handle, name)
+  return get_component(handle_of(self), name)
 end
 
 -- Every readable component the entity's storage holds, keyed by
 -- upstream's component type name. Upstream adds the ones still pending in
 -- the command buffer; see kCommandBuffer below for why those are not here.
 function entity_methods:GetAllComponents()
-  local handle = rawget(self, "Handle")
+  local handle = handle_of(self)
   local names, short = Ext._Internal.EntityComponentNames(handle, false)
   local out = {}
   for _, name in ipairs(names) do
@@ -8419,17 +8460,17 @@ end
 -- The rest of upstream's EntityProxyMetatable methods.
 
 function entity_methods:HasRawComponent(name)
-  return Ext._Internal.HasComponent(rawget(self, "Handle"), name)
+  return Ext._Internal.HasComponent(handle_of(self), name)
 end
 
 function entity_methods:IsAlive()
-  return Ext._Internal.EntityAlive(rawget(self, "Handle"))
+  return Ext._Internal.EntityAlive(handle_of(self))
 end
 
 -- Engine names; requireMapped keeps only those with (true) or without
 -- (false) a component type Lua can read.
 function entity_methods:GetAllComponentNames(requireMapped)
-  local names, short = Ext._Internal.EntityComponentNames(rawget(self, "Handle"),
+  local names, short = Ext._Internal.EntityComponentNames(handle_of(self),
                                                          false)
   if requireMapped == nil then return names end
   local out = {}
@@ -8440,7 +8481,7 @@ function entity_methods:GetAllComponentNames(requireMapped)
 end
 
 function entity_methods:GetChangedComponents()
-  local handle = rawget(self, "Handle")
+  local handle = handle_of(self)
   local names, short = Ext._Internal.EntityComponentNames(handle, true)
   local out = {}
   for _, name in ipairs(names) do
@@ -8450,22 +8491,22 @@ function entity_methods:GetChangedComponents()
 end
 
 function entity_methods:MarkChanged(name)
-  return Ext._Internal.MarkChanged(rawget(self, "Handle"), name) == true
+  return Ext._Internal.MarkChanged(handle_of(self), name) == true
 end
 
 function entity_methods:WasChanged(name)
-  return Ext._Internal.EntityWasChanged(rawget(self, "Handle"), name)
+  return Ext._Internal.EntityWasChanged(handle_of(self), name)
 end
 
 function entity_methods:GetReplicationFlags(name, qword)
-  return Ext._Internal.EntityReplicationFlags(rawget(self, "Handle"), name,
+  return Ext._Internal.EntityReplicationFlags(handle_of(self), name,
                                               qword)
 end
 
 -- Upstream's ReplicateComponent: OR the flags into the qword and mark the
 -- replication dirty, or say why it cannot.
 local function replicate(entity, name, flags, qword)
-  local ok, err = Ext._Internal.Replicate(rawget(entity, "Handle"), name,
+  local ok, err = Ext._Internal.Replicate(handle_of(entity), name,
                                           flags, qword)
   if not ok then Ext.Log.PrintError(tostring(err)) end
 end
@@ -8533,7 +8574,7 @@ local function user_var_option(defs, key, option, default)
 end
 
 local function entity_vars(entity)
-  local handle = rawget(entity, "Handle")
+  local handle = handle_of(entity)
   local guid = Ext.Entity.HandleToUuid(handle) or tostring(handle)
   local store, defs = Ext._Internal.UserVariableStore(guid)
   local server = Ext.IsServer()
@@ -8584,31 +8625,32 @@ local entity_meta = {
   __index = function(entity, key)
     local method = entity_methods[key]
     if method ~= nil then return method end
+    if key == "Handle" then return handle_of(entity) end
     if key == "Vars" then return entity_vars(entity) end
     if type(key) == "string" and Ext._Internal.ComponentFields(key) == nil then
       error(string.format("Not a valid EntityProxy method or component type: %s",
                           key), 2)
     end
-    return get_component(rawget(entity, "Handle"), key)
+    return get_component(handle_of(entity), key)
   end,
 
   -- The rest is upstream's EntityProxyMetatable. Two reads of one entity
   -- are two tables here, so without __eq `a.Owner == b` was false where
   -- upstream says true; ordering is by handle, as there.
   __eq = function(a, b)
-    return rawget(a, "Handle") == rawget(b, "Handle")
+    return handle_of(a) == handle_of(b)
   end,
   __lt = function(a, b)
-    return math.ult(rawget(a, "Handle"), rawget(b, "Handle"))
+    return math.ult(handle_of(a), handle_of(b))
   end,
   __le = function(a, b)
-    local x, y = rawget(a, "Handle"), rawget(b, "Handle")
+    local x, y = handle_of(a), handle_of(b)
     return x == y or math.ult(x, y)
   end,
   -- "Entity (%016llx)", which is what the captured entity-host reference
   -- prints; bg3le printed "table: 0x...".
   __tostring = function(entity)
-    return string.format("Entity (%016x)", rawget(entity, "Handle"))
+    return string.format("Entity (%016x)", handle_of(entity))
   end,
   -- What Ext.Types.GetObjectType reports, as upstream's GetTypeName does.
   __name = "EntityProxy",
@@ -8648,11 +8690,8 @@ function Ext.Entity.Get(id)
 
   local entity = entity_objects[handle]
   if entity == nil then
-    entity = setmetatable({Handle = handle}, entity_meta)
+    entity = Ext._Internal.NewEntityProxy(handle, entity_meta)
     entity_objects[handle] = entity
-  end
-  if type(id) == "string" and rawget(entity, "EntityUuid") == nil then
-    rawset(entity, "EntityUuid", id)
   end
   return entity
 end
