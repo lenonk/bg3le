@@ -9586,6 +9586,19 @@ local read_object
 -- element of StatsExpressionPooled.Params is a variant, and only its live
 -- alternative has bytes, so which one that is has to be asked for at
 -- runtime rather than derived.
+-- A snapshot array or map, as a userdata over the values read, as
+-- upstream's are userdata. source is where a set came from, for
+-- Ext.Types.Unserialize to write it back.
+local function snapshot_container(items, source)
+  return Ext._Internal.NewObjectProxy({
+    __index = items,
+    __newindex = function(_, k, v) items[k] = v end,
+    __len = function() return #items end,
+    __pairs = function() return next, items, nil end,
+    __bg3leSource = source,
+  })
+end
+
 local function read_object_path(addr, class, path, kind)
   if kind == "variant" or kind == "unsupported" then
     -- Only the alternative a variant currently holds has bytes, so which
@@ -9618,8 +9631,7 @@ local function read_object_path(addr, class, path, kind)
     -- rather than filling in a copy nothing reads. A hash set -- a spell
     -- list, say -- is the case that matters: it reads as an array of its
     -- keys and can only be written whole.
-    return setmetatable(items, {__bg3leSource = {addr = addr, class = class,
-                                                 path = path}})
+    return snapshot_container(items, {addr = addr, class = class, path = path})
   end
 
   -- Keyed by the map's own keys; an unreadable key gets make_map's
@@ -9640,7 +9652,7 @@ local function read_object_path(addr, class, path, kind)
       items[k] = read_object_path(addr, class, element,
                                   Ext._Internal.ObjectFieldInfo(class, element))
     end
-    return items
+    return snapshot_container(items)
   end
 
   local value, err = Ext._Internal.ObjectGetField(addr, class, path)
@@ -9680,7 +9692,7 @@ function read_object(addr, class, prefix, out)
   -- a mod may have grafted on with Ext.Types.AddCustomFunction.
   local viewType = Ext._Internal.ViewTypeName(class, prefix)
 
-  return setmetatable(out, {
+  return Ext._Internal.NewObjectProxy({
     __name = viewType,
     __index = function(self, key)
       local held = values[key]
