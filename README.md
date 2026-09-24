@@ -252,7 +252,11 @@ component's declared size with the size the engine recorded, and
   be assigned. Replacing a set means rebuilding its hash table, and doing
   that through bg3se's own container methods took the game down twice — the
   offsets, the hash rule and the two things not to call are in
-  `reference/STATIC-DATA-WRITES.md`
+  `reference/STATIC-DATA-WRITES.md`. Types are named by upstream's
+  `ExtResourceManagerType` label, which for 17 of them is not the class
+  name — `ColorDefinition` is `resource::Color` — and the five
+  character-creation default-value managers, whose names bg3se writes the
+  MSVC way, resolve too
 - `Ext.Stats`: 15,754 stats, enumerable and readable by name, through a
   proxy that reads an attribute when it is asked for, as upstream's does.
   Snapshotting all two hundred of them per fetch made a mod's stats pass

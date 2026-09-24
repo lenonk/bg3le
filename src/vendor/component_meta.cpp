@@ -968,7 +968,18 @@ struct ClassFields {
     // Whether this is an ECS component at all. A resource has an engine name
     // but no place in the entity world.
     bool IsComponent;
+    // A static data resource's ExtResourceManagerType, or -1.
+    std::int32_t ResourceType;
 };
+
+template <class T>
+constexpr std::int32_t resource_type_of() {
+    if constexpr (kIsResourceType<T>) {
+        return (std::int32_t)T::ResourceManagerType;
+    } else {
+        return -1;
+    }
+}
 
 template <class T>
 struct FieldTable;
@@ -1198,6 +1209,7 @@ inline constexpr ClassFields kClassFields{
     is_proxy_component<T>(),
     is_one_frame_component<T>(),
     is_component_class<T>(),
+    resource_type_of<T>(),
 };
 
 // Every class table, collected the way upstream collects its own.
@@ -1222,6 +1234,29 @@ std::unordered_map<std::string_view, ClassFields const*>& by_class_name() {
         std::unordered_map<std::string_view, ClassFields const*> m;
         m.reserve(std::size(kAllClasses) * 2);
         for (auto const* cls : kAllClasses) m.emplace(cls->Name, cls);
+        return m;
+    }();
+    return map;
+}
+
+// Resources by their ExtResourceManagerType label, which is how upstream's
+// Ext.StaticData names them. Seventeen differ from the class name --
+// "ColorDefinition" is resource::Color -- so the label is looked up rather
+// than assumed.
+std::unordered_map<std::string_view, ClassFields const*>& by_resource_label() {
+    static std::unordered_map<std::string_view, ClassFields const*> map = [] {
+        std::unordered_map<std::string_view, ClassFields const*> m;
+        auto e = by_enum_name().find(type_name<ExtResourceManagerType>());
+        if (e == by_enum_name().end()) return m;
+        for (auto const* cls : kAllClasses) {
+            if (cls->ResourceType < 0) continue;
+            for (auto const* l = e->second->Labels; l->Name != nullptr; ++l) {
+                if (l->Value == (std::uint64_t)cls->ResourceType) {
+                    m.emplace(l->Name, cls);
+                    break;
+                }
+            }
+        }
         return m;
     }();
     return map;
@@ -2669,12 +2704,9 @@ extern "C" void const* bg3le_meta_class(char const* className) {
 
     // A script names a resource the way bg3se's Lua API does, by the
     // ExtResourceManagerType label: "ActionResource", not
-    // "resource::ActionResource". The labels and the class names agree
-    // one-for-one, so qualification is the only difference, and retrying with
-    // it is exact rather than a search for a matching suffix.
-    const std::string qualified = std::string("resource::") + className;
-    it = by_class_name().find(qualified);
-    return it != by_class_name().end() ? it->second : nullptr;
+    // "resource::ActionResource".
+    it = by_resource_label().find(className);
+    return it != by_resource_label().end() ? it->second : nullptr;
 }
 
 // The engine's name for a component, so a caller who looked the component up

@@ -144,9 +144,49 @@ std::size_t load(const SymbolTable& symbols) {
     return total;
 }
 
+namespace {
+
+// bg3se spells a template argument the way MSVC does -- "struct X",
+// "class ls::FixedString", "enum ESkill" -- and the symbol table the way
+// libc++abi demangles it, without the keyword.
+std::string without_msvc_keywords(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (std::size_t i = 0; i < name.size();) {
+        bool skipped = false;
+        const bool boundary = i == 0 || name[i - 1] == '<' || name[i - 1] == ' '
+                              || name[i - 1] == ',';
+        if (boundary) {
+            for (const char* kw : {"struct ", "class ", "enum "}) {
+                const std::size_t n = std::strlen(kw);
+                if (name.compare(i, n, kw) == 0) {
+                    i += n;
+                    skipped = true;
+                    break;
+                }
+            }
+        }
+        if (!skipped) out += name[i++];
+    }
+    return out;
+}
+
+}  // namespace
+
 std::optional<std::int32_t> index_of(Context context, const std::string& name) {
     const auto& m = registry().by_context[static_cast<std::size_t>(context)];
-    const auto it = m.find(name);
+    auto it = m.find(name);
+    if (it == m.end()) {
+        // And libc++abi closes nested templates with ">>" where MSVC writes
+        // "> >".
+        std::string plain = without_msvc_keywords(name);
+        it = m.find(plain);
+        for (std::size_t at; it == m.end()
+                             && (at = plain.find("> >")) != std::string::npos;) {
+            plain.erase(at + 1, 1);
+            it = m.find(plain);
+        }
+    }
     if (it == m.end()) return std::nullopt;
 
     // Read through the fault-tolerant path: these live in .bss, so a wrong
