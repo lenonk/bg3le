@@ -32,10 +32,21 @@ component's declared size with the size the engine recorded, and
   and the other two are the story's own, so a count the mapping does not
   have goes the way story functions go
 - Lua host with `Ext.Log`, `Ext.Json`, `Ext.Math` (scalar), `Ext.Table`,
-  `Ext.Timer`, `Ext.Utils`, and `_D`/`_P`/`_PW`/`_PE`. The interpreter is
-  Norbyte's Lua fork, the same one bg3se uses — see
+  `Ext.Timer`, `Ext.Utils`, `Ext.Config`, and upstream's `_D`/`_DS`/`_P`/
+  `_PW`/`_PE`/`_C`/`_W` helpers and compatibility aliases. The interpreter
+  is Norbyte's Lua fork, the same one bg3se uses — see
   [external/lua/README.bg3le](external/lua/README.bg3le) for why that is not
-  optional
+  optional. `Ext.Json` is a port of upstream's `Json.inl`: `Stringify`
+  takes its options (`Beautify`, `IterateUserdata`,
+  `StringifyInternalTypes`, `AvoidRecursion`, `LimitDepth`,
+  `LimitArrayElements`, or the older positional form), sorts object keys
+  the way it does, and writes `"*RECURSION*"` and `"*DEPTH LIMIT
+  EXCEEDED*"` where it would; `Parse` keeps `1.0` a float and a `null` in
+  an array a hole. So `_D` output matches upstream's line for line, stat
+  dumps included (members, then attributes in the modifier list's order).
+  A slow event handler is reported as upstream's profiler reports it: a
+  warning over `Ext.Config`'s thresholds. `Ext.OnNextTick` is a one-shot
+  `Tick` subscription, as upstream's is
 - **`Ext.Events` and `Ext.ModEvents` are upstream's own library**, ported
   from bg3se's `LuaScripts/Libs/Events`: handlers run by `Priority`,
   `e:StopPropagation()` ends a throw, a subscription id carries its event in
@@ -114,7 +125,10 @@ component's declared size with the size the engine recorded, and
   its next tick — which is when a real one would have arrived.
   `BroadcastMessage`, `PostMessageToClient`, `PostMessageToUser`,
   `PostMessageToServer` and a `NetChannel`'s `Send`/`Request` all reach the
-  other side, and a request's reply comes back to the caller's callback
+  other side, and a request's reply comes back to the caller's callback.
+  The receiver always gets its own parsed copy, a missing channel or
+  handler warns as upstream's does, a failing request handler sends no
+  reply, and `Ext.Net.Version()` is the protocol version, 2
 - **`Ext.Debug.GenerateIdeHelpers`** writes the LuaLS annotations upstream
   writes, to the path upstream writes them to: 20,361 `Osi.*` stubs with
   `@param` and `@return` from the story's own signatures, plus the bare global
@@ -338,7 +352,10 @@ component's declared size with the size the engine recorded, and
   value for value to `reference/mod-shape.txt`. The
   public API is a compatibility contract — a mod written against bg3se has
   to work here — so it follows the reference rather than convenience.
-  `tools/grab-reference.sh` reproduces the capture
+  `tools/grab-reference.sh` reproduces the capture, and
+  `tools/check-reference.sh` compares against it: 15 of 25 captures are
+  identical, and what the rest differ in is the install (mod counts, the
+  save loaded, hash-ordered labels), not bg3le
 - A Lua debugger server compatible with the
   [bg3lua](https://github.com/lenonk/bg3lua) client (`client/` submodule),
   plus `CreateConsole` parity that opens a terminal on startup
@@ -446,6 +463,21 @@ component's declared size with the size the engine recorded, and
   so `src/vendor/noesis_rtti_linux.cpp` aliases 19 of them to one real
   placeholder type. That is safe only while no Noesis `dynamic_cast` runs. The
   real fix is keeping Noesis types out of the generated property maps
+- **`PersistentVars`, and saving `Ext.Vars` and persistent timers.** In
+  progress: upstream writes them into its own region of the save through
+  the engine's Osiris-variable save visitor, which has no symbol here.
+- **Osiris user queries (`QRY_*`).** Not callable yet: upstream evaluates
+  them through the Rete node's `IsValid` with an identity adapter, and
+  neither is located in this build.
+- **Client-side entities.** Entity reads go to the server world, so the
+  client context sees the server's entities and none of its own
+  (`ClientControl`, client visuals).
+- **`Ext.Entity.OnSystemUpdate`/`OnSystemPostUpdate`.** Upstream swaps a
+  system's update function; systems update on worker threads here, where a
+  Lua state cannot be entered.
+- **`Ext.Resource`, `GetCachedBoost`, and strings the engine made at
+  runtime** (a player-named character's `DisplayName`), each waiting on an
+  engine structure that has no anchor yet.
 - **Launching.** See [Running](#running)
 
 ## Building
