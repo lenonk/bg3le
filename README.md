@@ -189,8 +189,12 @@ component's declared size with the size the engine recorded, and
   before deferred ones, because the Lua states may only be entered from
   their own thread — so a destroy handler gets `nil` for the component,
   which no longer exists by then. Applying `BLESS` with Osiris reaches an
-  `OnCreate("ServerStatus")` handler with the status readable. `OnChange`,
-  which upstream drives from replication, does not fire yet
+  `OnCreate("ServerStatus")` handler with the status readable.
+  `OnChange`/`Subscribe` fire too, from the replication pools as upstream
+  reads them after the world update — the server tick sees each update's
+  changes once — with the changed field flags and upstream's optional flag
+  filter; a component with no replication index raises upstream's error.
+  Damaging the host reaches an `OnChange("Health")` handler with field 1
 - **Map keys arrive as upstream pushes them**: an entity key as the entity
   and an enum key as its label. `StatusContainer.Statuses` is keyed by the
   status entities, and each one can be looked up by the entity or followed

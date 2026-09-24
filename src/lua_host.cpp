@@ -4899,6 +4899,50 @@ int l_take_component_events(lua_State* L) {
     return 1;
 }
 
+extern "C" void bg3le_replication_watch(std::uint16_t replicationTypeIndex);
+extern "C" std::size_t bg3le_replication_changes(void* container,
+                                                 std::uint64_t* entities,
+                                                 std::uint16_t* types,
+                                                 std::uint64_t* fields,
+                                                 std::size_t max);
+
+// Ext._Internal.WatchReplication(component) -> whether it replicates
+int l_watch_replication(lua_State* L) {
+    const auto index = ecs::index_of(ecs::Context::Replication,
+                                     engine_name_of(luaL_checkstring(L, 1)));
+    if (index) bg3le_replication_watch(static_cast<std::uint16_t>(*index));
+    lua_pushboolean(L, index.has_value());
+    return 1;
+}
+
+// Ext._Internal.TakeReplicationChanges()
+//   -> { { handle, component short name, fields }, ... }
+int l_take_replication_changes(lua_State* L) {
+    constexpr std::size_t kBatch = 4096;
+    static std::uint64_t entities[kBatch];
+    static std::uint16_t types[kBatch];
+    static std::uint64_t fields[kBatch];
+    const std::size_t n = bg3le_replication_changes(server_container(), entities,
+                                                    types, fields, kBatch);
+    lua_createtable(L, (int)n, 0);
+    int at = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        auto name = ecs::name_of(ecs::Context::Replication, types[i]);
+        if (!name) continue;
+        void const* meta = bg3le_meta_component(name->c_str());
+        const char* shortName = meta ? bg3le_meta_short_name(meta) : nullptr;
+        lua_createtable(L, 3, 0);
+        lua_pushinteger(L, (lua_Integer)entities[i]);
+        lua_rawseti(L, -2, 1);
+        lua_pushstring(L, shortName != nullptr ? shortName : name->c_str());
+        lua_rawseti(L, -2, 2);
+        lua_pushinteger(L, (lua_Integer)fields[i]);
+        lua_rawseti(L, -2, 3);
+        lua_rawseti(L, -2, ++at);
+    }
+    return 1;
+}
+
 // Ext._Internal.ComponentShortName(name) -> upstream's name for a component
 int l_component_short_name(lua_State* L) {
     void const* meta = bg3le_meta_component(luaL_checkstring(L, 1));
@@ -5236,6 +5280,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "TakeComponentEvents");
     lua_pushcfunction(g_lua, l_component_short_name);
     lua_setfield(g_lua, -2, "ComponentShortName");
+    lua_pushcfunction(g_lua, l_watch_replication);
+    lua_setfield(g_lua, -2, "WatchReplication");
+    lua_pushcfunction(g_lua, l_take_replication_changes);
+    lua_setfield(g_lua, -2, "TakeReplicationChanges");
     lua_pushcfunction(g_lua, l_registered_component_types);
     lua_setfield(g_lua, -2, "RegisteredComponentTypes");
     lua_pushcfunction(g_lua, l_entity_alive);
@@ -8454,9 +8502,9 @@ entity_methods.OnDestroyDeferred = entity_on_fixed("destroy-deferred", false)
 entity_methods.OnDestroyDeferredOnce = entity_on_fixed("destroy-deferred", true)
 entity_methods.OnDestroyOnce = entity_on_fixed("destroy", true)
 
-function entity_methods:OnChanged(component, handler)
+function entity_methods:OnChanged(component, handler, flags)
   return Ext._Internal.SubscribeEntity("change", component, handler, self,
-                                       false)
+                                       false, flags)
 end
 
 -- These go through the calling thread's entity command buffer, which
@@ -10240,7 +10288,7 @@ local COMPONENT_EVENT_KINDS = {
   ["destroy"] = true, ["destroy-deferred"] = true,
 }
 
-local function subscribe(kind, component, handler, entity, once)
+local function subscribe(kind, component, handler, entity, once, flags)
   if type(handler) ~= "function" then
     error("Ext.Entity subscriptions expect a handler function", 3)
   end
@@ -10248,12 +10296,19 @@ local function subscribe(kind, component, handler, entity, once)
   if type(component) == "string" and COMPONENT_EVENT_KINDS[kind] then
     component = Ext._Internal.ComponentShortName(component) or component
     Ext._Internal.WatchComponentEvents(component)
+  elseif type(component) == "string" and kind == "change" then
+    component = Ext._Internal.ComponentShortName(component) or component
+    if not Ext._Internal.WatchReplication(component) then
+      error("No replication events are available for components of type "
+            .. component, 3)
+    end
   end
   local id = next_sub
   next_sub = next_sub + 1
   entity_subs[id] = {
     Kind = kind, Component = component, Handler = handler,
     Entity = entity, Once = once or false,
+    Flags = flags or -1,  -- all fields
   }
   return id
 end
@@ -10274,16 +10329,26 @@ function Ext._Internal.DeliverComponentEvents()
                                     e[3] == "create" and entity[e[2]] or nil)
     end
   end
+
+  -- And the replication changes the last update made: upstream's OnChange
+  -- handler gets the entity, the component and the changed field flags.
+  for _, c in ipairs(Ext._Internal.TakeReplicationChanges()) do
+    local entity = Ext._Internal.EntityValue(c[1])
+    if entity ~= nil then
+      Ext._Internal.FireEntityEvent("change", c[2], entity, c[3])
+    end
+  end
 end
 
 Ext._Internal.SubscribeEntity = subscribe
 
-function Ext.Entity.Subscribe(component, handler, entity)
-  return subscribe("change", component, handler, entity, false)
+function Ext.Entity.Subscribe(component, handler, entity, flags)
+  return subscribe("change", component, handler, entity, false, flags)
 end
 
-function Ext.Entity.OnCreate(component, handler, entity)
-  return subscribe("create", component, handler, entity, false)
+function Ext.Entity.OnCreate(component, handler, entity, deferred, once)
+  return subscribe(deferred and "create-deferred" or "create", component,
+                   handler, entity, once == true)
 end
 
 function Ext.Entity.OnCreateOnce(component, handler, entity)
@@ -10298,8 +10363,9 @@ function Ext.Entity.OnCreateDeferredOnce(component, handler, entity)
   return subscribe("create-deferred", component, handler, entity, true)
 end
 
-function Ext.Entity.OnDestroy(component, handler, entity)
-  return subscribe("destroy", component, handler, entity, false)
+function Ext.Entity.OnDestroy(component, handler, entity, deferred, once)
+  return subscribe(deferred and "destroy-deferred" or "destroy", component,
+                   handler, entity, once == true)
 end
 
 function Ext.Entity.OnDestroyOnce(component, handler, entity)
@@ -10314,8 +10380,8 @@ function Ext.Entity.OnDestroyDeferredOnce(component, handler, entity)
   return subscribe("destroy-deferred", component, handler, entity, true)
 end
 
-function Ext.Entity.OnChange(component, handler, entity)
-  return subscribe("change", component, handler, entity, false)
+function Ext.Entity.OnChange(component, handler, entity, flags)
+  return subscribe("change", component, handler, entity, false, flags)
 end
 
 function Ext.Entity.OnSystemUpdate(system, handler, once)
@@ -10335,9 +10401,11 @@ end
 -- Raised by bg3le when it detects one of these; the ECS-side detection is
 -- still to be written, so today it fires only for what bg3le itself does.
 function Ext._Internal.FireEntityEvent(kind, component, entity, ...)
+  local fields = kind == "change" and select(1, ...) or nil
   for id, sub in pairs(entity_subs) do
     if sub.Kind == kind and sub.Component == component
-       and (sub.Entity == nil or sub.Entity == entity) then
+       and (sub.Entity == nil or sub.Entity == entity)
+       and (fields == nil or sub.Flags & fields ~= 0) then
       if sub.Once then entity_subs[id] = nil end
       local ok, err = xpcall(sub.Handler, debug.traceback, entity, component,
                              ...)

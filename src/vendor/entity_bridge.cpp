@@ -719,6 +719,52 @@ extern "C" std::size_t bg3le_component_events_take(std::uint64_t* entities,
     return n;
 }
 
+// Replication changes, as upstream's ServerEntityReplicationEventHooks reads
+// them after the world update: each watched replication pool's entities
+// and the first qword of their dirty fields. The server tick runs after the
+// update that set them, so each change is seen once.
+namespace {
+std::vector<bool>& watched_replication() {
+    static std::vector<bool> w;
+    return w;
+}
+}  // namespace
+
+extern "C" void bg3le_replication_watch(std::uint16_t replicationTypeIndex) {
+    auto& w = watched_replication();
+    if (w.size() <= replicationTypeIndex) w.resize(replicationTypeIndex + 1);
+    w[replicationTypeIndex] = true;
+}
+
+extern "C" std::size_t bg3le_replication_changes(void* container,
+                                                 std::uint64_t* entities,
+                                                 std::uint16_t* types,
+                                                 std::uint64_t* fields,
+                                                 std::size_t max) {
+    // Not gated on Replication->Dirty as upstream's is: upstream reads
+    // straight after the update, and by the server tick the flag has been
+    // reset while the pools still hold that update's changes.
+    auto* world = container ? world_from_container(container) : nullptr;
+    if (world == nullptr || world->Replication == nullptr) return 0;
+    auto const& watched = watched_replication();
+    auto& pools = world->Replication->ComponentPools;
+    std::size_t n = 0;
+    for (unsigned i = 0; i < pools.size() && i < watched.size(); i++) {
+        if (!watched[i]) continue;
+        for (auto const& entry : pools[i]) {
+            if (n >= max) return n;
+            const std::uint64_t changed =
+                entry.Value().NumQwords() > 0 ? *entry.Value().GetBuf() : 0;
+            if (changed == 0) continue;
+            entities[n] = entry.Key().Handle;
+            types[n] = (std::uint16_t)i;
+            fields[n] = changed;
+            ++n;
+        }
+    }
+    return n;
+}
+
 // Diagnostic: one component type's construct/destroy signals, as bg3se lays
 // them out, to confirm the layout before anything is added to them.
 extern "C" void bg3le_component_callbacks_probe(void* container,
