@@ -822,6 +822,7 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         using E = typename GlmTraits<T>::Elem;
         describe_elements.template operator()<E>();
         f.ElemCount = (std::uint16_t)GlmTraits<T>::kCount;
+        f.IsVector = true;
     } else if constexpr (VectorTraits<T>::kIsVector) {
         using E = typename VectorTraits<T>::Elem;
         describe_elements.template operator()<E>();
@@ -1979,6 +1980,14 @@ extern "C" bool bg3le_meta_map_key(void const* handle, char const* path,
     *kind = (std::uint8_t)r.Field.KeyKind;
     *size = r.Field.KeySize;
     return true;
+}
+
+// Whether the field at path is a glm vector or matrix.
+extern "C" bool bg3le_meta_is_vector(void const* handle, char const* path) {
+    if (handle == nullptr || path == nullptr) return false;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
+                                nullptr);
+    return r.Ok && r.Field.IsVector;
 }
 
 // The label of an enum-typed map key, as upstream pushes one. False for a key

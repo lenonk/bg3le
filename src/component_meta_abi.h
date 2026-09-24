@@ -158,6 +158,9 @@ struct FieldDesc {
     // upstream pushes it. Null for a key that is not an enum.
     char const* KeyTypeName;
     std::uint16_t KeyTypeNameLength;
+    // A glm vector or matrix, which upstream pushes as a plain Lua table
+    // rather than as an array proxy.
+    bool IsVector;
 };
 
 }  // namespace bg3le

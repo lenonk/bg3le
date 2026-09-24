@@ -4818,6 +4818,18 @@ int l_new_entity_proxy(lua_State* L) {
     return 1;
 }
 
+extern "C" bool bg3le_meta_is_vector(void const* handle, char const* path);
+
+// Ext._Internal.IsVector(class or component, path) -> whether the field is a
+// glm vector or matrix, which reads as a plain table
+int l_is_vector(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    void const* meta = bg3le_meta_component(name);
+    if (meta == nullptr) meta = bg3le_meta_class(name);
+    lua_pushboolean(L, bg3le_meta_is_vector(meta, luaL_checkstring(L, 2)));
+    return 1;
+}
+
 // Ext._Internal.NewObjectProxy(metatable) -> a userdata behind that
 // metatable, which is what upstream's object, array and map proxies are.
 int l_new_object_proxy(lua_State* L) {
@@ -5323,6 +5335,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "NewEntityProxy");
     lua_pushcfunction(g_lua, l_new_object_proxy);
     lua_setfield(g_lua, -2, "NewObjectProxy");
+    lua_pushcfunction(g_lua, l_is_vector);
+    lua_setfield(g_lua, -2, "IsVector");
     lua_pushcfunction(g_lua, l_entity_proxy_handle);
     lua_setfield(g_lua, -2, "EntityProxyHandle");
     lua_pushcfunction(g_lua, l_entity_component_names);
@@ -6821,7 +6835,7 @@ function Ext.Types.Construct(typeName)
 end
 
 function Ext.Types.GetHashSetValueAt(object, index)
-  if type(object) ~= "table" then return nil end
+  if not Ext._Internal.Walkable(object) then return nil end
   return object[index + 1]
 end
 
@@ -6857,7 +6871,7 @@ local builtin_members = {}
 -- into it, so a string a mod has updated reads back through here too.
 local function translated_get(self)
   local handle = self.Handle
-  local key = type(handle) == "table" and handle.Handle or nil
+  local key = handle ~= nil and handle.Handle or nil
   if type(key) ~= "string" then return nil end
   return Ext._Internal.Loca(key)
 end
@@ -6866,6 +6880,29 @@ builtin_members["TranslatedFSString"] = {Get = {Fn = translated_get}}
 
 -- Published so the views can reach it; the prelude is compiled in more than
 -- one chunk, so a local here is not in scope there.
+-- The member names a type has beyond its fields, in a stable order, for
+-- iteration: upstream's property map holds methods and custom members too,
+-- so pairs over an object yields them.
+function Ext._Internal.CustomMemberNames(typeName)
+  local names = {}
+  for _, set in ipairs({builtin_members[typeName] or {},
+                        custom_members[typeName] or {}}) do
+    for key in pairs(set) do names[#names + 1] = key end
+  end
+  table.sort(names)
+  return names
+end
+
+-- A member's value as iteration yields it: the function for a method, the
+-- property's value for a property.
+function Ext._Internal.CustomMemberValue(self, typeName, key)
+  local extra = Ext._Internal.CustomMember(typeName, key)
+  if extra == nil then return nil end
+  if extra.Fn ~= nil then return extra.Fn end
+  local ok, value = pcall(extra.Get, self)
+  return ok and value or nil
+end
+
 function Ext._Internal.CustomMember(typeName, key)
   if typeName == nil then return nil end
   local builtin = builtin_members[typeName]
@@ -8152,7 +8189,10 @@ read_path = function(handle, comp, path)
     error("bg3le: " .. comp .. "." .. path .. " does not resolve", 0)
   end
 
-  if kind == "array" then return make_array(handle, comp, path) end
+  -- A glm vector is a plain table, as upstream pushes it.
+  if kind == "array" and not Ext._Internal.IsVector(comp, path) then
+    return make_array(handle, comp, path)
+  end
   if kind == "map" then return make_map(handle, comp, path) end
 
   -- An optional holds nought or one. Empty reads as nil, which is the answer
@@ -8431,14 +8471,24 @@ make_fields = function(handle, comp, prefix, fields)
     -- string rather than nil for the usual reason: nil would read as absent.
     __pairs = function(self)
       local key
+      local extras, extra = nil, 0
       return function()
-        local kind
-        key, kind = next(fields, key)
-        if key == nil then return nil end
-        if kind == "unsupported" then return key, "<unsupported>" end
-        local ok, value = pcall(function() return self[key] end)
-        if not ok then return key, "<unreadable>" end
-        return key, value
+        if extras == nil then
+          local kind
+          key, kind = next(fields, key)
+          if key ~= nil then
+            if kind == "unsupported" then return key, "<unsupported>" end
+            local ok, value = pcall(function() return self[key] end)
+            if not ok then return key, "<unreadable>" end
+            return key, value
+          end
+          extras = Ext._Internal.CustomMemberNames(type_of_view(comp, prefix))
+        end
+        extra = extra + 1
+        local name = extras[extra]
+        if name == nil then return nil end
+        return name, Ext._Internal.CustomMemberValue(
+          self, type_of_view(comp, prefix), name)
       end, self, nil
     end,
   })
@@ -9618,7 +9668,7 @@ local function read_object_path(addr, class, path, kind)
     return read_object(addr, class, path, {})
   end
 
-  if kind == "array" then
+  if kind == "array" and not Ext._Internal.IsVector(class, path) then
     local count = Ext._Internal.ObjectArrayInfo(addr, class, path)
     local items = {}
     for i = 0, (count or 0) - 1 do
@@ -9735,11 +9785,18 @@ function read_object(addr, class, prefix, out)
     end,
     __pairs = function(self)
       local key
+      local extras, extra = nil, 0
       return function()
-        local value
-        key, value = next(values, key)
-        if key == nil then return nil end
-        return key, value
+        if extras == nil then
+          local value
+          key, value = next(values, key)
+          if key ~= nil then return key, value end
+          extras = Ext._Internal.CustomMemberNames(viewType)
+        end
+        extra = extra + 1
+        local name = extras[extra]
+        if name == nil then return nil end
+        return name, Ext._Internal.CustomMemberValue(self, viewType, name)
       end, self, nil
     end,
     -- Where it came from. Under its own name rather than __bg3leSource,
