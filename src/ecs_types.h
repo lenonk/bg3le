@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "elf_symbols.h"
 
@@ -56,9 +58,11 @@ std::size_t count(Context context);
 // index_of, because the engine assigns the values during startup.
 bool has_index(Context context, std::int32_t index);
 
-// The name a context assigned to an index, or nothing. Linear in the number of
-// types in the context, so this is for diagnostics rather than for lookups.
+// The name a context assigned to an index, or nothing.
 std::optional<std::string> name_of(Context context, std::int32_t index);
+
+// Every type in the context whose index is assigned, in index order.
+std::vector<std::pair<std::int32_t, std::string>> assigned(Context context);
 
 // For diagnostics: the name of a context.
 const char* context_name(Context context);

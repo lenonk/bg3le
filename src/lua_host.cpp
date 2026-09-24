@@ -4434,10 +4434,15 @@ int l_entity_replicate(lua_State* L) {
         return 2;
     }
 
-    // Whole-component replication: qword 0, every flag set.
+    // Whole-component replication unless flags and qword are given, as
+    // upstream's Replicate and SetReplicationFlags.
+    const auto flags = lua_isnoneornil(L, 3)
+                           ? ~static_cast<std::uint64_t>(0)
+                           : static_cast<std::uint64_t>(luaL_checkinteger(L, 3));
+    const auto qword = static_cast<std::uint32_t>(luaL_optinteger(L, 4, 0));
     const auto status = bg3le_replicate_component(
-        server_container(), handle, static_cast<std::uint16_t>(*index), 0,
-        ~static_cast<std::uint64_t>(0));
+        server_container(), handle, static_cast<std::uint16_t>(*index), qword,
+        flags);
     if (status == 0) {
         lua_pushboolean(L, 1);
         return 1;
@@ -4522,6 +4527,130 @@ int l_entity_has_component(lua_State* L) {
                        static_cast<std::uint16_t>(*index), &storageIndex,
                        &storage, &component);
     lua_pushboolean(L, component != nullptr);
+    return 1;
+}
+
+extern "C" bool bg3le_entity_alive(void* container, std::uint64_t handle);
+extern "C" std::size_t bg3le_entity_component_types(void* container,
+                                                    std::uint64_t handle,
+                                                    std::uint16_t* out,
+                                                    std::size_t max);
+extern "C" std::size_t bg3le_entity_changed_types(void* container,
+                                                  std::uint64_t handle,
+                                                  std::uint16_t* out,
+                                                  std::size_t max);
+extern "C" bool bg3le_entity_was_changed(void* container, std::uint64_t handle,
+                                         std::uint16_t componentIndex);
+extern "C" bool bg3le_entity_replication_flags(void* container,
+                                               std::uint64_t handle,
+                                               std::uint16_t replicationTypeIndex,
+                                               std::uint32_t qword,
+                                               std::uint64_t* flags);
+
+// Ext._Internal.EntityAlive(handle) -> whether the entity has a storage
+int l_entity_alive(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    lua_pushboolean(L, bg3le_entity_alive(server_container(), handle));
+    return 1;
+}
+
+// Ext._Internal.EntityComponentNames(handle, changedOnly)
+//   -> { engine name, ... }, { engine name = short name or false, ... }
+int l_entity_component_names(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    const bool changedOnly = lua_toboolean(L, 2) != 0;
+
+    std::vector<std::uint16_t> types(512);
+    auto fetch = changedOnly ? bg3le_entity_changed_types
+                             : bg3le_entity_component_types;
+    std::size_t n = fetch(server_container(), handle, types.data(), types.size());
+    if (n > types.size()) {
+        types.resize(n);
+        n = fetch(server_container(), handle, types.data(), types.size());
+    }
+
+    lua_createtable(L, (int)n, 0);
+    lua_createtable(L, 0, (int)n);
+    int at = 0;
+    for (std::size_t i = 0; i < n && i < types.size(); ++i) {
+        // One-frame indices carry 0x8000; see component_index.
+        const bool oneFrame = (types[i] & 0x8000) != 0;
+        auto name = ecs::name_of(oneFrame ? ecs::Context::OneFrameComponent
+                                          : ecs::Context::Component,
+                                 types[i] & 0x7fff);
+        if (!name) continue;
+        lua_pushstring(L, name->c_str());
+        lua_rawseti(L, -3, ++at);
+        void const* meta = bg3le_meta_component(name->c_str());
+        const char* shortName = meta ? bg3le_meta_short_name(meta) : nullptr;
+        if (shortName != nullptr) lua_pushstring(L, shortName);
+        else lua_pushboolean(L, 0);
+        lua_setfield(L, -2, name->c_str());
+    }
+    return 2;
+}
+
+extern "C" std::size_t bg3le_registered_component_types(void* container,
+                                                        std::uint16_t* out,
+                                                        std::size_t max);
+
+// Ext._Internal.RegisteredComponentTypes()
+//   -> { { engine name, one-frame, short name or false }, ... }
+int l_registered_component_types(lua_State* L) {
+    std::vector<std::uint16_t> types(4096);
+    std::size_t n = bg3le_registered_component_types(server_container(),
+                                                     types.data(), types.size());
+    if (n > types.size()) {
+        types.resize(n);
+        n = bg3le_registered_component_types(server_container(), types.data(),
+                                             types.size());
+    }
+
+    lua_createtable(L, (int)n, 0);
+    int at = 0;
+    for (std::size_t i = 0; i < n && i < types.size(); ++i) {
+        const bool oneFrame = (types[i] & 0x8000) != 0;
+        auto name = ecs::name_of(oneFrame ? ecs::Context::OneFrameComponent
+                                          : ecs::Context::Component,
+                                 types[i] & 0x7fff);
+        if (!name) continue;
+        lua_createtable(L, 3, 0);
+        lua_pushstring(L, name->c_str());
+        lua_rawseti(L, -2, 1);
+        lua_pushboolean(L, oneFrame);
+        lua_rawseti(L, -2, 2);
+        void const* meta = bg3le_meta_component(name->c_str());
+        const char* shortName = meta ? bg3le_meta_short_name(meta) : nullptr;
+        if (shortName != nullptr) lua_pushstring(L, shortName);
+        else lua_pushboolean(L, 0);
+        lua_rawseti(L, -2, 3);
+        lua_rawseti(L, -2, ++at);
+    }
+    return 1;
+}
+
+// Ext._Internal.EntityWasChanged(handle, component) -> bool
+int l_entity_was_changed(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    const auto index = component_index(engine_name_of(luaL_checkstring(L, 2)));
+    lua_pushboolean(L, index && bg3le_entity_was_changed(
+                               server_container(), handle,
+                               static_cast<std::uint16_t>(*index)));
+    return 1;
+}
+
+// Ext._Internal.EntityReplicationFlags(handle, component, qword) -> flags
+int l_entity_replication_flags(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    const char* name = engine_name_of(luaL_checkstring(L, 2));
+    const auto qword = static_cast<std::uint32_t>(luaL_optinteger(L, 3, 0));
+    std::uint64_t flags = 0;
+    if (auto index = ecs::index_of(ecs::Context::Replication, name)) {
+        bg3le_entity_replication_flags(server_container(), handle,
+                                       static_cast<std::uint16_t>(*index),
+                                       qword, &flags);
+    }
+    lua_pushinteger(L, (lua_Integer)flags);
     return 1;
 }
 
@@ -4775,6 +4904,16 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "SetHealth");
     lua_pushcfunction(g_lua, l_entity_mark_changed);
     lua_setfield(g_lua, -2, "MarkChanged");
+    lua_pushcfunction(g_lua, l_registered_component_types);
+    lua_setfield(g_lua, -2, "RegisteredComponentTypes");
+    lua_pushcfunction(g_lua, l_entity_alive);
+    lua_setfield(g_lua, -2, "EntityAlive");
+    lua_pushcfunction(g_lua, l_entity_component_names);
+    lua_setfield(g_lua, -2, "EntityComponentNames");
+    lua_pushcfunction(g_lua, l_entity_was_changed);
+    lua_setfield(g_lua, -2, "EntityWasChanged");
+    lua_pushcfunction(g_lua, l_entity_replication_flags);
+    lua_setfield(g_lua, -2, "EntityReplicationFlags");
     lua_pushcfunction(g_lua, l_entity_replicate);
     lua_setfield(g_lua, -2, "Replicate");
     lua_pushcfunction(g_lua, l_world_probe);
@@ -7846,49 +7985,193 @@ function entity_methods:GetComponent(name)
   return get_component(self.Handle, name)
 end
 
--- Every component this entity carries, keyed by name, as upstream's is.
---
--- Upstream asks the ECS for the entity's own component list. bg3le asks the
--- other way round -- for each component it has metadata for, does this entity
--- have it -- which reaches the same set: the answer is "the components that
--- are both describable and present", and a component bg3le cannot describe
--- could not be returned either way.
---
--- It is 2,107 questions rather than one, so it is a call to make when dumping
--- an entity and not one to make in a loop. The names are cached because the
--- list does not change within a session.
-local component_names = nil
-
+-- Every readable component the entity's storage holds, keyed by
+-- upstream's component type name. Upstream adds the ones still pending in
+-- the command buffer; see kCommandBuffer below for why those are not here.
 function entity_methods:GetAllComponents()
-  if component_names == nil then
-    component_names = Ext._Internal.ComponentTypeNames()
-  end
-
   local handle = rawget(self, "Handle")
+  local names, short = Ext._Internal.EntityComponentNames(handle, false)
   local out = {}
-  for _, name in ipairs(component_names) do
-    local component = get_component(handle, name)
-    if component ~= nil then out[name] = component end
+  for _, name in ipairs(names) do
+    local key = short[name]
+    if key then out[key] = get_component(handle, key) end
   end
   return out
 end
 
--- Marking the component changed is what the server acts on; setting the
--- replication flags is what reaches the client. Both are needed for a write
--- to show up in the UI.
-function entity_methods:Replicate(name)
-  if not Ext._Internal.MarkChanged(self.Handle, name) then
-    error("bg3le: could not mark " .. tostring(name) .. " as changed", 0)
+-- The rest of upstream's EntityProxyMetatable methods.
+
+function entity_methods:HasRawComponent(name)
+  return Ext._Internal.HasComponent(rawget(self, "Handle"), name)
+end
+
+function entity_methods:IsAlive()
+  return Ext._Internal.EntityAlive(rawget(self, "Handle"))
+end
+
+-- Engine names; requireMapped keeps only those with (true) or without
+-- (false) a component type Lua can read.
+function entity_methods:GetAllComponentNames(requireMapped)
+  local names, short = Ext._Internal.EntityComponentNames(rawget(self, "Handle"),
+                                                         false)
+  if requireMapped == nil then return names end
+  local out = {}
+  for _, name in ipairs(names) do
+    if (short[name] ~= false) == requireMapped then out[#out + 1] = name end
   end
-  local ok, err = Ext._Internal.Replicate(self.Handle, name)
-  if not ok then error("bg3le: " .. tostring(err), 0) end
-  return true
+  return out
+end
+
+function entity_methods:GetChangedComponents()
+  local handle = rawget(self, "Handle")
+  local names, short = Ext._Internal.EntityComponentNames(handle, true)
+  local out = {}
+  for _, name in ipairs(names) do
+    if short[name] then out[short[name]] = get_component(handle, short[name]) end
+  end
+  return out
+end
+
+function entity_methods:MarkChanged(name)
+  return Ext._Internal.MarkChanged(rawget(self, "Handle"), name) == true
+end
+
+function entity_methods:WasChanged(name)
+  return Ext._Internal.EntityWasChanged(rawget(self, "Handle"), name)
+end
+
+function entity_methods:GetReplicationFlags(name, qword)
+  return Ext._Internal.EntityReplicationFlags(rawget(self, "Handle"), name,
+                                              qword)
+end
+
+-- Upstream's ReplicateComponent: OR the flags into the qword and mark the
+-- replication dirty, or say why it cannot.
+local function replicate(entity, name, flags, qword)
+  local ok, err = Ext._Internal.Replicate(rawget(entity, "Handle"), name,
+                                          flags, qword)
+  if not ok then Ext.Log.PrintError(tostring(err)) end
+end
+
+function entity_methods:SetReplicationFlags(name, flags, qword)
+  replicate(self, name, flags, qword or 0)
+end
+
+function entity_methods:Replicate(name)
+  replicate(self, name, nil, 0)
+end
+
+-- OnCreate(component, fn[, deferred[, once]]) and its fixed variants, as
+-- Ext.Entity's with this entity.
+local function entity_on(kind, deferredKind)
+  return function(self, component, handler, deferred, once)
+    return Ext._Internal.SubscribeEntity(deferred and deferredKind or kind,
+                                         component, handler, self, once == true)
+  end
+end
+
+local function entity_on_fixed(kind, once)
+  return function(self, component, handler)
+    return Ext._Internal.SubscribeEntity(kind, component, handler, self, once)
+  end
+end
+
+entity_methods.OnCreate = entity_on("create", "create-deferred")
+entity_methods.OnCreateDeferred = entity_on_fixed("create-deferred", false)
+entity_methods.OnCreateDeferredOnce = entity_on_fixed("create-deferred", true)
+entity_methods.OnCreateOnce = entity_on_fixed("create", true)
+entity_methods.OnDestroy = entity_on("destroy", "destroy-deferred")
+entity_methods.OnDestroyDeferred = entity_on_fixed("destroy-deferred", false)
+entity_methods.OnDestroyDeferredOnce = entity_on_fixed("destroy-deferred", true)
+entity_methods.OnDestroyOnce = entity_on_fixed("destroy", true)
+
+function entity_methods:OnChanged(component, handler)
+  return Ext._Internal.SubscribeEntity("change", component, handler, self,
+                                       false)
+end
+
+-- These go through the calling thread's entity command buffer, which
+-- upstream picks with ls::ThreadRegistry::RequestThreadIndex; nothing in
+-- this build names it. GetNetId needs the server's replication authority,
+-- which has no anchor yet.
+local kCommandBuffer = "needs the calling thread's entity command buffer, "
+  .. "which is chosen by ls::ThreadRegistry::RequestThreadIndex -- a "
+  .. "function this build has no symbol for"
+for _, name in ipairs({"CreateComponent", "CreateComponentImmediate",
+                       "RemoveComponent", "RemoveComponentImmediate",
+                       "GetAddedComponentsCurrentFrame",
+                       "GetRemovedComponentsCurrentFrame", "WasAdded",
+                       "WasRemoved", "WasEntityAdded", "WasEntityRemoved"}) do
+  entity_methods[name] = needs("entity:" .. name .. " " .. kCommandBuffer)
+end
+entity_methods.GetNetId = needs("entity:GetNetId needs the server's "
+  .. "replication authority (EoCServer.GameServer.Replication), which "
+  .. "bg3le has not found")
+
+-- entity.Vars: the entity's user variables, as upstream's holder.
+local function user_var_option(defs, key, option, default)
+  local value = defs[key] and defs[key][option]
+  if value == nil then return default end
+  return value
+end
+
+local function entity_vars(entity)
+  local handle = rawget(entity, "Handle")
+  local guid = Ext.Entity.HandleToUuid(handle) or tostring(handle)
+  local store, defs = Ext._Internal.UserVariableStore(guid)
+  local server = Ext.IsServer()
+  local side = server and "server" or "client"
+
+  return setmetatable({}, {
+    __index = function(_, key)
+      if defs[key] == nil then
+        Ext.Log.PrintError("Variable class '" .. tostring(key)
+                           .. "' not registered.")
+        return nil
+      end
+      if not user_var_option(defs, key, server and "Server" or "Client",
+                             server) then
+        Ext.Log.PrintError("Variable class '" .. key .. "' not available on "
+                           .. side)
+        return nil
+      end
+      return store[key]
+    end,
+    __newindex = function(_, key, value)
+      if defs[key] == nil then
+        Ext.Log.PrintError("Variable class '" .. tostring(key)
+                           .. "' not registered.")
+        return
+      end
+      if not user_var_option(defs, key, server and "WriteableOnServer"
+                             or "WriteableOnClient", server) then
+        Ext.Log.PrintError("Variable class '" .. key .. "' not writeable on "
+                           .. side)
+        return
+      end
+      store[key] = value
+      Ext.Vars.DirtyUserVariables(guid, key)
+    end,
+    __len = function()
+      local n = 0
+      for _ in pairs(store) do n = n + 1 end
+      return n
+    end,
+    __pairs = function() return next, store, nil end,
+  })
 end
 
 local entity_meta = {
+  -- Upstream's Index: a method, a component (nil when absent), Vars, or an
+  -- error for anything else.
   __index = function(entity, key)
     local method = entity_methods[key]
     if method ~= nil then return method end
+    if key == "Vars" then return entity_vars(entity) end
+    if type(key) == "string" and Ext._Internal.ComponentFields(key) == nil then
+      error(string.format("Not a valid EntityProxy method or component type: %s",
+                          key), 2)
+    end
     return get_component(rawget(entity, "Handle"), key)
   end,
 
@@ -9476,8 +9759,15 @@ Ext.Stats.GetCachedBoost = needs(
 
 -- Every component bg3le can read by name, which is what a mod asks for
 -- before deciding whether a component is worth looking at.
-function Ext.Entity.GetRegisteredComponentTypes()
-  return Ext._Internal.ComponentTypeNames()
+function Ext.Entity.GetRegisteredComponentTypes(oneFrame, mapped)
+  local out = {}
+  for _, t in ipairs(Ext._Internal.RegisteredComponentTypes()) do
+    if (oneFrame == nil or t[2] == oneFrame)
+       and (mapped == nil or (t[3] ~= false) == mapped) then
+      out[#out + 1] = t[1]
+    end
+  end
+  return out
 end
 
 -- Subscriptions. The registry and dispatch are real, so a mod's handlers
@@ -9500,6 +9790,8 @@ local function subscribe(kind, component, handler, entity, once)
   }
   return id
 end
+
+Ext._Internal.SubscribeEntity = subscribe
 
 function Ext.Entity.Subscribe(component, handler, entity)
   return subscribe("change", component, handler, entity, false)

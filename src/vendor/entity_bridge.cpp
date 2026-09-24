@@ -440,4 +440,134 @@ extern "C" std::int32_t bg3le_replicate_component(void* container,
     return 0;
 }
 
+namespace {
+
+bg3se::ecs::EntityStorageData* storage_of(void* container,
+                                          bg3se::EntityHandle entity) {
+    if (container == nullptr) return nullptr;
+    auto* storages =
+        reinterpret_cast<bg3se::ecs::EntityStorageContainer*>(container);
+    const auto index = storages->GetEntityStorageIndex(entity);
+    return index ? storages->GetEntityStorage(*index) : nullptr;
+}
+
+}  // namespace
+
+// The entity methods below follow upstream's EntityProxyMetatable
+// (Lua/Shared/Proxies/LuaEntityProxy.inl) over the captured container.
+
+// IsAlive: whether the entity has a storage.
+extern "C" bool bg3le_entity_alive(void* container, std::uint64_t handle) {
+    return storage_of(container, bg3se::EntityHandle(handle)) != nullptr;
+}
+
+// GetAllComponentNames: the storage's component types, then the one-frame
+// pools that hold this entity. Returns how many there are; writes up to max.
+extern "C" std::size_t bg3le_entity_component_types(void* container,
+                                                    std::uint64_t handle,
+                                                    std::uint16_t* out,
+                                                    std::size_t max) {
+    const auto entity = bg3se::EntityHandle(handle);
+    auto* storage = storage_of(container, entity);
+    if (storage == nullptr) return 0;
+
+    std::size_t n = 0;
+    auto put = [&](auto type) {
+        if (n < max) out[n] = (std::uint16_t)type;
+        ++n;
+    };
+    for (auto componentIdx : storage->ComponentTypeToIndex.keys()) {
+        put(componentIdx);
+    }
+    if (storage->HasOneFrameComponents) {
+        for (auto it : storage->OneFrameComponents) {
+            if (it->Value().find(entity) != it->Value().end()) put(it->Key());
+        }
+    }
+    return n;
+}
+
+// WasChanged, as EntityWorld::WasComponentChanged.
+extern "C" bool bg3le_entity_was_changed(void* container, std::uint64_t handle,
+                                         std::uint16_t componentIndex) {
+    const auto entity = bg3se::EntityHandle(handle);
+    auto* storage = storage_of(container, entity);
+    if (storage == nullptr) return false;
+    auto* storages =
+        reinterpret_cast<bg3se::ecs::EntityStorageContainer*>(container);
+    return storages->UsedFrameDataStorages[storage->StorageIndex]
+           && storage->WasComponentChanged(
+               entity, bg3se::ecs::ComponentTypeIndex(componentIndex));
+}
+
+// GetChangedComponents: the component types changed this frame.
+extern "C" std::size_t bg3le_entity_changed_types(void* container,
+                                                  std::uint64_t handle,
+                                                  std::uint16_t* out,
+                                                  std::size_t max) {
+    if (container == nullptr) return 0;
+    auto* storages =
+        reinterpret_cast<bg3se::ecs::EntityStorageContainer*>(container);
+    const auto entity = bg3se::EntityHandle(handle);
+    const auto storageIndex = storages->GetEntityStorageIndex(entity);
+    if (!storageIndex || !storages->IsEntityStorageDirty(*storageIndex)) {
+        return 0;
+    }
+
+    auto* storage = storages->GetEntityStorage(*storageIndex);
+    if (storage == nullptr) return 0;
+    auto instance = storage->InstanceToPageMap.try_get(entity);
+    if (instance == nullptr) return 0;
+
+    std::size_t n = 0;
+    for (auto type : storage->ComponentTypeToIndex) {
+        if (storage->ModifiedComponents[type.Value()]
+            && storage->WasComponentChanged(*instance, type.Value())) {
+            if (n < max) out[n] = (std::uint16_t)type.Key();
+            ++n;
+        }
+    }
+    return n;
+}
+
+// GetRegisteredComponentTypes: every component type the world registers,
+// as upstream walks ComponentRegistry_.
+extern "C" std::size_t bg3le_registered_component_types(void* container,
+                                                        std::uint16_t* out,
+                                                        std::size_t max) {
+    auto* world = container ? world_from_container(container) : nullptr;
+    if (world == nullptr) return 0;
+
+    auto const& registry = world->ComponentRegistry_;
+    std::size_t n = 0;
+    for (unsigned i = 0; i < registry.Bitmask.Size; i++) {
+        if (registry.Bitmask[i]) {
+            if (n < max) out[n] = (std::uint16_t)registry.Types[i].TypeId;
+            ++n;
+        }
+    }
+    return n;
+}
+
+// GetReplicationFlags: the qword of the entity's flags for one replicated
+// type, zero where it has none. False when there is no replication.
+extern "C" bool bg3le_entity_replication_flags(void* container,
+                                               std::uint64_t handle,
+                                               std::uint16_t replicationTypeIndex,
+                                               std::uint32_t qword,
+                                               std::uint64_t* flags) {
+    *flags = 0;
+    auto* world = container ? world_from_container(container) : nullptr;
+    if (world == nullptr || world->Replication == nullptr) return false;
+
+    auto& pools = world->Replication->ComponentPools;
+    if (replicationTypeIndex >= pools.Size()) return false;
+
+    auto* mask = pools[replicationTypeIndex].try_get(bg3se::EntityHandle(handle));
+    if (mask != nullptr && qword < mask->NumQwords()) {
+        *flags = mask->GetBuf()[qword];
+    }
+    return true;
+}
+
 }  // namespace bg3le

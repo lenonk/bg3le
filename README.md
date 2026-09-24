@@ -159,6 +159,20 @@ component's declared size with the size the engine recorded, and
   the engine paired it with, and gets the server world only when it has none.
   There is one entity object per handle while anything holds it, so an
   entity works as a table key, as upstream's value-compared proxies do
+- **An entity has upstream's methods**: `IsAlive`, `GetAllComponents` and
+  `GetAllComponentNames` from the entity's own storage (146 components for
+  Lae'zel, in 2 ms), `HasRawComponent`, `GetChangedComponents`,
+  `MarkChanged`/`WasChanged`, `Get`/`SetReplicationFlags` and `Replicate`
+  (upstream's replication test passes: 0, then 7, then all ones), the
+  `OnCreate`/`OnDestroy`/`OnChanged` family, and `entity.Vars` for user
+  variables. An unknown key raises upstream's error, and
+  `Ext.Entity.GetRegisteredComponentTypes` walks the world's registry. The
+  last two reference captures are now identical to the Windows output. What
+  is left needs the calling thread's entity command buffer, which upstream
+  picks with a function this build has no symbol for — `Create`/
+  `RemoveComponent`, `WasAdded`/`WasRemoved` and the current-frame lists —
+  and `GetNetId`, which needs the server's replication authority; those
+  raise and say so
 - **Map keys arrive as upstream pushes them**: an entity key as the entity
   and an enum key as its label. `StatusContainer.Statuses` is keyed by the
   status entities, and each one can be looked up by the entity or followed
@@ -491,9 +505,10 @@ undefined symbols allowed, because it has to interpose the engine's own, so a
 missing definition of *ours* builds cleanly and then kills the game at the
 first call. That has happened three times.
 
-And one that needs the game running with bg3le attached:
+And two that need the game running with bg3le attached:
 
     ./tools/check-reference.sh      # bg3le against the real extender's output
+    ./tools/run-upstream-tests.sh [bg3se checkout]   # bg3se's own Lua tests
 
 `reference/*.txt` is output captured from the Script Extender on Windows, and
 that replays the same queries here and reports how far apart the answers are.
@@ -501,6 +516,9 @@ It does not decide pass or fail — most of what differs is that the install is
 not the same one — but it is what found three broken entity calls and a key
 in every stat dump that upstream does not have. See
 [reference/REFERENCE-DIFFS.md](reference/REFERENCE-DIFFS.md).
+`run-upstream-tests.sh` runs the server-side tests from a bg3se checkout's
+`LuaScripts/Tests` (default `../bg3se`). Some of their expectations predate
+the current game, so it prints each failure's reason rather than a verdict.
 
 Two conventions worth knowing. Anything located by content is validated
 before use — a structure has to agree about something only the real one could

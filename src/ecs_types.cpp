@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 #include "log.h"
 #include "mem.h"
@@ -177,15 +178,56 @@ bool has_index(Context context, std::int32_t index) {
     return false;
 }
 
+namespace {
+
+// index -> name for one context, built from a live read. An index is
+// assigned once at startup and never changes, so the map only needs
+// rebuilding while some are still unassigned.
+struct ReverseMap {
+    std::vector<const std::string*> byIndex;
+    bool complete = false;
+};
+
+ReverseMap& reverse(Context context) {
+    static std::array<ReverseMap, 7> maps;
+    auto& r = maps[static_cast<std::size_t>(context)];
+    if (r.complete) return r;
+
+    r.byIndex.clear();
+    bool complete = true;
+    for (const auto& entry : registry().by_context[static_cast<std::size_t>(context)]) {
+        std::int32_t value = -1;
+        if (!safe_read(entry.second, &value, sizeof(value)) || value < 0) {
+            complete = false;
+            continue;
+        }
+        if ((std::size_t)value >= r.byIndex.size()) {
+            r.byIndex.resize((std::size_t)value + 1, nullptr);
+        }
+        r.byIndex[(std::size_t)value] = &entry.first;
+    }
+    r.complete = complete;
+    return r;
+}
+
+}  // namespace
+
 std::optional<std::string> name_of(Context context, std::int32_t index) {
     if (index < 0) return std::nullopt;
-    const auto& m = registry().by_context[static_cast<std::size_t>(context)];
-    for (const auto& entry : m) {
-        std::int32_t value = 0;
-        if (!safe_read(entry.second, &value, sizeof(value))) continue;
-        if (value == index) return entry.first;
+    auto& r = reverse(context);
+    if ((std::size_t)index < r.byIndex.size() && r.byIndex[(std::size_t)index]) {
+        return *r.byIndex[(std::size_t)index];
     }
     return std::nullopt;
+}
+
+std::vector<std::pair<std::int32_t, std::string>> assigned(Context context) {
+    std::vector<std::pair<std::int32_t, std::string>> out;
+    auto& r = reverse(context);
+    for (std::size_t i = 0; i < r.byIndex.size(); ++i) {
+        if (r.byIndex[i]) out.emplace_back((std::int32_t)i, *r.byIndex[i]);
+    }
+    return out;
 }
 
 }  // namespace ecs
