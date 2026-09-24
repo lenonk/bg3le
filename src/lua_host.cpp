@@ -7479,7 +7479,12 @@ function Ext._Internal.FireEvent(name, params)
     if params.Stopped == nil then params.Stopped = false end
     setmetatable(params, EventBase)
   end
+  -- Upstream throws StatsLoaded with ScopeModuleLoad set, the one window
+  -- in which a stat edit needs no Sync.
+  local moduleLoad = name == "StatsLoaded"
+  if moduleLoad then Ext._Internal.StatsModuleLoad = true end
   event:Throw(params)
+  if moduleLoad then Ext._Internal.StatsModuleLoad = false end
 end
 
 -- Ext.ModEvents[mod][event]: created on first index, as upstream's
@@ -8932,7 +8937,15 @@ local STAT_KIND_UNWRITABLE = {
   [11] = "deprecated upstream and reported as nil",
 }
 
+local sync_warning_shown = false
+
 local function stat_write(self, key, value)
+  if not Ext._Internal.StatsModuleLoad and not sync_warning_shown then
+    sync_warning_shown = true
+    Ext.Log.PrintWarning("Stats edited after ModuleLoad must be synced "
+      .. "manually; make sure that you call Sync() on it when you're finished!")
+  end
+
   local addr = rawget(self, "__addr")
   if addr == nil then
     error("bg3le: this stat was not read from the engine, so there is "
