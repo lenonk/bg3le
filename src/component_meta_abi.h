@@ -154,6 +154,10 @@ struct FieldDesc {
     // World is never at zero. See bg3le_meta_after_write.
     // Last, for the reason Assign's comment gives.
     std::uint16_t EntityWorldAt;
+    // Map only: the key's enum type, so a key reads as its label the way
+    // upstream pushes it. Null for a key that is not an enum.
+    char const* KeyTypeName;
+    std::uint16_t KeyTypeNameLength;
 };
 
 }  // namespace bg3le

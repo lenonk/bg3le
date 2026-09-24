@@ -137,7 +137,15 @@ component's declared size with the size the engine recorded, and
   writable too, converting as upstream's `get` does: an entity or `nil` for
   an entity, anything else refused; a string that parses for a GUID, with
   upstream's own error for one that does not. An `EntityRef` keeps the world
-  the engine paired it with, and gets the server world only when it has none
+  the engine paired it with, and gets the server world only when it has none.
+  There is one entity object per handle while anything holds it, so an
+  entity works as a table key, as upstream's value-compared proxies do
+- **Map keys arrive as upstream pushes them**: an entity key as the entity
+  and an enum key as its label. `StatusContainer.Statuses` is keyed by the
+  status entities, and each one can be looked up by the entity or followed
+  to its own `ServerStatus`; a spell prototype's `MetaConditions` is keyed
+  `Target`, not `5`. Maps inside prototypes, templates and static data are
+  read too — they came back as `"<unreadable>"` before
 - **`TranslatedString:Get()`**, upstream's way to turn a `DisplayName` into
   text: a character template's reads `"Nadira"`, and a companion's
   `DisplayName.Name:Get()` reads `"Shadowheart"`. It resolves through bg3le's

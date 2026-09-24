@@ -860,6 +860,10 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         f.KeyData = &map_keys_thunk<T>;
         f.KeyKind = scalar_kind_of<K>();
         f.KeySize = (std::uint16_t)sizeof(K);
+        if constexpr (std::is_enum_v<K>) {
+            f.KeyTypeName = type_name<K>().data();
+            f.KeyTypeNameLength = (std::uint16_t)type_name<K>().size();
+        }
     } else if constexpr (std::is_class_v<T>) {
         f.TypeName = type_name<T>().data();
         f.TypeNameLength = (std::uint16_t)type_name<T>().size();
@@ -1940,6 +1944,34 @@ extern "C" bool bg3le_meta_map_key(void const* handle, char const* path,
     *kind = (std::uint8_t)r.Field.KeyKind;
     *size = r.Field.KeySize;
     return true;
+}
+
+// The label of an enum-typed map key, as upstream pushes one. False for a key
+// that is not an enum, a bitmask, or a value with no label.
+extern "C" bool bg3le_meta_map_key_label(void const* handle, char const* path,
+                                         std::uint64_t raw,
+                                         char const** label) {
+    *label = nullptr;
+    if (handle == nullptr || path == nullptr) return false;
+
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
+                                nullptr);
+    if (!r.Ok || r.Field.Kind != FieldKind::Map
+        || r.Field.KeyTypeName == nullptr) {
+        return false;
+    }
+
+    auto it = by_enum_name().find(
+        std::string_view(r.Field.KeyTypeName, r.Field.KeyTypeNameLength));
+    if (it == by_enum_name().end() || it->second->IsBitmask) return false;
+
+    for (auto const* l = it->second->Labels; l->Name != nullptr; ++l) {
+        if (l->Value == raw) {
+            *label = l->Name;
+            return true;
+        }
+    }
+    return false;
 }
 
 // Enumerates a component's own fields, base classes included, for listing a

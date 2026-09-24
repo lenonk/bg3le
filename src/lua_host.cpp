@@ -2460,7 +2460,28 @@ int l_object_variant_index(lua_State* L) {
     return 2;
 }
 
-// Ext._Internal.ObjectMapKey(address, class, path, index) -> key
+extern "C" bool bg3le_meta_map_key_label(void const* handle, char const* path,
+                                         std::uint64_t raw,
+                                         char const** label);
+
+// A map key as upstream pushes it: an enum as its label, anything else as
+// its value. The kind follows it, so Lua can make an entity of an entity key.
+bool push_map_key(lua_State* L, void const* meta, char const* path,
+                  void const* address, FieldKind kind) {
+    const std::size_t width = field_kind_size(kind);
+    std::uint64_t raw = 0;
+    char const* label = nullptr;
+    if (width != 0 && width <= 8 && safe_read(address, &raw, width)
+        && bg3le_meta_map_key_label(meta, path, raw, &label)) {
+        lua_pushstring(L, label);
+    } else if (!push_field(L, address, kind)) {
+        return false;
+    }
+    lua_pushstring(L, field_kind_name(kind));
+    return true;
+}
+
+// Ext._Internal.ObjectMapKey(address, class, path, index) -> key, kind
 int l_object_map_key(lua_State* L) {
     Subject subject;
     const char* className = nullptr;
@@ -2479,13 +2500,13 @@ int l_object_map_key(lua_State* L) {
         return 2;
     }
 
-    if (!push_field(L, address, (FieldKind)kind)) {
+    if (!push_map_key(L, subject.Meta, path, address, (FieldKind)kind)) {
         lua_pushnil(L);
         lua_pushfstring(L, "the keys of %s.%s are of an unsupported kind (%s)",
                         className, path, field_kind_name((FieldKind)kind));
         return 2;
     }
-    return 1;
+    return 2;
 }
 
 // Ext._Internal.ResourceGet(class, guid) -> address
@@ -4093,7 +4114,7 @@ int l_variant_index(lua_State* L) {
     return 2;
 }
 
-// Ext._Internal.MapKey(handle, component, path, index) -> key
+// Ext._Internal.MapKey(handle, component, path, index) -> key, kind
 //
 // index is zero-based, matching the slot the value at the same index occupies,
 // so walking the slots pairs keys with values.
@@ -4122,7 +4143,7 @@ int l_map_key(lua_State* L) {
         return 2;
     }
 
-    if (!push_field(L, address, (FieldKind)kind)) {
+    if (!push_map_key(L, meta, path, address, (FieldKind)kind)) {
         lua_pushnil(L);
         lua_pushfstring(L,
             "the keys of %s.%s are of an unsupported kind (%s); the values are "
@@ -4130,7 +4151,7 @@ int l_map_key(lua_State* L) {
             field_kind_name((FieldKind)kind));
         return 2;
     }
-    return 1;
+    return 2;
 }
 
 extern "C" int bg3le_component_engine_size(void* container,
@@ -7445,7 +7466,9 @@ make_map = function(handle, comp, path)
   end
 
   local function key_at(i)
-    return Ext._Internal.MapKey(handle, comp, path, i)
+    local k, kind = Ext._Internal.MapKey(handle, comp, path, i)
+    if kind == "entity" then return Ext._Internal.EntityValue(k) end
+    return k
   end
 
   local function value_at(i)
@@ -7723,6 +7746,10 @@ Ext._Internal.EntityValue = entity_value
 
 Ext.Entity = {}
 
+-- One object per handle while anything holds it, as upstream's proxies
+-- compare equal by value even raw: an entity works as a table key.
+local entity_objects = setmetatable({}, {__mode = "v"})
+
 -- Accepts a UUID string, as mods do, or a raw EntityHandle.
 function Ext.Entity.Get(id)
   local handle
@@ -7735,9 +7762,15 @@ function Ext.Entity.Get(id)
     return nil
   end
 
-  return setmetatable({Handle = handle,
-                       EntityUuid = type(id) == "string" and id or nil},
-                      entity_meta)
+  local entity = entity_objects[handle]
+  if entity == nil then
+    entity = setmetatable({Handle = handle}, entity_meta)
+    entity_objects[handle] = entity
+  end
+  if type(id) == "string" and rawget(entity, "EntityUuid") == nil then
+    rawset(entity, "EntityUuid", id)
+  end
+  return entity
 end
 
 -- ---- Ext.Mod ----
@@ -8550,6 +8583,27 @@ local function read_object_path(addr, class, path, kind)
     -- keys and can only be written whole.
     return setmetatable(items, {__bg3leSource = {addr = addr, class = class,
                                                  path = path}})
+  end
+
+  -- Keyed by the map's own keys; an unreadable key gets make_map's
+  -- placeholder, with its slot so two of them cannot collide.
+  if kind == "map" then
+    local count = Ext._Internal.ObjectArrayInfo(addr, class, path)
+    if count == nil then return "<unreadable>" end
+    local items = {}
+    for i = 0, count - 1 do
+      local k, keyKind = Ext._Internal.ObjectMapKey(addr, class, path, i)
+      if keyKind == "entity" then k = Ext._Internal.EntityValue(k) end
+      if k == nil then
+        k = "<unreadable key " .. i .. ">"
+      elseif type(k) == "string" and k:sub(1, 1) == "<" and k:sub(-1) == ">" then
+        k = k:sub(1, -2) .. " at slot " .. i .. ">"
+      end
+      local element = path .. "[" .. i .. "]"
+      items[k] = read_object_path(addr, class, element,
+                                  Ext._Internal.ObjectFieldInfo(class, element))
+    end
+    return items
   end
 
   local value, err = Ext._Internal.ObjectGetField(addr, class, path)
