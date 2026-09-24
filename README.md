@@ -265,7 +265,14 @@ component's declared size with the size the engine recorded, and
   `Ext.Template`'s local and cache managers, and the rest are singles —
   `Entity.Create`/`Destroy`, `Types.Construct`, and `GlobalSwitches`, whose
   object is findable by its own language string and whose declared layout is
-  not this build's, measured in
+  not this build's. The evidence for that is now a string test rather than a
+  boolean one — one of Larian's strings is 128 bits with a length that has to
+  agree with its own contents, against a boolean's one bit, and no candidate
+  in the process has the other declared strings where bg3se puts them. Since
+  the nearest of those is only +48 from the anchor, the drift starts within a
+  few members of `Language`. An attempt to solve for it is recorded there as
+  a negative result: it fits, with four arbitrary breaks, which is what a
+  test with that much freedom does.
   [reference/GLOBAL-SWITCHES.md](reference/GLOBAL-SWITCHES.md).
   `reference/ext-api-surface.txt` lists them with their shapes
 - **One session per process, unless asked.** `Ext.Debug.Reset()` works —
@@ -298,14 +305,16 @@ component's declared size with the size the engine recorded, and
   [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
   the three theories that were tested and eliminated
 - **The last 4% of the field kinds.** 3,426 of 3,558 fields convert
-  (96.3%, from `tools/meta-check.c`; `std::optional` became writable as well
-  as readable when `Ext.IMGUI` needed it, and it was 94.0% before `STDString` was
+  (96.3%, from `tools/meta-check.c`; it was 94.0% before `STDString` was
   given this build's sixteen-byte layout): scalars, enums and bitmasks, nested
   structs, fixed and dynamic arrays, hash sets, hash maps, glm vectors,
-  `std::optional`, `std::variant` and `FixedString`. What is left is mostly
-  `TranslatedString` and raw pointers. Naming an unsupported field raises
-  rather than returning nil, so a mod cannot mistake a missing conversion for
-  a missing value
+  `std::optional`, `std::variant` and `FixedString`. Two of those were
+  finished recently — an `std::optional` is written as well as read, through
+  the container's own `emplace()` and `reset()` rather than by guessing where
+  libc++ keeps the flag, and a `std::variant` is read at the engine's stride
+  rather than this compiler's. What is left is mostly `TranslatedString` and
+  raw pointers. Naming an unsupported field raises rather than returning nil,
+  so a mod cannot mistake a missing conversion for a missing value
 - **The client-side modules.** `Ext.ClientUI` in particular is blocked on the
   placeholder Noesis RTTI — the native game ships no Noesis typeinfo at all,
   so `src/vendor/noesis_rtti_linux.cpp` aliases 19 of them to one real
