@@ -7607,6 +7607,32 @@ local _PW = function(...) Ext.Log.PrintWarning(...) end
 
 local events_by_id = {}
 
+-- Upstream's Ext.Config (Lua/Libs/LuaSharedLibs.cpp RegisterConfig) with
+-- ExtenderConfig's defaults; the thresholds are microseconds.
+Ext.Config = {
+  ProfilerEnabled = false,
+  PerfMessagesEnabled = true,
+  ProfilerLoadCallbackErrorThreshold = 50000,
+  ProfilerCallbackErrorThreshold =
+    Ext._Internal.IsClientState() and 2000 or 5000,
+}
+
+-- Upstream's Profiler:Report: a warning for a handler over the threshold,
+-- the load threshold while the game is not running.
+local function perf_report(took, desc)
+  if not Ext.Config.PerfMessagesEnabled then return end
+  local ok, state = pcall(Ext.Utils.GetGameState)
+  if not ok then state = nil end
+  local loading = state ~= "Running" and state ~= "Paused"
+  local threshold = loading and Ext.Config.ProfilerLoadCallbackErrorThreshold
+                    or Ext.Config.ProfilerCallbackErrorThreshold
+  if took >= threshold then
+    Ext.Log.PrintWarning(desc .. " took " .. (Ext.Math.Round(took) / 1000)
+                         .. " ms")
+  end
+end
+Ext._Internal.PerfReport = perf_report
+
 local SubscribableEvent = {}
 SubscribableEvent.__index = SubscribableEvent
 
@@ -7739,27 +7765,16 @@ end
 -- Upstream's Dispatch, plus bg3le's report of a handler that holds the
 -- thread up, named by the file and line it was defined at.
 function SubscribableEvent:Dispatch(event, handler)
-  local started = Ext.Utils.MonotonicTime()
+  local started = Ext.Utils.MicrosecTime()
   local ok, result = xpcall(handler, debug.traceback, event)
+  local took = Ext.Utils.MicrosecTime() - started
   if not ok then
     Ext.Log.PrintError("Error while dispatching event " .. self.Name .. ": ",
                        result)
-    return
-  end
-
-  local took = Ext.Utils.MonotonicTime() - started
-  if took >= 10 and self.Name ~= "DoConsoleCommand"
-     and self.Name ~= "NetMessage" then
-    local where = "?"
-    if type(handler) == "function" then
-      local info = debug.getinfo(handler, "Sl")
-      if info ~= nil then
-        where = string.format("%s:%d", info.short_src or "?",
-                              info.linedefined or 0)
-      end
-    end
-    Ext.Log.Print(string.format("Dispatching event %s (%s) took %d ms",
-                                self.Name, where, took))
+  elseif self.Name ~= "DoConsoleCommand" and self.Name ~= "NetMessage" then
+    local source, line = Ext.Types.GetFunctionLocation(handler)
+    perf_report(took, "Dispatching event " .. self.Name .. " ("
+                      .. tostring(source) .. ":" .. tostring(line) .. ")")
   end
 end
 
