@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <map>
 #include "osi.h"
@@ -2719,6 +2720,54 @@ Status remove(char const* key, std::vector<Value> const& args,
 }
 
 void set_trigger_sink(TriggerFn fn) { g_trigger = fn; }
+
+namespace {
+
+// Engine calls a listener watches, by dispatch handle: what upstream's
+// CallPreHook and CallPostHook fire for.
+struct WatchedCall {
+    std::string name;
+    std::vector<std::uint8_t> params;
+};
+
+std::unordered_map<std::uint32_t, WatchedCall>& watched_calls() {
+    static std::unordered_map<std::uint32_t, WatchedCall> calls;
+    return calls;
+}
+
+std::atomic<bool> g_any_watched_call{false};
+
+}  // namespace
+
+bool watch_call(Function const& fn) {
+    if (fn.kind() != kCall || (fn.id >> 3) == 0) return false;
+    watched_calls()[fn.id] = WatchedCall{fn.name, fn.params};
+    g_any_watched_call.store(true, std::memory_order_release);
+    return true;
+}
+
+bool call_watched(std::uint32_t id) {
+    return g_any_watched_call.load(std::memory_order_acquire)
+           && watched_calls().count(id) != 0;
+}
+
+void fire_call(std::uint32_t id, void const* args, char const* event) {
+    if (g_trigger == nullptr) return;
+    auto found = watched_calls().find(id);
+    if (found == watched_calls().end()) return;
+    auto const& call = found->second;
+
+    std::vector<Value> values;
+    void const* node = args;
+    for (std::size_t i = 0; i < call.params.size() && node != nullptr; ++i) {
+        const std::uint8_t declared = call.params[i];
+        values.push_back(read(node, declared >= 6 ? kGuidString : declared));
+        void const* next = nullptr;
+        if (!peek((std::uintptr_t)node, &next)) break;
+        node = next;
+    }
+    g_trigger(call.name.c_str(), call.params.size(), event, values);
+}
 
 bool watch_story_triggers() {
     const CacheLock lock(osiris_cache_lock());

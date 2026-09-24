@@ -290,6 +290,22 @@ int l_watch_osiris(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.WatchOsirisCall(name, arity) -> whether it is an engine call,
+// which listeners see through the DIV call handler rather than a node.
+int l_watch_osiris_call(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    const auto arity = static_cast<std::size_t>(luaL_checkinteger(L, 2));
+    osi::set_trigger_sink(&osiris_trigger);
+    bool watched = false;
+    for (osi::Function const& fn : g_functions) {
+        if (fn.name == name && fn.params.size() == arity) {
+            watched = osi::watch_call(fn) || watched;
+        }
+    }
+    lua_pushboolean(L, watched ? 1 : 0);
+    return 1;
+}
+
 // Osi.Name for a story-defined function, built the first time the name is
 // asked for.
 //
@@ -4938,6 +4954,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "IsClientState");
     lua_pushcfunction(g_lua, l_watch_osiris);
     lua_setfield(g_lua, -2, "WatchOsiris");
+    lua_pushcfunction(g_lua, l_watch_osiris_call);
+    lua_setfield(g_lua, -2, "WatchOsirisCall");
     lua_pushcfunction(g_lua, l_get_field);
     lua_setfield(g_lua, -2, "GetField");
     lua_pushcfunction(g_lua, l_set_field);
@@ -5776,6 +5794,15 @@ function Ext.Osiris.RegisterListener(name, arity, event, handler)
   if not Ext._Internal.WatchOsiris() then
     error("Ext.Osiris.RegisterListener: bg3le could not start watching " ..
           "Osiris (no story loaded yet?)", 2)
+  end
+
+  -- An engine call has no node; it is seen at the DIV boundary instead,
+  -- and like upstream it has no delete triggers.
+  if Ext._Internal.WatchOsirisCall(name, arity)
+     and (event == "beforeDelete" or event == "afterDelete") then
+    Ext.Log.PrintError("Couldn't register Osiris subscriber for " .. name
+      .. "/" .. tostring(arity) .. ": Delete triggers not supported on events.")
+    return
   end
 
   local key = name .. "/" .. tostring(arity) .. "/" .. tostring(event)

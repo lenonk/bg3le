@@ -750,12 +750,24 @@ void ensure_achievement_gate_patch() {
     first = false;
 }
 
+// Every engine call, from the story or from Lua, passes through here so a
+// watched one reaches its listeners before and after it runs, as upstream's
+// CallPreHook and CallPostHook. An unwatched call costs one flag test.
+long listening_call(long a, long b, long c, long d, long e, long f) {
+    const auto id = static_cast<std::uint32_t>(a);
+    const bool watched = osi::call_watched(id);
+    if (watched) osi::fire_call(id, reinterpret_cast<const void*>(b), "before");
+    const long rc = g_real_call != nullptr ? g_real_call(a, b, c, d, e, f) : 0;
+    if (watched) osi::fire_call(id, reinterpret_cast<const void*>(b), "after");
+    return rc;
+}
+
 long call_wrapper(long a, long b, long c, long d, long e, long f) {
     static unsigned long seen = 0;
     if (++seen <= 10) logf("DIV Call  arg0=0x%lx arg1=0x%lx", a, b);
     if (seen <= 3) dump_arg_desc(reinterpret_cast<const void*>(b),
                                  (unsigned)a, "DIV Call ");
-    return g_real_call != nullptr ? g_real_call(a, b, c, d, e, f) : 0;
+    return listening_call(a, b, c, d, e, f);
 }
 
 long query_wrapper(long a, long b, long c, long d, long e, long f) {
@@ -783,14 +795,15 @@ void* maybe_wrap_div_table(void* init_fn) {
     g_real_call = reinterpret_cast<Thunk6>(copy[1]);
     g_real_query = reinterpret_cast<Thunk6>(copy[2]);
 
-    // osi::invoke() bypasses the DIV table, so it needs
-    // the real handlers even without diagnostic wrapping.
-    osi::set_handlers(reinterpret_cast<void*>(g_real_call),
+    // osi::invoke() bypasses the DIV table, so it goes through the
+    // listening wrapper directly; the story reaches it through the table.
+    osi::set_handlers(reinterpret_cast<void*>(&listening_call),
                       reinterpret_cast<void*>(g_real_query));
+    copy[1] = reinterpret_cast<std::uintptr_t>(&listening_call);
 
     const char* opt = std::getenv("BG3LE_WRAP_DIV");
     if (opt == nullptr || opt[0] != '1') {
-        return init_fn;
+        return copy;
     }
 
     copy[1] = reinterpret_cast<std::uintptr_t>(&call_wrapper);

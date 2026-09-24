@@ -88,7 +88,12 @@ component's declared size with the size the engine recorded, and
   in the two node classes that use them — bg3se's `NodeHooks.cpp` does the
   same — and only once a mod subscribes, so until then every node keeps the
   engine's own pointers. Engine-side activity reaches it too: a listener on a
-  database sees the fact a procedure's own rule inserts
+  database sees the fact a procedure's own rule inserts. The engine's own
+  calls have no node, so they are seen where upstream sees them, at the DIV
+  call handler: `before` and `after` on `SetCanGossip` fire for a call made
+  from Lua, and on `TimerLaunch` for the story's own. User queries (`QRY_*`)
+  are not callable yet — upstream evaluates them through the Rete node's
+  `IsValid` with an identity adapter
 - **`Ext.Enums`**, every enum and bitfield bg3se describes, reachable by label
   or by numeric value, under the Lua name the generated metadata gives it —
   `Ext.Enums.ClientGameState.Menu`, not `ecl::GameState`. The entries are the

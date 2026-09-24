@@ -135,6 +135,13 @@ void set_trigger_sink(TriggerFn fn);
 // then every node keeps the engine's own pointers.
 bool watch_story_triggers();
 
+// Watches an engine call for listeners, as upstream's CallPreHook and
+// CallPostHook: fire_call sends its arguments to the trigger sink before
+// and after the engine runs it. False if fn is not an engine call.
+bool watch_call(Function const& fn);
+bool call_watched(std::uint32_t id);
+void fire_call(std::uint32_t id, void const* args, char const* event);
+
 // The facts a story database holds, one row per fact, typed as declared.
 bool facts(char const* key, std::vector<std::vector<Value>>* rows);
 
