@@ -6207,12 +6207,53 @@ end
 -- answered.
 local custom_members = {}
 
+-- Methods upstream's property maps declare with P_FUN, which bg3le's field
+-- tables leave out because a method has no offset. Kept apart from what mods
+-- register, and consulted first, as upstream's own map would be.
+local builtin_members = {}
+
+-- TranslatedString::Get and TranslatedFSString::Get: the text for the
+-- handle, or nil if nothing is keyed by it -- upstream's std::optional. It
+-- is how a mod turns a DisplayName into a name.
+--
+-- Upstream looks the handle and version up in the string repository's
+-- primary pool, then its two fallback pools. bg3le's index is built from the
+-- game's .loca files and keyed by the handle alone, and Ext.Loca's writes go
+-- into it, so a string a mod has updated reads back through here too.
+local function translated_get(self)
+  local handle = self.Handle
+  local key = type(handle) == "table" and handle.Handle or nil
+  if type(key) ~= "string" then return nil end
+  return Ext._Internal.Loca(key)
+end
+builtin_members["TranslatedString"] = {Get = {Fn = translated_get}}
+builtin_members["TranslatedFSString"] = {Get = {Fn = translated_get}}
+
 -- Published so the views can reach it; the prelude is compiled in more than
 -- one chunk, so a local here is not in scope there.
 function Ext._Internal.CustomMember(typeName, key)
-  local members = typeName ~= nil and custom_members[typeName] or nil
+  if typeName == nil then return nil end
+  local builtin = builtin_members[typeName]
+  if builtin ~= nil and builtin[key] ~= nil then return builtin[key] end
+  local members = custom_members[typeName]
   if members == nil then return nil end
   return members[key]
+end
+
+-- The name a view reports, as upstream's type names are spelled.
+--
+-- A top-level view names its class the way the property maps do --
+-- "TranslatedString", "esv::Character". A nested one used to report the raw
+-- C++ name, "bg3se::TranslatedString", which is not what
+-- Ext.Types.GetObjectType returns upstream -- and custom members are filed
+-- under the maps' spelling, so a function a mod added to TranslatedString
+-- was never found on one nested inside anything.
+function Ext._Internal.ViewTypeName(class, prefix)
+  if prefix == "" then return Ext._Internal.ClassName(class) end
+  local raw = Ext._Internal.TypeNameAt(class, prefix)
+  if raw == nil then return nil end
+  local plain = raw:gsub("^bg3se::", "")
+  return Ext._Internal.ClassName(plain) or plain
 end
 
 local function register_custom(what, typeName, property, entry)
@@ -7487,12 +7528,7 @@ local function type_of_view(comp, prefix)
     return found
   end
 
-  local name
-  if prefix == "" then
-    name = Ext._Internal.ClassName(comp)
-  else
-    name = Ext._Internal.TypeNameAt(comp, prefix)
-  end
+  local name = Ext._Internal.ViewTypeName(comp, prefix)
   view_types[key] = name or false
   return name
 end
@@ -8547,8 +8583,7 @@ function read_object(addr, class, prefix, out)
 
   -- The type this view is of, for Ext.Types.GetObjectType and for the members
   -- a mod may have grafted on with Ext.Types.AddCustomFunction.
-  local viewType = (prefix == "") and Ext._Internal.ClassName(class)
-                   or Ext._Internal.TypeNameAt(class, prefix)
+  local viewType = Ext._Internal.ViewTypeName(class, prefix)
 
   return setmetatable(out, {
     __name = viewType,

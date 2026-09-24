@@ -138,6 +138,14 @@ component's declared size with the size the engine recorded, and
   an entity, anything else refused; a string that parses for a GUID, with
   upstream's own error for one that does not. An `EntityRef` keeps the world
   the engine paired it with, and gets the server world only when it has none
+- **`TranslatedString:Get()`**, upstream's way to turn a `DisplayName` into
+  text: a character template's reads `"Nadira"`, and a companion's
+  `DisplayName.Name:Get()` reads `"Shadowheart"`. It resolves through bg3le's
+  index of the game's `.loca` files, which `Ext.Loca.UpdateTranslatedString`
+  also writes to. What it cannot resolve yet is a string the engine made at
+  runtime — the name a player typed for their own character is
+  `ResStr_272917352`, which exists only in the engine's live string
+  repository, and finding that repository has no symbol to start from
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
