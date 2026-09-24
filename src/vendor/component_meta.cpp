@@ -741,9 +741,27 @@ constexpr FieldDesc make_field(char const* name, std::size_t offset) {
         using V = typename OverrideableTraits<T>::Value;
         static_assert(offsetof(T, Value) == 0,
                       "OverrideableProperty keeps its Value first");
-        FieldDesc inner = make_plain_field<V>(name, offset);
+        // make_field rather than make_plain_field, so a value that is itself
+        // presented as something else -- an EntityRef, say -- still is.
+        FieldDesc inner = make_field<V>(name, offset);
         inner.OverrideFlagAt = (std::uint16_t)offsetof(T, IsOverridden);
         return inner;
+    } else if constexpr (std::is_same_v<T, bg3se::ecs::EntityRef>) {
+        // An entity and the world it belongs to. Upstream's push hands back
+        // the entity for Handle, or nil if it is null, exactly as it does for
+        // a bare EntityHandle; World never reaches Lua. So it reads as its
+        // handle, at the same offset.
+        //
+        // Writing is where World would matter -- upstream's get fills it with
+        // the calling context's world -- but bg3le does not write entity
+        // handles at all yet (see write_field). When it does, this needs
+        // care: the 227 of these split 77 server, 77 client and 73 in effects
+        // and genome blueprints, and bg3le lets either context write server
+        // components, so the object's own existing world is the right one to
+        // keep, not the caller's.
+        static_assert(offsetof(bg3se::ecs::EntityRef, Handle) == 0,
+                      "EntityRef keeps its Handle first");
+        return make_plain_field<EntityHandle>(name, offset);
     } else {
         return make_plain_field<T>(name, offset);
     }

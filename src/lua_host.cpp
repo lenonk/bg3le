@@ -7269,6 +7269,7 @@ read_path = function(handle, comp, path)
 
   local value, err = Ext._Internal.GetField(handle, comp, path)
   if value == nil and err ~= nil then error("bg3le: " .. err, 0) end
+  if kind == "entity" then return Ext._Internal.EntityValue(value) end
   return value
 end
 
@@ -7586,7 +7587,42 @@ local entity_meta = {
     if method ~= nil then return method end
     return get_component(rawget(entity, "Handle"), key)
   end,
+
+  -- The rest is upstream's EntityProxyMetatable. Two reads of one entity
+  -- are two tables here, so without __eq `a.Owner == b` was false where
+  -- upstream says true; ordering is by handle, as there.
+  __eq = function(a, b)
+    return rawget(a, "Handle") == rawget(b, "Handle")
+  end,
+  __lt = function(a, b)
+    return math.ult(rawget(a, "Handle"), rawget(b, "Handle"))
+  end,
+  __le = function(a, b)
+    local x, y = rawget(a, "Handle"), rawget(b, "Handle")
+    return x == y or math.ult(x, y)
+  end,
+  -- "Entity (%016llx)", which is what the captured entity-host reference
+  -- prints; bg3le printed "table: 0x...".
+  __tostring = function(entity)
+    return string.format("Entity (%016x)", rawget(entity, "Handle"))
+  end,
+  -- What Ext.Types.GetObjectType reports, as upstream's GetTypeName does.
+  __name = "EntityProxy",
 }
+
+-- An entity-valued field reads as the entity, or nil for the null handle --
+-- upstream's push for both EntityHandle and EntityRef. The null is
+-- TypedHandle::NullHandle, 0xFFC0000000000000, not all ones; any other value,
+-- including zero, is a handle upstream would make a proxy for.
+local NULL_ENTITY_HANDLE = 0xFFC0000000000000
+
+local function entity_value(handle)
+  if type(handle) ~= "number" or handle == NULL_ENTITY_HANDLE then
+    return nil
+  end
+  return Ext.Entity.Get(handle)
+end
+Ext._Internal.EntityValue = entity_value
 
 Ext.Entity = {}
 
@@ -8428,6 +8464,7 @@ local function read_object_path(addr, class, path, kind)
 
   local value, err = Ext._Internal.ObjectGetField(addr, class, path)
   if value == nil and err ~= nil then return "<unreadable>" end
+  if kind == "entity" then return Ext._Internal.EntityValue(value) end
   return value
 end
 

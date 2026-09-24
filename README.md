@@ -126,6 +126,14 @@ component's declared size with the size the engine recorded, and
   search runs backwards: what points at the manager, what points at that,
   until something in the executable's own writable data does. Story-load
   work went from 30.3s to 0.07s
+- **An entity-valued field is an entity.** Upstream's push for an
+  `EntityHandle` or an `EntityRef` makes an entity proxy, or `nil` for the
+  null handle — which is `0xFFC0000000000000`, not all ones. bg3le handed back
+  the raw integer, so `comp.Owner:GetComponent(...)` failed where upstream's
+  works. Entities also compare equal by handle, order by handle and print as
+  `Entity (0200000100000086)`, as upstream's do; two reads of one entity used
+  to compare unequal. `esv::Character.MyHandle` coming back equal to the
+  character it was read from is the check
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -317,23 +325,25 @@ component's declared size with the size the engine recorded, and
   fields are writable.
   [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
   the three theories that were tested and eliminated
-- **The last 4% of the field kinds.** 3,426 of 3,558 fields convert
-  (96.3%, from `tools/meta-check.c`; it was 94.0% before `STDString` was
+- **The last 3% of the field kinds.** 3,453 of 3,558 fields convert
+  (97.0%, from `tools/meta-check.c`; it was 94.0% before `STDString` was
   given this build's sixteen-byte layout): scalars, enums and bitmasks, nested
   structs, fixed and dynamic arrays, hash sets, hash maps, glm vectors,
-  `std::optional`, `std::variant`, `FixedString` and
-  `OverrideableProperty`. An `std::optional` is written as well as read,
+  `std::optional`, `std::variant`, `FixedString`, `OverrideableProperty`
+  and `ecs::EntityRef`. An `std::optional` is written as well as read,
   through the container's own `emplace()` and `reset()`, and a
   `std::variant` is read by the engine's layout rather than this compiler's
   — the game is libc++ ABI 2, see
   [reference/LIBCXX-ABI.md](reference/LIBCXX-ABI.md). Counting every class
-  the metadata describes rather than only components, 2,215 of 21,365 fields
-  do not convert yet. The largest named groups are `ecs::EntityRef` (227),
-  `stats::ConditionId` (102, which functors already resolve through the
-  condition pool), component handles (91), `Path` (41) and `NetId` (27); the
-  ImGui widgets' 391 delegate fields are handled by `Ext.IMGUI`'s own
-  callbacks rather than the field tables; and 1,026 have no type name
-  recorded, which is the next thing to characterise. Naming an unsupported
+  the metadata describes rather than only components, 1,988 of 21,365 fields
+  do not convert yet. Of those, 831 are raw pointers — 386 of them in the
+  `aspk` effect timelines — which upstream follows to the object they point
+  at; the largest named groups are `stats::ConditionId` (102, which functors
+  already resolve through the condition pool), component handles (91),
+  `Path` (41) and `NetId` (27); and the ImGui widgets' 391 delegate fields
+  are handled by `Ext.IMGUI`'s own callbacks rather than the field tables.
+  Entity fields are readable but not yet writable, by an earlier decision
+  that is now the gap: upstream writes them. Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
 - **The client-side modules.** `Ext.ClientUI` in particular is blocked on the
