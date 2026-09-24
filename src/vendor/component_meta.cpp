@@ -467,6 +467,20 @@ struct EngineLayout<bg3se::StatsExpressionInternal::Param> {
     static constexpr int IndexAt = 24;
 };
 
+// And the variant nested inside it, for the same reason one level down. Its
+// size agrees at 24 either way -- a sixteen-byte union of which the largest
+// alternative is an STDString, padded to the alignment -- so the size alone
+// gave no hint that anything was wrong. What differs is the width of the
+// discriminant: this libc++ keeps four bytes of it at +16, the engine one,
+// and the three bytes after it are whatever the pool last held. Reading all
+// four gave inner indices of 1818322177 and 1414745857 -- `Axal` and `AORT`,
+// stat file text -- where the engine had written 1.
+template <>
+struct EngineLayout<bg3se::StatsExpressionInternal::Variant2> {
+    static constexpr std::size_t Size = 24;
+    static constexpr int IndexAt = 16;
+};
+
 template <class V>
 std::size_t variant_alternative_count();
 

@@ -223,12 +223,24 @@ expression reads as a token stream in prefix order:
 
     Add, Placeholder, 0, Max, 2, Variable, AbilityOverride, …
 
-Thirteen of its fifteen parameters decode; two read nil, and both are nested
-`Variant2`s whose own discriminant is still read through `index()` on
-bg3le's compiled type. That is the same class of problem one level down and
-the same fix if it turns out to need one — but `Variant2` measures 24 in both
-bg3le and the engine, so it may be something else, and it is not worth
-guessing at before measuring.
+All fifteen of its parameters decode:
+
+    Add, Placeholder, 0, Max, 2,
+    Variable, AbilityOverride, Dexterity, {Modifier}, Unspecified,
+    Variable, AbilityOverride, Strength,  {Modifier}, Unspecified
+
+which is the code read in prefix order, with no holes.
+
+Getting the last two took the same fix one level down, and measuring it
+rather than guessing is what found it. The nested `Variant2` was reading its
+own discriminant as **1818322177** and **1414745857** — `Axal` and `AORT`,
+stat file text from the pool. Its *size* agrees at 24 either way, so nothing
+about the size hinted at a problem; what differs is the discriminant's
+width. This libc++ keeps four bytes of it at +16 and the engine one, and the
+three bytes after it are whatever the allocation last held. With
+`EngineLayout<Variant2>` at size 24, index at +16, those two read
+`Dexterity` and `Strength` — which is what
+`max(DexterityModifier,StrengthModifier)` should say.
 
 ### Why the compiled size disagrees, and it is not a mystery
 

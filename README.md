@@ -126,6 +126,16 @@ component's declared size with the size the engine recorded, and
   search runs backwards: what points at the manager, what points at that,
   until something in the executable's own writable data does. Story-load
   work went from 30.3s to 0.07s
+- **The parameters of a pooled stats expression.**
+  `StatsExpressionPooled.Params` reads `["Placeholder", 0]` for
+  `"Placeholder0"`, matching the real extender's capture, and a 52-character
+  expression reads as its fifteen tokens in prefix order. The elements are
+  `std::variant`s, and the standard library does not lay one out the way the
+  engine does — this libc++ makes `Param` 40 bytes against the engine's 32,
+  and keeps four bytes of a nested variant's discriminant where the engine
+  keeps one — so the metadata describes the engine's layout, measured from
+  its own memory rather than taken from the declaration. How it was measured
+  is in [reference/REFERENCE-DIFFS.md](reference/REFERENCE-DIFFS.md)
 - **`Ext.IMGUI` draws and its callbacks fire**, which is Mod Configuration
   Menu's menu and the only thing in a 57-mod set known to need it. Upstream's
   own widget tree is compiled into `libbg3le.so`, imgui and its Vulkan
@@ -287,17 +297,6 @@ component's declared size with the size the engine recorded, and
   fields are writable.
   [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
   the three theories that were tested and eliminated
-- **Two of a long stats expression's parameters.**
-  `StatsExpressionPooled.Params` decodes now — `"Placeholder0"` reads as
-  `["Placeholder", 0]`, matching the real extender's capture, and a
-  52-character expression reads as its token stream in prefix order. The
-  elements are `std::variant`s, and the standard library does not lay one out
-  the way the engine does: this libc++ makes `Param` 40 bytes where the
-  engine makes it 32, so the metadata describes the engine's layout instead,
-  measured from its own memory. Thirteen of that expression's fifteen
-  parameters decode; the two that do not are nested variants one level down.
-  How the layout was measured is in
-  [reference/REFERENCE-DIFFS.md](reference/REFERENCE-DIFFS.md)
 - **The last 4% of the field kinds.** 3,426 of 3,558 fields convert
   (96.3%, from `tools/meta-check.c`; `std::optional` became writable as well
   as readable when `Ext.IMGUI` needed it, and it was 94.0% before `STDString` was
