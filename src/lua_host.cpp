@@ -7300,7 +7300,9 @@ local kHostUserId = 1
 
 function Ext.Net.IsHost() return true end
 
-function Ext.Net.Version() return Ext.Utils.Version() end
+-- The network protocol version, as upstream's: 2 is the binary serializer
+-- (net::ProtoVersion::VerBinSerializer), which every peer here has.
+function Ext.Net.Version() return 2 end
 
 function Ext.Net.PlayerHasExtender(_)
   -- True for the host, which is the only peer that exists here.
@@ -7423,6 +7425,8 @@ end
 -- One context and nowhere to send: a mod that talks to itself over a
 -- channel still works, which is what this falls back to.
 local function channel_local(self, payload, user, requestId, response)
+  -- A copy, as upstream's receiver parses its own from the wire.
+  payload = Ext.Json.Parse(Ext.Json.Stringify(payload))
   Ext.OnNextTick(function()
     Ext._Internal.DeliverChannel(channel_key(self), payload,
                                  user or kHostUser, requestId, response)
@@ -7516,7 +7520,20 @@ end
 function NetChannel:SetHandler(handler) self.MessageHandler = handler end
 function NetChannel:SetRequestHandler(handler) self.RequestHandler = handler end
 
-function NetChannel:Broadcast(payload) channel_send(self, payload, nil) end
+function NetChannel:IsBinary() return Ext.Net.Version() >= 2 end
+
+function NetChannel:Stringify(message)
+  return Ext.Json.Stringify(message, {Binary = self:IsBinary()})
+end
+
+-- Every client but the excluded character's; the host's is the only one.
+function NetChannel:Broadcast(payload, excludeCharacter)
+  if excludeCharacter ~= nil and Osi.GetHostCharacter
+     and excludeCharacter == Osi.GetHostCharacter() then
+    return
+  end
+  channel_send(self, payload, nil)
+end
 function NetChannel:SendToServer(payload) channel_send(self, payload, nil) end
 
 function NetChannel:SendToClient(payload, user)
