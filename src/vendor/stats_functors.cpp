@@ -44,7 +44,6 @@ extern "C" bool bg3le_meta_enum_label(void const* handle, char const* path,
                                       std::size_t index, char const** label,
                                       std::uint64_t* value, bool* isBitmask);
 extern "C" std::size_t bg3le_stats_list_index_offset();
-extern "C" char const* bg3le_stats_attr_condition(int raw);
 
 namespace {
 
@@ -431,26 +430,9 @@ extern "C" char const* bg3le_stats_functor_class(void const* functor) {
 }
 
 
-// Two field types the property maps mark unsupported, which between them
-// account for every functor field bg3le could not read.
-//
-// ConditionId is an index into the same condition pool the Conditions
-// attributes use. StatsExpressionRef is a pointer to a pooled expression
-// whose Code and RefCount are reachable once Params' offset is known --
-// Params is a plain field, so the maps do give that one.
-
-// A ConditionId field's expression text.
-extern "C" char const* bg3le_stats_object_condition(void const* object,
-                                                    char const* className,
-                                                    char const* field) {
-    std::size_t at = 0;
-    if (object == nullptr || !field_offset(className, field, &at)) {
-        return nullptr;
-    }
-    std::int32_t id = 0;
-    if (!read_as((char const*)object + at, &id)) return nullptr;
-    return bg3le_stats_attr_condition(id);
-}
+// StatsExpressionRef, which the property maps mark unsupported: a pointer to
+// a pooled expression whose Code and RefCount are reachable once Params'
+// offset is known -- Params is a plain field, so the maps do give that one.
 
 // The pooled expression a StatsExpressionRef field points at.
 extern "C" void* bg3le_stats_object_expression(void const* object,

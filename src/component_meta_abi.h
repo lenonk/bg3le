@@ -66,6 +66,10 @@ enum class FieldKind : std::uint8_t {
     // named in Name. Classes are declared in dependency-free order, so bases
     // are resolved by name at load rather than by pointer.
     Inherit,
+    // A component handle: an integer to Lua, or nil when null.
+    ComponentHandle,
+    // A stats condition's id, read as the condition's text.
+    ConditionId,
 };
 
 struct FieldDesc;

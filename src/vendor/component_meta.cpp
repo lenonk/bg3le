@@ -629,6 +629,22 @@ constexpr FieldKind scalar_kind_of() {
     // reflected object's string fields, a template's Name among them, read
     // as "<unsupported>".
     else if constexpr (std::is_same_v<T, STDString>) return FieldKind::LSString;
+    // Wrappers upstream pushes and gets as the value they hold, which is
+    // first in each, so the bytes at the field's address are that value.
+    else if constexpr (std::is_same_v<T, Path>) {
+        static_assert(offsetof(Path, Name) == 0 && sizeof(Path) == sizeof(STDString));
+        return FieldKind::LSString;
+    }
+    else if constexpr (std::is_same_v<T, NetId>) return FieldKind::Uint64;
+    else if constexpr (std::is_same_v<T, UserId>) {
+        return scalar_kind_of<decltype(UserId::Id)>();
+    }
+    else if constexpr (std::is_same_v<T, ComponentHandle>) {
+        return FieldKind::ComponentHandle;
+    }
+    else if constexpr (std::is_same_v<T, bg3se::stats::ConditionId>) {
+        return FieldKind::ConditionId;
+    }
     else return FieldKind::Unsupported;
 }
 
@@ -2512,6 +2528,8 @@ extern "C" char const* bg3le_meta_kind_name(std::uint8_t kind) {
         case FieldKind::Optional: return "optional";
         case FieldKind::Variant: return "variant";
         case FieldKind::Inherit: return "inherit";
+        case FieldKind::ComponentHandle: return "handle";
+        case FieldKind::ConditionId: return "condition";
         default: return "unsupported";
     }
 }

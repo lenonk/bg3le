@@ -337,23 +337,26 @@ component's declared size with the size the engine recorded, and
   fields are writable.
   [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
   the three theories that were tested and eliminated
-- **The last 3% of the field kinds.** 3,453 of 3,558 fields convert
-  (97.0%, from `tools/meta-check.c`; it was 94.0% before `STDString` was
+- **The last 3% of the field kinds.** 3,467 of 3,558 fields convert
+  (97.4%, from `tools/meta-check.c`; it was 94.0% before `STDString` was
   given this build's sixteen-byte layout): scalars, enums and bitmasks, nested
   structs, fixed and dynamic arrays, hash sets, hash maps, glm vectors,
-  `std::optional`, `std::variant`, `FixedString`, `OverrideableProperty`
-  and `ecs::EntityRef`. An `std::optional` is written as well as read,
-  through the container's own `emplace()` and `reset()`, and a
+  `std::optional`, `std::variant`, `FixedString`, `OverrideableProperty`,
+  `ecs::EntityRef`, and the wrappers upstream pushes as what they hold —
+  `Path` as its string, `NetId` and `UserId` as integers, a component handle
+  as an integer or nil, and a `stats::ConditionId` as its condition's text,
+  refusing a write with upstream's message. An `std::optional` is written as
+  well as read, through the container's own `emplace()` and `reset()`, and a
   `std::variant` is read by the engine's layout rather than this compiler's
   — the game is libc++ ABI 2, see
   [reference/LIBCXX-ABI.md](reference/LIBCXX-ABI.md). Counting every class
-  the metadata describes rather than only components, 1,988 of 21,365 fields
+  the metadata describes rather than only components, 1,714 of 21,365 fields
   do not convert yet. Of those, 831 are raw pointers — 386 of them in the
   `aspk` effect timelines — which upstream follows to the object they point
-  at; the largest named groups are `stats::ConditionId` (102, which functors
-  already resolve through the condition pool), component handles (91),
-  `Path` (41) and `NetId` (27); and the ImGui widgets' 391 delegate fields
-  are handled by `Ext.IMGUI`'s own callbacks rather than the field tables.
+  at; the largest named groups are the Lua registry entries (44),
+  `CompactSet<FixedString>` (26) and `StatsExpressionRef` (11); and the
+  ImGui widgets' 391 delegate fields are handled by `Ext.IMGUI`'s own
+  callbacks rather than the field tables.
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value

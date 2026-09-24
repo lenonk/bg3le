@@ -1186,6 +1186,7 @@ enum class FieldKind : std::uint8_t {
     Unsupported = 0, Bool, Float, Double, Int8, Uint8, Int16, Uint16,
     Int32, Uint32, Int64, Uint64, Guid, Entity, FixedString, LSString,
     ScalarArray, Struct, DynArray, Map, Optional, Variant, Inherit,
+    ComponentHandle, ConditionId,
 };
 
 extern "C" const char* bg3le_meta_kind_name(std::uint8_t kind);
@@ -1207,9 +1208,9 @@ std::size_t field_kind_size(FieldKind kind) {
         case FieldKind::Float: case FieldKind::Int32: case FieldKind::Uint32:
             return 4;
         case FieldKind::Double: case FieldKind::Int64: case FieldKind::Uint64:
-        case FieldKind::Entity:
+        case FieldKind::Entity: case FieldKind::ComponentHandle:
             return 8;
-        case FieldKind::FixedString:
+        case FieldKind::FixedString: case FieldKind::ConditionId:
             return 4;
         case FieldKind::Guid:
             return 16;
@@ -1259,6 +1260,8 @@ void* component_pointer(std::uint64_t handle, const char* name,
     }
     return slot;
 }
+
+extern "C" char const* bg3le_stats_attr_condition(int raw);
 
 // Pushes a field, read through safe_read so a stale handle yields nil rather
 // than a fault.
@@ -1321,6 +1324,20 @@ bool push_field(lua_State* L, const void* address, FieldKind kind,
             if (!safe_read(address, &raw, 8)) return false;
             lua_pushinteger(L, (lua_Integer)raw);
             return true;
+        case FieldKind::ComponentHandle:
+            // Upstream's push: the handle's bits, or nil for NullHandle.
+            if (!safe_read(address, &raw, 8)) return false;
+            if (raw == 0xFFC0000000000000ull) lua_pushnil(L);
+            else lua_pushinteger(L, (lua_Integer)raw);
+            return true;
+        case FieldKind::ConditionId: {
+            // Upstream's push: ConditionId::Get's text, or "" for none.
+            std::int32_t id = -1;
+            if (!safe_read(address, &id, 4)) return false;
+            char const* text = id < 0 ? nullptr : bg3le_stats_attr_condition(id);
+            lua_pushstring(L, text != nullptr ? text : "");
+            return true;
+        }
         case FieldKind::Float: {
             float f = 0;
             if (!safe_read(address, &f, 4)) return false;
@@ -1443,6 +1460,16 @@ bool write_field(lua_State* L, int index, void* address, FieldKind kind,
             std::memcpy(address, &handle, sizeof(handle));
             return true;
         }
+        case FieldKind::ComponentHandle: {
+            // Upstream's get: nil is NullHandle, anything else an integer.
+            std::uint64_t handle = 0xFFC0000000000000ull;
+            if (!lua_isnil(L, index)) handle = (std::uint64_t)lua_tointeger(L, index);
+            std::memcpy(address, &handle, sizeof(handle));
+            return true;
+        }
+        case FieldKind::ConditionId:
+            luaL_error(L, "Setting ConditionId values is not supported");
+            return false;
         case FieldKind::ScalarArray: {
             const std::size_t stride = field_kind_size(elemKind);
             if (stride == 0 || !lua_istable(L, index)) return false;
@@ -1975,9 +2002,6 @@ extern "C" bool bg3le_stats_functor_group_at(void const* object,
 extern "C" int bg3le_stats_functor_count(void const* functors);
 extern "C" void* bg3le_stats_functor_at(void const* functors, int index);
 extern "C" char const* bg3le_stats_functor_class(void const* functor);
-extern "C" char const* bg3le_stats_object_condition(void const* object,
-                                                    char const* className,
-                                                    char const* field);
 extern "C" void* bg3le_stats_object_expression(void const* object,
                                                char const* className,
                                                char const* field);
@@ -3311,17 +3335,6 @@ int l_expression_dump(lua_State* L) {
     bg3le_stats_expression_dump(
         (void const*)(std::uintptr_t)luaL_checkinteger(L, 1));
     return 0;
-}
-
-// Ext._Internal.ObjectCondition(address, class, field) -> expression text
-int l_object_condition(lua_State* L) {
-    auto const* object =
-        (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
-    char const* text = bg3le_stats_object_condition(
-        object, luaL_checkstring(L, 2), luaL_checkstring(L, 3));
-    if (text == nullptr) return 0;
-    lua_pushstring(L, text);
-    return 1;
 }
 
 // Ext._Internal.ObjectExpression(address, class, field)
@@ -4867,8 +4880,6 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsAttrCondition");
     lua_pushcfunction(g_lua, l_expression_dump);
     lua_setfield(g_lua, -2, "ExpressionDump");
-    lua_pushcfunction(g_lua, l_object_condition);
-    lua_setfield(g_lua, -2, "ObjectCondition");
     lua_pushcfunction(g_lua, l_object_expression);
     lua_setfield(g_lua, -2, "ObjectExpression");
     lua_pushcfunction(g_lua, l_stats_enum_label);
@@ -7970,27 +7981,20 @@ local STAT_KIND = {
 Ext.Stats = {}
 
 -- One attribute, decoded as far as its type allows.
--- A functor, with the two field types the property maps mark unsupported
--- filled in: a ConditionId resolves against the condition pool, and a
--- StatsExpressionRef is a pointer to a pooled expression whose Code,
--- Params and RefCount upstream reports as a table.
+-- A functor, with StatsExpressionRef filled in: a pointer to a pooled
+-- expression whose Code, Params and RefCount upstream reports as a table.
 local function read_functor(address, class)
   local out = Ext._Internal.ReadObject(address, class, "", {})
   for field, value in pairs(out) do
     if value == "<unsupported>" then
-      local condition = Ext._Internal.ObjectCondition(address, class, field)
-      if condition ~= nil then
-        Ext._Internal.AmendObject(out, field, condition)
-      else
-        local pooled, code, refCount =
-          Ext._Internal.ObjectExpression(address, class, field)
-        if pooled ~= nil then
-          local expression = Ext._Internal.ReadObject(
-            pooled, "StatsExpressionPooled", "", {})
-          Ext._Internal.AmendObject(expression, "Code", code)
-          Ext._Internal.AmendObject(expression, "RefCount", refCount)
-          Ext._Internal.AmendObject(out, field, expression)
-        end
+      local pooled, code, refCount =
+        Ext._Internal.ObjectExpression(address, class, field)
+      if pooled ~= nil then
+        local expression = Ext._Internal.ReadObject(
+          pooled, "StatsExpressionPooled", "", {})
+        Ext._Internal.AmendObject(expression, "Code", code)
+        Ext._Internal.AmendObject(expression, "RefCount", refCount)
+        Ext._Internal.AmendObject(out, field, expression)
       end
     end
   end
