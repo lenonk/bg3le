@@ -4818,6 +4818,16 @@ int l_new_entity_proxy(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.NewObjectProxy(metatable) -> a userdata behind that
+// metatable, which is what upstream's object, array and map proxies are.
+int l_new_object_proxy(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_newuserdata(L, 1);
+    lua_pushvalue(L, 1);
+    lua_setmetatable(L, -2);
+    return 1;
+}
+
 // Ext._Internal.EntityProxyHandle(value) -> handle, or nil for a non-entity
 int l_entity_proxy_handle(lua_State* L) {
     std::uint64_t handle = 0;
@@ -5311,6 +5321,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "EntityAlive");
     lua_pushcfunction(g_lua, l_new_entity_proxy);
     lua_setfield(g_lua, -2, "NewEntityProxy");
+    lua_pushcfunction(g_lua, l_new_object_proxy);
+    lua_setfield(g_lua, -2, "NewObjectProxy");
     lua_pushcfunction(g_lua, l_entity_proxy_handle);
     lua_setfield(g_lua, -2, "EntityProxyHandle");
     lua_pushcfunction(g_lua, l_entity_component_names);
@@ -5770,8 +5782,17 @@ local function json_string(v)
   return '"' .. escaped .. '"'
 end
 
+-- A table, or one of the userdata views: anything iterable as key, value.
+local function walkable(v)
+  if type(v) == "table" then return true end
+  if type(v) ~= "userdata" then return false end
+  local meta = getmetatable(v)
+  return type(meta) == "table" and meta.__pairs ~= nil
+end
+Ext._Internal.Walkable = walkable
+
 local function encode(v, indent, depth, opts, seen, out)
-  local t = type(v)
+  local t = walkable(v) and "table" or type(v)
   if v == nil then out[#out+1] = "null"
   elseif t == "boolean" then out[#out+1] = tostring(v)
   elseif t == "number" then
@@ -6724,7 +6745,7 @@ function Ext.Types.Validate(object)
   -- back. bg3le's objects are plain values that were already read, so
   -- there is nothing left that can fail; true is the honest answer for
   -- anything it produced, and a non-table is not one.
-  return type(object) == "table"
+  return Ext._Internal.Walkable(object)
 end
 
 -- Upstream's Serialize turns an engine object proxy into a plain Lua
@@ -6732,7 +6753,7 @@ end
 -- earlier version here stringified, which would have handed a mod a string
 -- where it expected a table.
 local function deep_plain(value, seen)
-  if type(value) ~= "table" then return value end
+  if not Ext._Internal.Walkable(value) then return value end
   if seen[value] then return seen[value] end
 
   local out = {}
@@ -6960,7 +6981,7 @@ function Ext.Vars.GetModVariables(moduleUuid)
   if defs == nil then return {} end
 
   local store = mod_variables[moduleUuid]
-  return setmetatable({}, {
+  return Ext._Internal.NewObjectProxy({
     __index = function(_, key) return store[key] end,
     __newindex = function(_, key, value)
       if defs[key] == nil then
@@ -8197,8 +8218,13 @@ make_array = function(handle, comp, path)
     return read_path(handle, comp, element_path(i))
   end
 
-  return setmetatable({}, {
-    __index = function(_, i) return element(i) end,
+  return Ext._Internal.NewObjectProxy({
+    -- Out of range is nil, as upstream's ArrayProxy answers, which is also
+    -- what stops ipairs.
+    __index = function(_, i)
+      if type(i) ~= "number" or i < 1 or i > length() then return nil end
+      return element(i)
+    end,
     __newindex = function(_, i, v)
       local ok, err = Ext._Internal.SetField(handle, comp, element_path(i), v)
       if not ok then error("bg3le: " .. tostring(err), 0) end
@@ -8259,7 +8285,7 @@ make_map = function(handle, comp, path)
     return nil
   end
 
-  return setmetatable({}, {
+  return Ext._Internal.NewObjectProxy({
     __index = function(_, key)
       -- A method rather than a field, so a map whose keys cannot be converted
       -- is still walkable.
@@ -8349,7 +8375,7 @@ make_fields = function(handle, comp, prefix, fields)
     return prefix .. "." .. key
   end
 
-  return setmetatable({}, {
+  return Ext._Internal.NewObjectProxy({
     -- What Ext.Types.GetObjectType reports, and what a custom member is
     -- registered against.
     __name = type_of_view(comp, prefix),
@@ -8580,7 +8606,7 @@ local function entity_vars(entity)
   local server = Ext.IsServer()
   local side = server and "server" or "client"
 
-  return setmetatable({}, {
+  return Ext._Internal.NewObjectProxy({
     __index = function(_, key)
       if defs[key] == nil then
         Ext.Log.PrintError("Variable class '" .. tostring(key)

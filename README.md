@@ -163,7 +163,9 @@ component's declared size with the size the engine recorded, and
   upstream's own error for one that does not. An `EntityRef` keeps the world
   the engine paired it with, and gets the server world only when it has none.
   An entity is a userdata, as upstream's are, so `type(entity)` is
-  `"userdata"`, and there is one per handle while anything holds it, so it
+  `"userdata"` — and so are its components and their arrays and maps, which
+  dump, serialise and iterate as before and answer `nil` past the end, as
+  upstream's arrays do — and there is one per handle while anything holds it, so it
   works as a table key and compares raw-equal the way upstream's
   value-compared proxies do. `Ext.Types.GetValueType` answers as upstream's
   does: `"Entity"`, a struct's name (base type `"CppObject"`), or Lua's own
