@@ -7620,7 +7620,6 @@ end
 -- bg3le throws the events it can tell the truth about -- SessionLoading and
 -- SessionLoaded, StatsLoaded, Tick -- and the rest exist and stay silent.
 
-local _PW = function(...) Ext.Log.PrintWarning(...) end
 
 local events_by_id = {}
 
@@ -7867,8 +7866,8 @@ end
 do
   local oldSubscribe = engine_events.NetMessage.Subscribe
   engine_events.NetMessage.Subscribe = function(self, handler, opts)
-    _PW("Ext.Events.NetMessage.Subscribe() is deprecated; consider using "
-        .. "Ext.Net.CreateChannel() instead")
+    Ext.Log.PrintWarning("Ext.Events.NetMessage.Subscribe() is deprecated; "
+                         .. "consider using Ext.Net.CreateChannel() instead")
     return oldSubscribe(self, handler, opts)
   end
 end
@@ -8189,6 +8188,25 @@ Ext.Timer.MicrosecTime = Ext._Internal.MicrosecTime
 
 _P = Ext.Log.Print
 _PW = Ext.Log.PrintWarning
+
+-- Upstream's BuiltinLibrary helpers: the host character and its weapon on
+-- the server, the controlled character on the client.
+if Ext._Internal.IsClientState() then
+  function _C()
+    for _, entity in pairs(Ext.Entity.GetAllEntitiesWithComponent("ClientControl")) do
+      if entity.ClientCharacter and entity.ClientCharacter.ReservedUserID == 1 then
+        return entity
+      end
+    end
+    return nil
+  end
+else
+  function _C() return Ext.Entity.Get(Osi.GetHostCharacter()) end
+  function _W()
+    return Ext.Entity.Get(Osi.GetEquippedWeapon(Osi.GetHostCharacter())
+                          or "00000000-0000-0000-0000-000000000000")
+  end
+end
 _PE = Ext.Log.PrintError
 Print = Ext.Log.Print
 print = Ext.Log.Print
@@ -11338,6 +11356,13 @@ local function context_view(base, omit)
     end,
   })
 end
+
+-- Upstream's backwards-compatibility aliases (BuiltinLibrary.lua).
+Ext.Utils.MonotonicTime = Ext.Timer.MonotonicTime
+Ext.Utils.MicrosecTime = Ext.Timer.MicrosecTime
+Ext.Utils.GameTime = Ext.Timer.GameTime
+Ext.Entity.GetTile = Ext.Level.GetTile
+Ext.Entity.GetEntitiesOnTile = Ext.Level.GetEntitiesOnTile
 
 for _, entry in ipairs(CONTEXT_MODULES) do
   local name, from, omit = entry[1], entry[2], entry[3]
