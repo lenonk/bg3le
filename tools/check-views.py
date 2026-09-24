@@ -73,7 +73,13 @@ local function check(what, got, want)
     print(string.format("ok   %s = %s", what, tostring(got)))
   end
 end
-Ext = {_Internal = {}}
+Ext = {_Internal = {}, Types = {}}
+-- The views are userdata in game; plain Lua cannot make one, and a table
+-- behind the same metatable behaves the same for everything tested here.
+function Ext._Internal.NewObjectProxy(meta) return setmetatable({}, meta) end
+function Ext._Internal.IsVector() return false end
+function Ext._Internal.EntityProxyHandle() return nil end
+function Ext.Types.GetValueType(v) return type(v) end
 local make_fields
 local make_map
 """
@@ -142,9 +148,10 @@ end
 check("pairs count", seen, 7)
 check("pairs last index", last, 7)
 
+-- A read out of range is nil, as upstream's ArrayProxy answers, which is
+-- also what stops ipairs; a write out of range still raises.
 for _, bad in ipairs({0, 8, -1}) do
-  check("read a[" .. bad .. "] raises",
-        pcall(function() return a[bad] end), false)
+  check("read a[" .. bad .. "] is nil", a[bad], nil)
   check("write a[" .. bad .. "] raises",
         pcall(function() a[bad] = 1 end), false)
 end
@@ -154,7 +161,10 @@ check("write a.nope raises", pcall(function() a.nope = 1 end), false)
 -- between accesses is seen at its new length.
 count = 5
 check("#a after shrink", #a, 5)
-check("a[7] raises after shrink", pcall(function() return a[7] end), false)
+check("a[7] is nil after shrink", a[7], nil)
+local walked = 0
+for _ in ipairs(a) do walked = walked + 1 end
+check("ipairs stops at the end", walked, 5)
 
 -- A failure to size must raise, not read as an empty array. Returning zero
 -- there made an unreadable container look like a present, empty one, which is
@@ -293,7 +303,10 @@ local proxy = setmetatable({}, {
   end,
 })
 
-local ok, json = pcall(Ext.Json.Stringify, proxy, {})
+-- As Ext.Dump asks: a view is only walked with IterateUserdata, as
+-- upstream's objects are.
+local ok, json = pcall(Ext.Json.Stringify, proxy, {IterateUserdata = true,
+                                                 StringifyInternalTypes = true})
 check("dumping a view with an unconvertible field succeeds", ok, true)
 if ok then
   check("the dump names the unconvertible field",

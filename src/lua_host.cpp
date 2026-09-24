@@ -6099,8 +6099,15 @@ function Ext.Json.Parse(text)
 
   local pos = 1
 
-  local function fail(what)
-    error(string.format("Ext.Json.Parse: %s at offset %d", what, pos), 3)
+  -- Upstream's message, whatever the fault.
+  local function fail()
+    error("Unable to parse JSON", 3)
+  end
+
+  local depth = 0
+  local function enter()
+    depth = depth + 1
+    if depth > 64 then error("Maximum JSON depth exceeded", 3) end
   end
 
   local function skip()
@@ -6153,16 +6160,22 @@ function Ext.Json.Parse(text)
   local parse_value
 
   local function parse_array()
+    enter()
     pos = pos + 1
     local out = {}
-    if skip() == "]" then pos = pos + 1 return out end
+    if skip() == "]" then pos = pos + 1 depth = depth - 1 return out end
+    -- Counted rather than appended, so a null leaves a hole at its index
+    -- as upstream's parser does instead of shifting what follows.
+    local n = 0
     while true do
-      out[#out + 1] = parse_value()
+      n = n + 1
+      out[n] = parse_value()
       local c = skip()
       if c == "," then
         pos = pos + 1
       elseif c == "]" then
         pos = pos + 1
+        depth = depth - 1
         return out
       else
         fail("expected , or ]")
@@ -6171,9 +6184,10 @@ function Ext.Json.Parse(text)
   end
 
   local function parse_object()
+    enter()
     pos = pos + 1
     local out = {}
-    if skip() == "}" then pos = pos + 1 return out end
+    if skip() == "}" then pos = pos + 1 depth = depth - 1 return out end
     while true do
       if skip() ~= '"' then fail("expected a key") end
       local key = parse_string()
@@ -6185,6 +6199,7 @@ function Ext.Json.Parse(text)
         pos = pos + 1
       elseif c == "}" then
         pos = pos + 1
+        depth = depth - 1
         return out
       else
         fail("expected , or }")
@@ -6206,8 +6221,12 @@ function Ext.Json.Parse(text)
     local literal = text:match("^-?%d+%.?%d*[eE]?[-+]?%d*", pos)
     if literal == nil or literal == "" then fail("unexpected character") end
     pos = pos + #literal
-    -- An integer stays an integer, as bg3se's parser keeps them apart.
-    return math.tointeger(tonumber(literal)) or tonumber(literal)
+    -- As rapidjson reads them: a fraction or exponent makes a float, even a
+    -- whole one, and anything else an integer.
+    local number = tonumber(literal)
+    if number == nil then fail() end
+    if literal:find("[.eE]") then return number + 0.0 end
+    return math.tointeger(number) or number
   end
 
   local value = parse_value()
