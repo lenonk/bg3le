@@ -289,6 +289,10 @@ struct Found {
     // attribute write has to see the capacity and hand out a slot from it.
     void const* ConditionsHeader{nullptr};
     void const* StringsHeader{nullptr};     // likewise, for FixedStrings
+    void const* Int64sHeader{nullptr};      // and for Int64s
+    void const* FloatsHeader{nullptr};      // and for Floats
+    void const* GuidsHeader{nullptr};       // and for GUIDs
+    void const* TranslatedHeader{nullptr};  // and for TranslatedStrings
     bool Attributes{false};             // whether all of the above landed
 };
 
@@ -681,6 +685,7 @@ void find_value_pools(unsigned long long poolAddr, Found* f) {
     if (array_header_at((void const*)(poolAddr + kInt64sAt), &int64s)
         && int64s.Size > 0) {
         f->Int64s = int64s;
+        f->Int64sHeader = (void const*)(poolAddr + kInt64sAt);
         logf("stats: int64 pool at pool+%zu, %u entries", kInt64sAt,
              int64s.Size);
     }
@@ -689,6 +694,7 @@ void find_value_pools(unsigned long long poolAddr, Found* f) {
     if (array_header_at((void const*)(poolAddr + kGuidsAt), &guids)
         && plausible_guids(guids)) {
         f->Guids = guids;
+        f->GuidsHeader = (void const*)(poolAddr + kGuidsAt);
         logf("stats: guid pool at pool+%zu, %u entries", kGuidsAt,
              guids.Size);
     }
@@ -697,6 +703,7 @@ void find_value_pools(unsigned long long poolAddr, Found* f) {
     if (array_header_at((void const*)(poolAddr + kFloatsAt), &floats)
         && plausible_floats(floats)) {
         f->Floats = floats;
+        f->FloatsHeader = (void const*)(poolAddr + kFloatsAt);
         logf("stats: float pool at pool+%zu, %u entries", kFloatsAt,
              floats.Size);
     }
@@ -719,6 +726,7 @@ void find_value_pools(unsigned long long poolAddr, Found* f) {
     if (array_header_at((void const*)(poolAddr + kTranslatedAt), &translated)
         && plausible_handles(translated)) {
         f->TranslatedStrings = translated;
+        f->TranslatedHeader = (void const*)(poolAddr + kTranslatedAt);
         logf("stats: translated string pool at pool+%zu, %u entries",
              kTranslatedAt, translated.Size);
     } else {
@@ -1040,6 +1048,9 @@ void const* object_at(std::size_t index) {
 //   +176 Requirements    Array<Requirement>
 constexpr std::size_t kObjectRollConditions = 104;
 constexpr std::size_t kObjectAIFlags = 168;
+constexpr std::size_t kObjectRequirements = 176;
+static_assert(offsetof(bg3se::stats::Object, Requirements) == kObjectRequirements,
+              "Object::Requirements where the live walk put it");
 
 // A bg3se HashMap: HashKeys, NextIds, Keys, then Values. Looking a key up
 // means walking the buckets upstream, but Keys and Values are parallel
@@ -1929,23 +1940,19 @@ extern "C" char const* bg3le_stats_attr_translated(int raw) {
 // takes care is the value: most kinds are an index into one of RPGStats'
 // pools, and a value a mod builds at runtime is not in one.
 //
-// Adding to a pool cannot mean growing it. The engine owns those arrays
-// and frees them with its own allocator, so replacing the buffer with one
-// of ours would hand it a pointer to free that it did not allocate. What
-// it can mean is the slack past the end: a Larian array carries a
-// capacity as well as a size, and an entry written into the spare capacity
-// is inside the engine's own buffer.
+// A value a mod builds goes at the end of the pool: into the array's spare
+// capacity, or, when there is none, into a fresh buffer from the engine's
+// own operator new -- the allocator the engine frees these arrays with --
+// with the old buffer left in place, since the engine may still be reading
+// it. See pool_slot.
 //
-// The size is then raised to include it, which the first version of this
+// The size is raised to include the entry, which the first version of this
 // did not do -- on the theory that an entry the engine does not count is
 // an entry it will never destruct. That was wrong in the way that matters:
 // an index past the size is out of range to every reader, this file's
 // included, so the attribute read back empty. Writing a condition
 // therefore *cleared* it, and an interrupt with no condition is an
 // interrupt that always fires.
-//
-// So a write either finds the value already pooled, or takes a slack slot,
-// or refuses and says which.
 std::size_t& conditions_taken() {
     static std::size_t taken = 0;
     return taken;
@@ -1959,6 +1966,10 @@ std::size_t& strings_taken() {
 extern "C" bool bg3le_fixed_string_intern(char const* text,
                                           std::uint32_t* out);
 extern "C" char const* bg3le_stats_attr_condition(int raw);
+extern "C" bool bg3le_game_allocator_ready();
+extern "C" bool bg3le_fixed_string_index_of(char const* wanted,
+                                            std::uint32_t* out);
+extern "C" bool bg3le_meta_parse_guid(char const* text, void* out);
 
 bool write_bytes(void* at, void const* from, std::size_t size) {
     // The pools are ordinary heap, not the read-only image, so there is no
@@ -2007,6 +2018,47 @@ bool build_ls_string(void* at, char const* text) {
 
 // The pool index for a condition expression: the one it already has, or a
 // slack slot, or -1.
+// The next free slot of one of RPGStats' pools, an engine Array whose header
+// is { Buffer, Capacity, Size }. A full array moves to a fresh engine
+// allocation half as large again, as push_back would grow it -- but the old
+// buffer is abandoned rather than freed: the engine may still be reading it,
+// and bg3le never frees engine memory. Returns false if there is no room
+// and none can be made.
+bool pool_slot(void const* header, ArrayRef const& ref, std::size_t stride,
+               char const* what, std::uint32_t* slot) {
+    std::uint64_t buffer = 0;
+    std::uint32_t capacity = 0;
+    std::uint32_t used = 0;
+    if (!read_as(header, &buffer) || !read_as((char const*)header + 8, &capacity)
+        || !read_as((char const*)header + 12, &used)) {
+        return false;
+    }
+    if (used < capacity) {
+        *slot = used;
+        return true;
+    }
+    if (!bg3le_game_allocator_ready()) return false;
+
+    const std::uint32_t grown = capacity + capacity / 2 + 16;
+    void* fresh = bg3se::GameAllocRaw((std::size_t)grown * stride);
+    if (fresh == nullptr) return false;
+    std::memset(fresh, 0, (std::size_t)grown * stride);
+    if (used != 0
+        && safe_read_some((void const*)buffer, fresh, (std::size_t)used * stride)
+               != (std::size_t)used * stride) {
+        return false;  // the fresh block is abandoned too
+    }
+
+    const auto pointer = (std::uint64_t)(std::uintptr_t)fresh;
+    write_bytes((void*)header, &pointer, sizeof(pointer));
+    write_bytes((void*)((char const*)header + 8), &grown, sizeof(grown));
+    const_cast<ArrayRef&>(ref).Buffer = fresh;
+    logf("stats: the %s pool was full at %u; moved it to a buffer of %u and "
+         "left the old one in place", what, capacity, grown);
+    *slot = used;
+    return true;
+}
+
 extern "C" int bg3le_stats_condition_intern(char const* text) {
     const CacheLock lock(stats_cache_lock());
     Found const& f = state();
@@ -2023,17 +2075,14 @@ extern "C" int bg3le_stats_condition_intern(char const* text) {
     auto known = ours.find(text);
     if (known != ours.end()) return known->second;
 
-    std::uint32_t capacity = 0;
-    if (!read_as((char const*)f.ConditionsHeader + 8, &capacity)) return -1;
-
-    const std::size_t slot = f.Conditions.Size + conditions_taken();
-    if (slot >= capacity) {
-        logf("stats: the condition pool has %u entries and %u capacity, so "
-             "there is no room for \"%s\"; the engine owns the array and "
-             "growing it would hand it a buffer to free that it did not "
-             "allocate", f.Conditions.Size, capacity, text);
+    // The next slot is the array's own size, read live. Adding a count of
+    // our writes to a size those writes had already advanced skipped a
+    // slot per write, and one more each time.
+    std::uint32_t next = 0;
+    if (!pool_slot(f.ConditionsHeader, f.Conditions, 16, "condition", &next)) {
         return -1;
     }
+    const std::size_t slot = next;
 
     if (!build_ls_string((void*)((char*)f.Conditions.Buffer + slot * 16),
                          text)) {
@@ -2052,9 +2101,8 @@ extern "C" int bg3le_stats_condition_intern(char const* text) {
     // characters and a mod writes dozens.
     static std::size_t said = 0;
     if (++said <= 3) {
-        logf("stats: condition written to pool slot %zu, in the array's own "
-             "spare capacity (%zu of %u used): \"%.64s%s\"", slot,
-             conditions_taken(), capacity - f.Conditions.Size, text,
+        logf("stats: condition written to pool slot %zu (%zu written): "
+             "\"%.64s%s\"", slot, conditions_taken(), text,
              std::strlen(text) > 64 ? "..." : "");
     }
     return (int)slot;
@@ -2099,17 +2147,12 @@ extern "C" int bg3le_stats_string_intern(char const* text) {
     auto known = slots.find(id);
     if (known != slots.end()) return known->second;
 
-    std::uint32_t capacity = 0;
-    if (!read_as((char const*)f.StringsHeader + 8, &capacity)) return -1;
-
-    const std::size_t slot = f.Strings.Size + strings_taken();
-    if (slot >= capacity) {
-        logf("stats: the string pool has %u entries and %u capacity, so "
-             "there is no room for another; the engine owns the array and "
-             "growing it would hand it a buffer to free that it did not "
-             "allocate", f.Strings.Size, capacity);
+    std::uint32_t next = 0;
+    if (!pool_slot(f.StringsHeader, f.Strings, sizeof(std::uint32_t), "string",
+                   &next)) {
         return -1;
     }
+    const std::size_t slot = next;  // live, as for conditions
 
     if (!write_bytes((void*)((char*)f.Strings.Buffer
                              + slot * sizeof(std::uint32_t)),
@@ -2125,11 +2168,354 @@ extern "C" int bg3le_stats_string_intern(char const* text) {
 
     static std::size_t said = 0;
     if (++said <= 3) {
-        logf("stats: string id %#x written to pool slot %zu, in the array's "
-             "own spare capacity (%zu of %u used)", id, slot, strings_taken(),
-             capacity - f.Strings.Size);
+        logf("stats: string id %#x written to pool slot %zu (%zu written)",
+             id, slot, strings_taken());
     }
     return (int)slot;
+}
+
+// The pool index for a flag set's mask, as upstream's
+// RPGStats::GetOrCreateInt64: each entry is a pointer to an int64 allocated
+// on the engine's heap. A slot already holding the mask is reused;
+// otherwise one comes out of the array's spare capacity, on the same terms
+// as a condition.
+extern "C" int bg3le_stats_int64_intern(std::int64_t value) {
+    const CacheLock lock(stats_cache_lock());
+    Found const& f = state();
+    if (f.Int64s.Buffer == nullptr || f.Int64sHeader == nullptr) return -1;
+
+    static std::unordered_map<std::int64_t, int> slots;
+    static bool mapped = false;
+    if (!mapped) {
+        mapped = true;
+        std::vector<std::uint64_t> cells(f.Int64s.Size);
+        const std::size_t got = safe_read_some(
+            f.Int64s.Buffer, cells.data(), cells.size() * sizeof(std::uint64_t));
+        // Slot 0 reads as "no flags", so it is never handed out.
+        for (std::size_t i = 1; i < got / sizeof(std::uint64_t); ++i) {
+            std::int64_t mask = 0;
+            if (cells[i] != 0 && read_as((void const*)cells[i], &mask)) {
+                slots.emplace(mask, (int)i);
+            }
+        }
+    }
+    auto known = slots.find(value);
+    if (known != slots.end()) return known->second;
+
+    std::uint32_t used = 0;
+    if (!pool_slot(f.Int64sHeader, f.Int64s, sizeof(void*), "int64", &used)
+        || !bg3le_game_allocator_ready()) {
+        return -1;
+    }
+
+    auto* cell = bg3se::GameAlloc<std::int64_t>();
+    *cell = value;
+    const auto pointer = (std::uint64_t)(std::uintptr_t)cell;
+    if (!write_bytes((void*)((char*)f.Int64s.Buffer + used * sizeof(pointer)),
+                     &pointer, sizeof(pointer))) {
+        return -1;
+    }
+    const std::uint32_t size = used + 1;
+    write_bytes((void*)((char*)f.Int64sHeader + 12), &size, sizeof(size));
+    const_cast<ArrayRef&>(f.Int64s).Size = size;
+    slots.emplace(value, (int)used);
+    return (int)used;
+}
+
+// The pool index for a float attribute's value, as upstream's
+// RPGStats::GetOrCreateFloat. A slot already holding the same bits is
+// reused -- a pool entry is never changed once written, so sharing one is
+// the same as owning one.
+extern "C" int bg3le_stats_float_intern(float value) {
+    const CacheLock lock(stats_cache_lock());
+    Found const& f = state();
+    if (f.Floats.Buffer == nullptr || f.FloatsHeader == nullptr) return -1;
+
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+
+    static std::unordered_map<std::uint32_t, int> slots;
+    static bool mapped = false;
+    if (!mapped) {
+        mapped = true;
+        std::vector<std::uint32_t> all(f.Floats.Size);
+        const std::size_t got = safe_read_some(
+            f.Floats.Buffer, all.data(), all.size() * sizeof(std::uint32_t));
+        for (std::size_t i = 1; i < got / sizeof(std::uint32_t); ++i) {
+            slots.emplace(all[i], (int)i);
+        }
+    }
+    auto known = slots.find(bits);
+    if (known != slots.end()) return known->second;
+
+    std::uint32_t slot = 0;
+    if (!pool_slot(f.FloatsHeader, f.Floats, sizeof(float), "float", &slot)) {
+        return -1;
+    }
+    if (!write_bytes((void*)((char const*)f.Floats.Buffer
+                             + slot * sizeof(float)),
+                     &value, sizeof(value))) {
+        return -1;
+    }
+    const std::uint32_t size = slot + 1;
+    write_bytes((void*)((char const*)f.FloatsHeader + 12), &size, sizeof(size));
+    const_cast<ArrayRef&>(f.Floats).Size = size;
+    slots.emplace(bits, (int)slot);
+    return (int)slot;
+}
+
+// Object::Requirements, one entry at a time. Upstream presents each as
+// { Requirement, Not, Param }, with Param the tag's GUID for a Tag
+// requirement and the integer otherwise.
+extern "C" int bg3le_stats_requirement_count(void const* object) {
+    const CacheLock lock(stats_cache_lock());
+    std::uint32_t size = 0;
+    if (object == nullptr
+        || !read_as((char const*)object + kObjectRequirements + 12, &size)) {
+        return -1;
+    }
+    return size > 4096 ? -1 : (int)size;
+}
+
+extern "C" bool bg3le_stats_requirement_at(void const* object, int index,
+                                           std::uint32_t* id,
+                                           std::int32_t* intParam,
+                                           unsigned char* tag, bool* negated) {
+    const CacheLock lock(stats_cache_lock());
+    const int count = bg3le_stats_requirement_count(object);
+    if (count < 0 || index < 0 || index >= count) return false;
+
+    void const* buffer = nullptr;
+    if (!read_as((char const*)object + kObjectRequirements, &buffer)
+        || buffer == nullptr) {
+        return false;
+    }
+    bg3se::stats::Requirement r{};
+    if (!safe_read((char const*)buffer + (std::size_t)index * sizeof(r), &r,
+                   sizeof(r))) {
+        return false;
+    }
+    *id = (std::uint32_t)r.RequirementId;
+    *intParam = r.IntParam;
+    std::memcpy(tag, &r.TagParam, 16);
+    *negated = r.Not;
+    return true;
+}
+
+// Replaces Object::Requirements, in place if the array has room and in a
+// fresh engine allocation otherwise; the old buffer is left, as always.
+struct RequirementIn {
+    std::uint32_t Id;
+    std::int32_t IntParam;
+    unsigned char Tag[16];
+    bool Not;
+};
+
+extern "C" bool bg3le_stats_requirements_set(void const* object,
+                                             RequirementIn const* entries,
+                                             std::size_t count) {
+    const CacheLock lock(stats_cache_lock());
+    if (object == nullptr || count > 4096) return false;
+    auto* array = (char*)object + kObjectRequirements;
+
+    std::uint64_t buffer = 0;
+    std::uint32_t capacity = 0;
+    if (!read_as(array, &buffer) || !read_as(array + 8, &capacity)) return false;
+    if (count > capacity || buffer == 0) {
+        if (count == 0) {
+            const std::uint32_t empty = 0;
+            return write_bytes(array + 12, &empty, sizeof(empty));
+        }
+        if (!bg3le_game_allocator_ready()) return false;
+        void* fresh = bg3se::GameAllocRaw(count * sizeof(bg3se::stats::Requirement));
+        if (fresh == nullptr) return false;
+        buffer = (std::uint64_t)(std::uintptr_t)fresh;
+        const auto cap = (std::uint32_t)count;
+        write_bytes(array, &buffer, sizeof(buffer));
+        write_bytes(array + 8, &cap, sizeof(cap));
+    }
+
+    for (std::size_t i = 0; i < count; ++i) {
+        bg3se::stats::Requirement r{};
+        r.RequirementId = (bg3se::RequirementType)entries[i].Id;
+        r.IntParam = entries[i].IntParam;
+        std::memcpy(&r.TagParam, entries[i].Tag, 16);
+        r.Not = entries[i].Not;
+        if (!write_bytes((void*)(std::uintptr_t)(buffer + i * sizeof(r)), &r,
+                         sizeof(r))) {
+            return false;
+        }
+    }
+    const auto size = (std::uint32_t)count;
+    return write_bytes(array + 12, &size, sizeof(size));
+}
+
+// The pool index for a TranslatedString attribute, as upstream's
+// SetTranslatedString(TranslatedString::FromString(text)): "handle" or
+// "handle;version", with the argument string left as a default-constructed
+// one -- the unknown handle, version 0.
+extern "C" int bg3le_stats_translated_intern(char const* text) {
+    const CacheLock lock(stats_cache_lock());
+    Found const& f = state();
+    if (text == nullptr || f.TranslatedStrings.Buffer == nullptr
+        || f.TranslatedHeader == nullptr) {
+        return -1;
+    }
+
+    std::string handle = text;
+    std::uint16_t version = 0;
+    if (auto sep = handle.find(';'); sep != std::string::npos) {
+        version = (std::uint16_t)std::atoi(handle.c_str() + sep + 1);
+        handle.resize(sep);
+    }
+
+    std::uint32_t handleId = 0;
+    std::uint32_t unknownId = 0;
+    if ((!bg3le_fixed_string_index_of(handle.c_str(), &handleId)
+         && !bg3le_fixed_string_intern(handle.c_str(), &handleId))
+        || !bg3le_fixed_string_index_of(
+            "ls::TranslatedStringRepository::s_HandleUnknown", &unknownId)) {
+        return -1;
+    }
+
+    struct Entry {
+        std::uint32_t Handle;
+        std::uint16_t Version;
+        std::uint16_t Pad0;
+        std::uint32_t Argument;
+        std::uint16_t ArgumentVersion;
+        std::uint16_t Pad1;
+    };
+    static_assert(sizeof(Entry) == sizeof(bg3se::TranslatedString));
+    const Entry entry{handleId, version, 0, unknownId, 0, 0};
+
+    static std::unordered_map<std::uint64_t, int> ours;
+    const std::uint64_t key = ((std::uint64_t)handleId << 16) | version;
+    if (auto known = ours.find(key); known != ours.end()) return known->second;
+
+    std::uint32_t slot = 0;
+    if (!pool_slot(f.TranslatedHeader, f.TranslatedStrings, sizeof(Entry),
+                   "translated string", &slot)
+        || !write_bytes((void*)((char const*)f.TranslatedStrings.Buffer
+                                + slot * sizeof(Entry)),
+                        &entry, sizeof(entry))) {
+        return -1;
+    }
+    const std::uint32_t size = slot + 1;
+    write_bytes((void*)((char const*)f.TranslatedHeader + 12), &size,
+                sizeof(size));
+    const_cast<ArrayRef&>(f.TranslatedStrings).Size = size;
+    ours.emplace(key, (int)slot);
+    return (int)slot;
+}
+
+// Object::AIFlags, which upstream's SetString assigns directly rather than
+// through the pool or the enumeration.
+extern "C" bool bg3le_stats_ai_flags_set(void const* object, char const* text) {
+    const CacheLock lock(stats_cache_lock());
+    if (object == nullptr || text == nullptr || !state().Attributes) return false;
+    std::uint32_t id = 0;
+    if (!bg3le_fixed_string_index_of(text, &id)
+        && !bg3le_fixed_string_intern(text, &id)) {
+        return false;
+    }
+    return write_bytes((void*)((char const*)object + kObjectAIFlags), &id,
+                       sizeof(id));
+}
+
+// The pool index for a GUID attribute's value, as upstream's SetGuid. A slot
+// already holding the GUID is reused. -1 for text that is not a GUID, -2 if
+// there is no room.
+extern "C" int bg3le_stats_guid_intern(char const* text) {
+    const CacheLock lock(stats_cache_lock());
+    Found const& f = state();
+    unsigned char guid[16] = {};
+    if (text == nullptr || !bg3le_meta_parse_guid(text, guid)) return -1;
+    if (f.Guids.Buffer == nullptr || f.GuidsHeader == nullptr) return -2;
+
+    static std::unordered_map<std::string, int> slots;
+    static bool mapped = false;
+    if (!mapped) {
+        mapped = true;
+        std::vector<unsigned char> all((std::size_t)f.Guids.Size * 16);
+        const std::size_t got = safe_read_some(f.Guids.Buffer, all.data(),
+                                               all.size());
+        for (std::size_t i = 1; i < got / 16; ++i) {
+            slots.emplace(std::string((char const*)&all[i * 16], 16), (int)i);
+        }
+    }
+    const std::string key((char const*)guid, 16);
+    auto known = slots.find(key);
+    if (known != slots.end()) return known->second;
+
+    std::uint32_t slot = 0;
+    if (!pool_slot(f.GuidsHeader, f.Guids, 16, "guid", &slot)) return -2;
+    if (!write_bytes((void*)((char const*)f.Guids.Buffer + slot * 16), guid,
+                     sizeof(guid))) {
+        return -2;
+    }
+    const std::uint32_t size = slot + 1;
+    write_bytes((void*)((char const*)f.GuidsHeader + 12), &size, sizeof(size));
+    const_cast<ArrayRef&>(f.Guids).Size = size;
+    slots.emplace(key, (int)slot);
+    return (int)slot;
+}
+
+// Replaces a RollConditions attribute, as upstream's SetRollConditions:
+// each (name, expression) pair becomes { Name, Conditions = <pooled> }.
+// SetString's form is one pair named "Default", and "" is none. The array
+// is rewritten in place, or moved to a fresh buffer if it is too small.
+// 0 on success; 1 if the stat has no entry for the attribute (adding one is
+// a HashMap insert bg3le does not do), 2 if a condition could not be pooled,
+// 3 otherwise.
+extern "C" int bg3le_stats_roll_set(void const* object, char const* attribute,
+                                    char const* const* names,
+                                    char const* const* texts,
+                                    std::size_t count) {
+    const CacheLock lock(stats_cache_lock());
+    if (object == nullptr || attribute == nullptr || !state().Attributes
+        || count > 256) {
+        return 3;
+    }
+    auto const* map = (char const*)object + kObjectRollConditions;
+    const int slot = hash_map_slot(map, attribute);
+    if (slot < 0) return 1;
+    HashMapRef m{};
+    if (!read_hash_map(map, &m)) return 3;
+    auto* array = (char*)m.Values + (std::size_t)slot * 16;
+
+    std::vector<std::int32_t> entries;
+    for (std::size_t i = 0; i < count; ++i) {
+        const int condition = bg3le_stats_condition_intern(texts[i]);
+        if (condition < 0) return 2;
+        std::uint32_t name = 0;
+        if (!bg3le_fixed_string_index_of(names[i], &name)
+            && !bg3le_fixed_string_intern(names[i], &name)) {
+            return 3;
+        }
+        entries.push_back((std::int32_t)name);
+        entries.push_back(condition);
+    }
+
+    std::uint64_t buffer = 0;
+    std::uint32_t capacity = 0;
+    if (!read_as(array, &buffer) || !read_as(array + 8, &capacity)) return 3;
+    if (count > 0 && (buffer == 0 || capacity < count)) {
+        if (!bg3le_game_allocator_ready()) return 3;
+        void* fresh = bg3se::GameAllocRaw(count * 8);
+        if (fresh == nullptr) return 3;
+        buffer = (std::uint64_t)(std::uintptr_t)fresh;
+        const auto cap = (std::uint32_t)count;
+        write_bytes(array, &buffer, sizeof(buffer));
+        write_bytes(array + 8, &cap, sizeof(cap));
+    }
+    if (count > 0
+        && !write_bytes((void*)(std::uintptr_t)buffer, entries.data(),
+                        entries.size() * sizeof(std::int32_t))) {
+        return 3;
+    }
+    const auto size = (std::uint32_t)count;
+    return write_bytes(array + 12, &size, sizeof(size)) ? 0 : 3;
 }
 
 // One int32 into the object's indexed properties, which is what an

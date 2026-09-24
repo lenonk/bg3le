@@ -366,24 +366,26 @@ component's declared size with the size the engine recorded, and
   automatically means telling a new session from the two or three story loads
   that make up one, which needs the game state machine bg3le does not read
   yet, so it waits to be told rather than resetting at the wrong moment
-- **Writing stats, except strings and the compiled kinds.** Integer,
-  enumeration and condition attributes are written: an attribute is one
-  `int32` in the stat object, and a condition a mod builds at runtime goes
-  into the spare capacity of the engine's own condition pool. 5eSpells
-  rewrites a few hundred interrupt conditions this way and they read back
-  through a fresh `Ext.Stats.Get`. A `FixedString` attribute can be written
-  too, off the engine's own free list and with a compare-and-swap, and it
-  reads back — but a mod that makes hundreds of them spends minutes of the
-  level load between one and the next in its *own* code, so it is off
-  unless `BG3LE_STAT_STRING_WRITES=1`. Functors,
-  roll conditions and requirements are held compiled by the engine and are
-  not attempted. `CopyFrom` works — it is upstream's own loop over the
-  indexed properties, which are the whole of a stat's scalar surface, and it
-  refuses across modifier lists exactly as upstream does. `SetPersistence`
-  still raises, and `Sync` reports what it cannot do rather than raising,
-  because a mod that writes and then syncs would otherwise lose the write it
-  already made — and because the thing `Sync` would rebuild is reachable
-  anyway: `Ext.Stats.GetCachedSpell` resolves the compiled prototype and its
+- **Stat `Sync` and `SetPersistence`.** Every attribute kind upstream
+  writes is written, the way its `Object::Set*` writes it: integers and
+  enumerations in place; conditions, strings, floats, GUIDs, flag sets and
+  translated-string handles into the matching `RPGStats` pool; roll
+  conditions (a string or a `{Name = expression}` table) and requirements
+  into the stat's own containers; `AIFlags` onto the object. A pool with no
+  spare capacity moves to a fresh buffer from the engine's own allocator,
+  with the old one left in place. Re-assigning every attribute of a
+  sample of 105 stats across seven modifier lists to itself changes none
+  of 8,310 values, and bg3se's `TestStatAttributes` fails only on a
+  hash-order and a stale functor expectation. (Functor lists are not
+  written; upstream's own setter for them is commented out.) An earlier
+  version skipped a pool slot per write, one more each time; see
+  `pool_slot` in `src/vendor/stats.cpp`. `CopyFrom` works — it is
+  upstream's own loop over the indexed properties, and it refuses across
+  modifier lists exactly as upstream does. `SetPersistence` still raises,
+  and `Sync` reports what it cannot do rather than raising, because a mod
+  that writes and then syncs would otherwise lose the write it already
+  made — and because the thing `Sync` would rebuild is reachable anyway:
+  `Ext.Stats.GetCachedSpell` resolves the compiled prototype and its
   fields are writable.
   [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
   the three theories that were tested and eliminated

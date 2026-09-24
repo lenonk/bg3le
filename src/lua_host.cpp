@@ -3943,6 +3943,248 @@ int l_stats_condition_intern(lua_State* L) {
     return 1;
 }
 
+extern "C" int bg3le_stats_int64_intern(std::int64_t value);
+extern "C" int bg3le_stats_float_intern(float value);
+extern "C" int bg3le_stats_guid_intern(char const* text);
+extern "C" int bg3le_stats_translated_intern(char const* text);
+extern "C" bool bg3le_stats_ai_flags_set(void const* object, char const* text);
+
+// Ext._Internal.StatsTranslatedIntern(text) -> pool index, or nil
+int l_stats_translated_intern(lua_State* L) {
+    const int index = bg3le_stats_translated_intern(luaL_checkstring(L, 1));
+    if (index < 0) return 0;
+    lua_pushinteger(L, index);
+    return 1;
+}
+
+// Ext._Internal.StatsAIFlagsSet(address, text) -> bool
+int l_stats_ai_flags_set(lua_State* L) {
+    auto const* object = (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    lua_pushboolean(L, bg3le_stats_ai_flags_set(object, luaL_checkstring(L, 2)));
+    return 1;
+}
+extern "C" int bg3le_stats_roll_set(void const* object, char const* attribute,
+                                    char const* const* names,
+                                    char const* const* texts,
+                                    std::size_t count);
+
+struct RequirementIn {
+    std::uint32_t Id;
+    std::int32_t IntParam;
+    unsigned char Tag[16];
+    bool Not;
+};
+extern "C" int bg3le_stats_requirement_count(void const* object);
+extern "C" bool bg3le_stats_requirement_at(void const* object, int index,
+                                           std::uint32_t* id,
+                                           std::int32_t* intParam,
+                                           unsigned char* tag, bool* negated);
+extern "C" bool bg3le_stats_requirements_set(void const* object,
+                                             RequirementIn const* entries,
+                                             std::size_t count);
+extern "C" bool bg3le_meta_enum_label_value(char const* enumName,
+                                           char const* label,
+                                           std::uint64_t* value);
+
+// RequirementType::Tag, whose Param is a GUID rather than an integer.
+std::uint32_t requirement_tag() {
+    static const std::uint32_t tag = [] {
+        std::uint64_t value = 0;
+        return bg3le_meta_enum_label_value("RequirementType", "Tag", &value)
+                   ? (std::uint32_t)value
+                   : 0xffffffffu;
+    }();
+    return tag;
+}
+
+// Ext._Internal.StatsRequirements(address)
+//   -> { { Requirement, Not, Param }, ... }, as upstream serialises them
+int l_stats_requirements(lua_State* L) {
+    auto const* object = (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    const int count = bg3le_stats_requirement_count(object);
+    if (count < 0) return 0;
+
+    lua_createtable(L, count, 0);
+    for (int i = 0; i < count; ++i) {
+        std::uint32_t id = 0;
+        std::int32_t intParam = 0;
+        unsigned char tag[16] = {};
+        bool negated = false;
+        if (!bg3le_stats_requirement_at(object, i, &id, &intParam, tag,
+                                        &negated)) {
+            break;
+        }
+        lua_createtable(L, 0, 3);
+        const char* label = nullptr;
+        std::uint64_t value = 0;
+        bool named = false;
+        for (std::size_t at = 0;
+             bg3le_meta_enum_value_at("RequirementType", at, &label, &value);
+             ++at) {
+            if (value == id) {
+                lua_pushstring(L, label);
+                named = true;
+                break;
+            }
+        }
+        if (!named) lua_pushinteger(L, id);
+        lua_setfield(L, -2, "Requirement");
+        lua_pushboolean(L, negated);
+        lua_setfield(L, -2, "Not");
+        if (id == requirement_tag()) {
+            char text[40];
+            if (bg3le_meta_format_guid(tag, text, sizeof(text))) {
+                lua_pushstring(L, text);
+            } else {
+                lua_pushnil(L);
+            }
+        } else {
+            lua_pushinteger(L, intParam);
+        }
+        lua_setfield(L, -2, "Param");
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+// Ext._Internal.StatsRequirementsSet(address, { { Requirement, Not, Param },
+//   ... }) -> true, or nil and a reason
+int l_stats_requirements_set(lua_State* L) {
+    auto const* object = (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    const lua_Integer n = luaL_len(L, 2);
+    std::vector<RequirementIn> entries((std::size_t)(n > 0 ? n : 0));
+
+    for (lua_Integer i = 1; i <= n; ++i) {
+        lua_rawgeti(L, 2, i);
+        if (!lua_istable(L, -1)) {
+            lua_pushnil(L);
+            lua_pushfstring(L, "requirement %d is not a table", (int)i);
+            return 2;
+        }
+        RequirementIn& r = entries[(std::size_t)(i - 1)];
+        r = RequirementIn{};
+
+        lua_getfield(L, -1, "Requirement");
+        std::uint64_t id = 0;
+        if (lua_isinteger(L, -1)) {
+            id = (std::uint64_t)lua_tointeger(L, -1);
+        } else if (!lua_isstring(L, -1)
+                   || !bg3le_meta_enum_label_value("RequirementType",
+                                                   lua_tostring(L, -1), &id)) {
+            lua_pushnil(L);
+            lua_pushfstring(L, "requirement %d: %s is not a RequirementType",
+                            (int)i, luaL_tolstring(L, -1, nullptr));
+            return 2;
+        }
+        lua_pop(L, 1);
+        r.Id = (std::uint32_t)id;
+
+        lua_getfield(L, -1, "Not");
+        r.Not = lua_toboolean(L, -1) != 0;
+        lua_pop(L, 1);
+
+        lua_getfield(L, -1, "Param");
+        if (r.Id == requirement_tag()) {
+            r.IntParam = -1;
+            const char* text = lua_tostring(L, -1);
+            if (text == nullptr || !bg3le_meta_parse_guid(text, r.Tag)) {
+                lua_pushnil(L);
+                lua_pushfstring(L, "requirement %d: Param is not a GUID",
+                                (int)i);
+                return 2;
+            }
+        } else {
+            r.IntParam = (std::int32_t)luaL_optinteger(L, -1, 0);
+        }
+        lua_pop(L, 2);
+    }
+
+    if (!bg3le_stats_requirements_set(object, entries.data(), entries.size())) {
+        lua_pushnil(L);
+        lua_pushstring(L, "the requirement array could not be written");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// Ext._Internal.StatsGuidIntern(text) -> pool index, or nil and a reason
+int l_stats_guid_intern(lua_State* L) {
+    const int index = bg3le_stats_guid_intern(luaL_checkstring(L, 1));
+    if (index >= 0) {
+        lua_pushinteger(L, index);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, index == -1 ? "not a GUID" : "no room in the GUID pool");
+    return 2;
+}
+
+// Ext._Internal.StatsRollSet(address, attribute, value) -> true, or nil and
+// a reason. value is an expression (one "Default" entry, none for "") or a
+// table of name = expression, as upstream's setter takes either.
+int l_stats_roll_set(lua_State* L) {
+    auto const* object = (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    const char* attribute = luaL_checkstring(L, 2);
+    std::vector<std::string> names;
+    std::vector<std::string> texts;
+    if (lua_istable(L, 3)) {
+        lua_pushnil(L);
+        while (lua_next(L, 3) != 0) {
+            if (lua_type(L, -2) == LUA_TSTRING && lua_isstring(L, -1)) {
+                names.emplace_back(lua_tostring(L, -2));
+                texts.emplace_back(lua_tostring(L, -1));
+            }
+            lua_pop(L, 1);
+        }
+    } else {
+        const char* text = luaL_checkstring(L, 3);
+        if (*text != '\0') {
+            names.emplace_back("Default");
+            texts.emplace_back(text);
+        }
+    }
+    std::vector<char const*> namePtrs;
+    std::vector<char const*> textPtrs;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        namePtrs.push_back(names[i].c_str());
+        textPtrs.push_back(texts[i].c_str());
+    }
+    const int status = bg3le_stats_roll_set(object, attribute, namePtrs.data(),
+                                            textPtrs.data(), names.size());
+    if (status == 0) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    static const char* const why[] = {
+        "", "this stat has no roll conditions for it, and adding an entry "
+            "is a hash map insert bg3le does not do",
+        "the condition could not be added to the condition pool",
+        "the roll condition array could not be written"};
+    lua_pushnil(L);
+    lua_pushstring(L, why[status >= 1 && status <= 3 ? status : 3]);
+    return 2;
+}
+
+// Ext._Internal.StatsFloatIntern(value) -> pool index, or nil
+int l_stats_float_intern(lua_State* L) {
+    const int index = bg3le_stats_float_intern(
+        static_cast<float>(luaL_checknumber(L, 1)));
+    if (index < 0) return 0;
+    lua_pushinteger(L, index);
+    return 1;
+}
+
+// Ext._Internal.StatsInt64Intern(mask) -> pool index, or nil
+int l_stats_int64_intern(lua_State* L) {
+    const int index = bg3le_stats_int64_intern(
+        static_cast<std::int64_t>(luaL_checkinteger(L, 1)));
+    if (index < 0) return 0;
+    lua_pushinteger(L, index);
+    return 1;
+}
+
 int l_stats_find(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     void* obj = bg3le_stats_find(name);
@@ -5092,6 +5334,22 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsAttrSet");
     lua_pushcfunction(g_lua, l_stats_condition_intern);
     lua_setfield(g_lua, -2, "StatsConditionIntern");
+    lua_pushcfunction(g_lua, l_stats_int64_intern);
+    lua_setfield(g_lua, -2, "StatsInt64Intern");
+    lua_pushcfunction(g_lua, l_stats_float_intern);
+    lua_setfield(g_lua, -2, "StatsFloatIntern");
+    lua_pushcfunction(g_lua, l_stats_guid_intern);
+    lua_setfield(g_lua, -2, "StatsGuidIntern");
+    lua_pushcfunction(g_lua, l_stats_translated_intern);
+    lua_setfield(g_lua, -2, "StatsTranslatedIntern");
+    lua_pushcfunction(g_lua, l_stats_ai_flags_set);
+    lua_setfield(g_lua, -2, "StatsAIFlagsSet");
+    lua_pushcfunction(g_lua, l_stats_roll_set);
+    lua_setfield(g_lua, -2, "StatsRollSet");
+    lua_pushcfunction(g_lua, l_stats_requirements);
+    lua_setfield(g_lua, -2, "StatsRequirements");
+    lua_pushcfunction(g_lua, l_stats_requirements_set);
+    lua_setfield(g_lua, -2, "StatsRequirementsSet");
     lua_pushcfunction(g_lua, l_fixed_string_intern);
     lua_setfield(g_lua, -2, "FixedStringIntern");
     lua_pushcfunction(g_lua, l_stats_string_intern);
@@ -8576,11 +8834,8 @@ local function read_attribute(addr, i)
       value = Ext._Internal.StatsAttrLabel(addr, i, raw) or raw
     end
   elseif kind == 10 then
-    -- Requirements is an array upstream. Reading the entries needs
-    -- Object::Requirements, which is not located yet, so the array is empty
-    -- rather than absent: an empty list is the right shape and an honest
-    -- value for a stat with no requirements, which most have.
-    value = {}
+    -- Object::Requirements, as upstream's serializer presents it.
+    value = Ext._Internal.StatsRequirements(addr) or {}
   elseif kind == 7 then
     -- Each group is a text key and a list of functors. A functor is a
     -- polymorphic engine object, and its concrete class is in the same
@@ -8664,21 +8919,17 @@ end
 -- the first mod error. Three A/B runs were attributed to the wrong thing
 -- before a core dump named it.
 local STAT_WRITABLE_KINDS = {
-  [0] = "int", [1] = "int", [3] = "string", [4] = "enum", [8] = "condition",
+  [0] = "int", [1] = "int", [2] = "float", [3] = "string", [4] = "enum",
+  [5] = "flags", [6] = "guid", [8] = "condition", [9] = "roll",
+  [10] = "requirements", [12] = "translated",
 }
 if Ext._Internal.Env("BG3LE_STAT_WRITES") == "0" then
   STAT_WRITABLE_KINDS = {}
 end
 
 local STAT_KIND_UNWRITABLE = {
-  [2] = "a float, which indexes a pool with no room to add to",
-  [5] = "a flag set, which indexes the int64 pool",
-  [6] = "a GUID, which indexes the GUID pool",
   [7] = "a functor list, which the engine holds compiled",
-  [9] = "a roll condition table, which the engine holds compiled",
-  [10] = "a requirement list, which the engine holds compiled",
   [11] = "deprecated upstream and reported as nil",
-  [12] = "a translated string handle",
 }
 
 local function stat_write(self, key, value)
@@ -8695,6 +8946,15 @@ local function stat_write(self, key, value)
       .. "write", tostring(key)), 3)
   end
   local slot = {index = index, kind = kind, typeName = typeName}
+
+  -- Upstream's SetString assigns Object::AIFlags itself.
+  if slot.typeName == "AIFlags" then
+    if not Ext._Internal.StatsAIFlagsSet(addr, tostring(value or "")) then
+      error(string.format("bg3le could not write %s", key), 3)
+    end
+    rawget(self, "__cache")[key] = nil
+    return true
+  end
 
   local writable = STAT_WRITABLE_KINDS[slot.kind]
   if writable == nil then
@@ -8718,6 +8978,81 @@ local function stat_write(self, key, value)
         error(string.format("%q is not a value of enumeration %s", tostring(value),
                             tostring(slot.typeName)), 3)
       end
+    end
+  elseif writable == "float" then
+    -- Upstream's SetFloat: a value goes into the float pool; nil clears it.
+    if value == nil then
+      raw = -1
+    elseif type(value) ~= "number" then
+      error(string.format("%s is a float attribute", key), 3)
+    else
+      raw = Ext._Internal.StatsFloatIntern(value)
+      if raw == nil then
+        error(string.format("bg3le could not add %s's value to the engine's "
+                            .. "float pool; see the stats lines in the "
+                            .. "extender log", key), 3)
+      end
+    end
+  elseif writable == "guid" then
+    local why
+    raw, why = Ext._Internal.StatsGuidIntern(tostring(value))
+    if raw == nil and why == "not a GUID" then
+      error(string.format("Couldn't set %s.%s: Value (\"%s\") is not a "
+                          .. "valid GUID", rawget(self, "__name"), key,
+                          tostring(value)), 3)
+    elseif raw == nil then
+      error(string.format("bg3le could not write %s: %s", key, why), 3)
+    end
+  elseif writable == "translated" then
+    -- "handle" or "handle;version", as TranslatedString::FromString; nil
+    -- clears it.
+    if value == nil then
+      raw = -1
+    else
+      raw = Ext._Internal.StatsTranslatedIntern(tostring(value))
+      if raw == nil then
+        error(string.format("bg3le could not add %s's handle to the engine's "
+                            .. "translated string pool", key), 3)
+      end
+    end
+  elseif writable == "requirements" then
+    local ok, why = Ext._Internal.StatsRequirementsSet(addr, value or {})
+    if not ok then
+      error(string.format("bg3le could not write %s: %s", key, why), 3)
+    end
+    rawget(self, "__cache")[key] = nil
+    return true
+  elseif writable == "roll" then
+    -- Not an indexed property: the stat's own RollConditions map.
+    if type(value) ~= "table" then value = tostring(value or "") end
+    local ok, why = Ext._Internal.StatsRollSet(addr, key, value)
+    if not ok then
+      error(string.format("bg3le could not write %s: %s", key, why), 3)
+    end
+    rawget(self, "__cache")[key] = nil
+    return true
+  elseif writable == "flags" then
+    -- Upstream's Object::SetFlags: each label's index sets bit index - 1.
+    -- A single label is upstream's SetString on a flag type.
+    if type(value) == "string" then value = {value} end
+    if type(value) ~= "table" then
+      error(string.format("%s is a flag set; assign a table of labels", key), 3)
+    end
+    local mask = 0
+    for _, label in ipairs(value) do
+      local index = Ext._Internal.StatsEnumIndex(slot.typeName, tostring(label))
+      if index == nil then
+        error(string.format("Couldn't set %s.%s: Value (\"%s\") is not a "
+                            .. "valid enum label", rawget(self, "__name"), key,
+                            tostring(label)), 3)
+      end
+      if index > 0 then mask = mask | (1 << (index - 1)) end
+    end
+    raw = Ext._Internal.StatsInt64Intern(mask)
+    if raw == nil then
+      error(string.format("bg3le could not add %s's flag set to the engine's "
+                          .. "int64 pool; see the stats lines in the extender "
+                          .. "log", key), 3)
     end
   elseif writable == "string" then
     if type(value) ~= "string" then
@@ -8745,8 +9080,11 @@ local function stat_write(self, key, value)
     error(string.format("bg3le could not write %s on this stat", key), 3)
   end
 
-  -- What the proxy has already read, so a read back agrees with the write.
-  rawget(self, "__cache")[key] = value
+  -- Read back from the engine rather than cached as written, so it comes
+  -- out as upstream's reads it: a float rounded to 32 bits, a GUID in its
+  -- canonical form, a flag set in the enumeration's order, a translated
+  -- string without its version.
+  rawget(self, "__cache")[key] = nil
   return true
 end
 
