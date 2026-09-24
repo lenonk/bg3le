@@ -5661,9 +5661,9 @@ function Ext._Internal.FireOsirisListener(name, arity, event, ...)
                                .. tostring(event)]
   if list == nil then return end
   for _, handler in ipairs(list) do
-    local ok, err = pcall(handler, ...)
+    local ok, err = xpcall(handler, debug.traceback, ...)
     if not ok then
-      Ext.Log.PrintError("Osiris listener failed: " .. tostring(err))
+      Ext.Log.PrintError("Osiris event handler failed: " .. tostring(err))
     end
   end
 end
@@ -5948,9 +5948,9 @@ local function imgui_pump()
 
     local fn = imgui_callbacks[id]
     if fn ~= nil then
-      local ok, err = pcall(fn, make_widget(handle), arg)
+      local ok, err = xpcall(fn, debug.traceback, make_widget(handle), arg)
       if not ok then
-        Ext.Log.PrintError("bg3le: an Ext.IMGUI callback failed: "
+        Ext.Log.PrintError("Error while dispatching user function call: "
                            .. tostring(err))
       end
     end
@@ -6513,11 +6513,8 @@ function Ext._Internal.DrainNetMessages()
       end
     else
       Ext._Internal.FireNetMessage(channel, payload, user)
-      local event = Ext.Events.NetMessage
-      if event ~= nil and event.Throw ~= nil then
-        event:Throw({Channel = channel, Payload = payload, UserID = user,
-                     RequestId = nil})
-      end
+      Ext._Internal.FireEvent("NetMessage", {Channel = channel,
+                                             Payload = payload, UserID = user})
     end
   end
 end
@@ -6636,29 +6633,39 @@ function Ext._Internal.DeliverChannel(key, payload, user, requestId,
     local callback = pending_requests[requestId]
     pending_requests[requestId] = nil
     if callback ~= nil then
-      local ok, err = pcall(callback, payload)
+      local ok, err = xpcall(callback, debug.traceback, payload)
       if not ok then
-        Ext.Log.PrintError("bg3le: net channel reply failed: "
+        Ext.Log.PrintError("Error while dispatching user function call: "
                            .. tostring(err))
       end
     end
     return
   end
 
+  -- Upstream's warnings and messages, from NetworkManager and NetChannel.
   local self = net_channels[key]
-  if self == nil then return end
+  if self == nil then
+    local module, channel = key:match("^([^/]*)/(.*)$")
+    Ext.Log.PrintWarning("Net message received for module "
+      .. tostring(module) .. ", channel " .. tostring(channel)
+      .. ", but no such channel was registered!")
+    return
+  end
 
   if requestId ~= nil then
-    local response = nil
-    if self.RequestHandler ~= nil then
-      local ok, result = pcall(self.RequestHandler, payload, user)
-      if ok then
-        response = result
-      else
-        Ext.Log.PrintError(string.format(
-          "bg3le: request handler for net channel %s failed: %s",
-          self.Channel, tostring(result)))
-      end
+    if self.RequestHandler == nil then
+      Ext.Log.PrintWarning("Net request received for module " .. self.Module
+        .. ", channel " .. self.Channel
+        .. ", but no request handler was registered!")
+      return
+    end
+    local ok, response = xpcall(self.RequestHandler, debug.traceback,
+                                payload, user)
+    if not ok then
+      Ext.Log.PrintError("Error during request dispatch for module "
+        .. self.Module .. ", channel " .. self.Channel .. ": "
+        .. tostring(response))
+      return
     end
     if Ext._Internal.HasOtherContext() then
       channel_post(self, response, user, requestId, true)
@@ -6670,16 +6677,20 @@ function Ext._Internal.DeliverChannel(key, payload, user, requestId,
     return
   end
 
-  if self.Handler == nil then return end
-  local ok, err = pcall(self.Handler, payload, user)
+  if self.MessageHandler == nil then
+    Ext.Log.PrintWarning("Net message received for module " .. self.Module
+      .. ", channel " .. self.Channel
+      .. ", but no message handler was registered!")
+    return
+  end
+  local ok, err = xpcall(self.MessageHandler, debug.traceback, payload, user)
   if not ok then
-    Ext.Log.PrintError(string.format(
-      "bg3le: handler for net channel %s failed: %s", self.Channel,
-      tostring(err)))
+    Ext.Log.PrintError("Error during message dispatch for module "
+      .. self.Module .. ", channel " .. self.Channel .. ": " .. tostring(err))
   end
 end
 
-function NetChannel:SetHandler(handler) self.Handler = handler end
+function NetChannel:SetHandler(handler) self.MessageHandler = handler end
 function NetChannel:SetRequestHandler(handler) self.RequestHandler = handler end
 
 function NetChannel:Broadcast(payload) channel_send(self, payload, nil) end
@@ -6701,20 +6712,24 @@ function NetChannel:RequestToClient(payload, user, callback)
   channel_request(self, payload, user, callback)
 end
 
-function Ext.Net.CreateChannel(module, channel)
+function Ext.Net.CreateChannel(module, channel, messageHandler,
+                              requestHandler)
   if type(module) ~= "string" or type(channel) ~= "string" then
-    error("Ext.Net.CreateChannel(module, channel)", 2)
+    error("Ext.Net.CreateChannel(module, channel[, messageHandler"
+          .. "[, requestHandler]])", 2)
   end
 
   -- One object per (module, channel), so both halves of a mod that create
   -- the same channel share a handler rather than shadowing one another.
   local key = module .. "/" .. channel
-  local existing = net_channels[key]
-  if existing ~= nil then return existing end
-
-  local made = setmetatable({ Module = module, Channel = channel },
-                            NetChannel)
-  net_channels[key] = made
+  local made = net_channels[key]
+  if made == nil then
+    made = setmetatable({ Module = module, Channel = channel }, NetChannel)
+    net_channels[key] = made
+  end
+  -- As upstream's CreateChannel, which assigns both unconditionally.
+  made.MessageHandler = messageHandler
+  made.RequestHandler = requestHandler
   return made
 end
 
@@ -6736,9 +6751,9 @@ end
 
 function Ext._Internal.FireNetMessage(channel, payload, userId)
   for _, handler in ipairs(net_listeners[channel] or {}) do
-    local ok, err = pcall(handler, channel, payload, userId)
+    local ok, err = xpcall(handler, debug.traceback, channel, payload, userId)
     if not ok then
-      Ext.Log.PrintError("net listener failed: " .. tostring(err))
+      Ext.Log.PrintError("Error during NetMessage dispatch: ", err)
     end
   end
 end
@@ -6754,170 +6769,338 @@ function Ext.OnNextTick(fn)
   return Ext.Timer.WaitFor(0, fn)
 end
 
--- ---- mod events ----
+-- ---- Ext.Events and Ext.ModEvents ----
 --
--- A mod declares an event with Ext.RegisterModEvent(modTable, name) and
--- everyone reaches it through Ext.ModEvents[modTable][name], which has
--- Subscribe, Unsubscribe and Throw. The key is whatever the declaring mod
--- passed -- upstream's own mods use the mod table name, not the UUID.
--- ---- Ext.Events ----
+-- A port of upstream's Events library (LuaScripts/Libs/Events: Subscribable-
+-- Event, MissingSubscribableEvent, EventManager, ModEventManager), by Norbyte
+-- and the bg3se contributors. Handlers run by priority, highest first; a
+-- subscription id carries its event's prefix in the high 32 bits; changes
+-- made during a throw take effect after it; e:StopPropagation() ends it.
 --
--- The extender's own events, with upstream's names and the same
--- Subscribe/Unsubscribe shape as a mod event. The ones bg3le can tell the
--- truth about are thrown from the places that know: SessionLoading and
--- SessionLoaded around mod loading, StatsLoaded when the stats manager is
--- found, Tick on the server tick. The rest exist and stay silent rather
--- than being absent, because a mod subscribing to one should not fail to
--- load over an event that will simply never fire here.
-local kEventNames = {
-  "AfterExecuteFunctor", "BeforeDealDamage", "ControllerAxisInput",
-  "ControllerButtonInput", "DealDamage", "DealtDamage", "DoConsoleCommand",
-  "ExecuteFunctor", "FindPath", "GameStateChanged", "KeyInput",
-  "ModuleLoadStarted", "ModuleResume", "MouseButtonInput",
-  "MouseWheelInput", "NetMessage", "NetModMessage", "ResetCompleted",
-  "SessionLoaded", "SessionLoading", "Shutdown", "StatsLoaded",
-  "StatsStructureLoaded", "Tick", "ViewportResized",
-}
+-- bg3le throws the events it can tell the truth about -- SessionLoading and
+-- SessionLoaded, StatsLoaded, Tick -- and the rest exist and stay silent.
 
--- Indexing an event that was never registered yields one anyway. That is
--- what upstream does -- Mod Configuration Menu subscribes to channels it
--- never declares, including the one its own logger hangs off -- and the
--- alternative is a nil index on the mod's first line.
-local ModEvent = {}
-ModEvent.__index = ModEvent
+local _PW = function(...) Ext.Log.PrintWarning(...) end
 
-local function new_mod_event(name)
-  return setmetatable({ Name = name, Handlers = {}, Once = {},
-                        NextHandle = 0 }, ModEvent)
+local events_by_id = {}
+
+local SubscribableEvent = {}
+SubscribableEvent.__index = SubscribableEvent
+
+local function new_event(name, idPrefix)
+  return setmetatable({
+    First = nil,
+    NextIndex = 1,
+    IdPrefix = idPrefix or Ext.Math.Random(1, 0xfffffff),
+    Name = name,
+    PendingDeletions = {},
+    PendingAdds = {},
+    EnterCount = 0,
+  }, SubscribableEvent)
 end
 
-local function events_of(modTable)
-  local events = rawget(Ext.ModEvents, modTable)
-  if events ~= nil then return events end
+function SubscribableEvent:Subscribe(handler, opts)
+  opts = opts or {}
+  local index = self.NextIndex
+  self.NextIndex = self.NextIndex + 1
 
-  events = setmetatable({}, {
-    __index = function(self, event)
-      local made = new_mod_event(modTable .. "." .. event)
-      rawset(self, event, made)
-      return made
+  local sub = {
+    Handler = handler,
+    Index = index,
+    Priority = opts.Priority or 100,
+    Once = opts.Once or false,
+    Options = opts,
+  }
+
+  if self.EnterCount == 0 then
+    self:DoSubscribe(sub)
+  else
+    table.insert(self.PendingAdds, sub)
+  end
+
+  return index | (self.IdPrefix << 32)
+end
+
+function SubscribableEvent:DoSubscribeBefore(node, sub)
+  sub.Prev = node.Prev
+  sub.Next = node
+  if node.Prev ~= nil then
+    node.Prev.Next = sub
+  else
+    self.First = sub
+  end
+  node.Prev = sub
+end
+
+function SubscribableEvent:DoSubscribe(sub)
+  if self.First == nil then
+    self.First = sub
+    return
+  end
+
+  local cur = self.First
+  local last
+  while cur ~= nil do
+    last = cur
+    if sub.Priority > cur.Priority then
+      self:DoSubscribeBefore(cur, sub)
+      return
+    end
+    cur = cur.Next
+  end
+
+  last.Next = sub
+  sub.Prev = last
+end
+
+function SubscribableEvent:RemoveNode(node)
+  if node.Prev ~= nil then node.Prev.Next = node.Next end
+  if node.Next ~= nil then node.Next.Prev = node.Prev end
+  if self.First == node then self.First = node.Next end
+  node.Prev = nil
+  node.Next = nil
+end
+
+function SubscribableEvent:Unsubscribe(id)
+  if id >> 32 ~= self.IdPrefix then
+    local evt = events_by_id[id >> 32]
+    if evt == nil then
+      Ext.Log.PrintWarning("Attempted to remove subscriber ID " .. id
+        .. " for event '" .. self.Name
+        .. "', but the subscription is for a different event!")
+    else
+      Ext.Log.PrintWarning("Attempted to remove subscriber ID " .. id
+        .. " for event '" .. self.Name
+        .. "', but the subscription is for event '" .. evt.Name .. "'!")
+    end
+    return
+  end
+
+  local handlerIndex = id & 0xffffffff
+  if self.EnterCount == 0 then
+    self:DoUnsubscribe(handlerIndex)
+  else
+    table.insert(self.PendingDeletions, handlerIndex)
+  end
+end
+
+function SubscribableEvent:DoUnsubscribe(handlerIndex)
+  local cur = self.First
+  while cur ~= nil do
+    if cur.Index == handlerIndex then
+      self:RemoveNode(cur)
+      return
+    end
+    cur = cur.Next
+  end
+
+  Ext.Log.PrintWarning("Attempted to remove subscriber index " .. handlerIndex
+    .. " for event '" .. self.Name
+    .. "', but no such subscriber exists (maybe it was removed already?)")
+end
+
+function SubscribableEvent:ProcessDeferredSubscriptions()
+  if #self.PendingAdds > 0 then
+    for _, sub in pairs(self.PendingAdds) do self:DoSubscribe(sub) end
+    self.PendingAdds = {}
+  end
+
+  if #self.PendingDeletions > 0 then
+    for _, handlerIndex in pairs(self.PendingDeletions) do
+      self:DoUnsubscribe(handlerIndex)
+    end
+    self.PendingDeletions = {}
+  end
+end
+
+-- Upstream's Dispatch, plus bg3le's report of a handler that holds the
+-- thread up, named by the file and line it was defined at.
+function SubscribableEvent:Dispatch(event, handler)
+  local started = Ext.Utils.MonotonicTime()
+  local ok, result = xpcall(handler, debug.traceback, event)
+  if not ok then
+    Ext.Log.PrintError("Error while dispatching event " .. self.Name .. ": ",
+                       result)
+    return
+  end
+
+  local took = Ext.Utils.MonotonicTime() - started
+  if took >= 10 and self.Name ~= "DoConsoleCommand"
+     and self.Name ~= "NetMessage" then
+    local where = "?"
+    if type(handler) == "function" then
+      local info = debug.getinfo(handler, "Sl")
+      if info ~= nil then
+        where = string.format("%s:%d", info.short_src or "?",
+                              info.linedefined or 0)
+      end
+    end
+    Ext.Log.Print(string.format("Dispatching event %s (%s) took %d ms",
+                                self.Name, where, took))
+  end
+end
+
+function SubscribableEvent:Throw(event)
+  self.EnterCount = self.EnterCount + 1
+
+  local cur = self.First
+  while cur ~= nil do
+    if event.Stopped then break end
+
+    self:Dispatch(event, cur.Handler)
+
+    if cur.Once then
+      local last = cur
+      cur = last.Next
+      self:RemoveNode(last)
+    else
+      cur = cur.Next
+    end
+  end
+
+  self.EnterCount = self.EnterCount - 1
+  if self.EnterCount == 0 then self:ProcessDeferredSubscriptions() end
+end
+
+local MissingSubscribableEvent = {}
+MissingSubscribableEvent.__index = MissingSubscribableEvent
+
+function MissingSubscribableEvent:Subscribe()
+  Ext.Log.PrintError("Attempted to subscribe to nonexistent event: "
+                     .. self.Name)
+end
+
+function MissingSubscribableEvent:Unsubscribe()
+  Ext.Log.PrintError("Attempted to unsubscribe from nonexistent event: "
+                     .. self.Name)
+end
+
+function MissingSubscribableEvent:Throw()
+  Ext.Log.PrintError("Attempted to throw nonexistent event: " .. self.Name)
+end
+
+-- Upstream's _PublishedSharedEvents, then each context's _PublishedEvents.
+local kSharedEvents = {
+  "ModuleLoadStarted", "StatsLoaded", "ModuleResume", "SessionLoading",
+  "SessionLoaded", "GameStateChanged", "ResetCompleted", "Shutdown",
+  "DoConsoleCommand", "Tick", "StatsStructureLoaded", "FindPath",
+  "NetMessage", "NetModMessage", "Log",
+}
+local kServerEvents = {
+  "DealDamage", "DealtDamage", "BeforeDealDamage", "ExecuteFunctor",
+  "AfterExecuteFunctor",
+}
+local kClientEvents = {
+  "KeyInput", "MouseButtonInput", "MouseWheelInput", "ControllerAxisInput",
+  "ControllerButtonInput", "ViewportResized",
+}
+
+local engine_events = {}
+
+local function register_engine_event(name)
+  local ev = new_event(name, #events_by_id + 1)
+  engine_events[name] = ev
+  table.insert(events_by_id, ev)
+end
+
+for _, name in ipairs(kSharedEvents) do register_engine_event(name) end
+for _, name in ipairs(Ext._Internal.IsClientState() and kClientEvents
+                      or kServerEvents) do
+  register_engine_event(name)
+end
+
+do
+  local oldSubscribe = engine_events.NetMessage.Subscribe
+  engine_events.NetMessage.Subscribe = function(self, handler, opts)
+    _PW("Ext.Events.NetMessage.Subscribe() is deprecated; consider using "
+        .. "Ext.Net.CreateChannel() instead")
+    return oldSubscribe(self, handler, opts)
+  end
+end
+
+Ext.Events = setmetatable({}, {
+  __index = function(_, event)
+    return engine_events[event]
+           or setmetatable({ Name = event }, MissingSubscribableEvent)
+  end,
+  __newindex = function()
+    error("Cannot write to Ext.Events directly!")
+  end,
+})
+
+-- An engine event's object: its fields, plus upstream's EventBase members.
+local EventBase = {}
+EventBase.__index = EventBase
+
+function EventBase:StopPropagation() self.Stopped = true end
+
+function EventBase:PreventAction()
+  if self.CanPreventAction then
+    self.ActionPrevented = true
+  else
+    Ext.Log.PrintError("Can't prevent action")
+  end
+end
+
+-- Throws one of them. Params are whatever the caller has; they become the
+-- event object the handlers read.
+function Ext._Internal.FireEvent(name, params)
+  local event = engine_events[name]
+  if event == nil then return end
+  params = params or {}
+  if getmetatable(params) == nil then
+    params.Name = params.Name or name
+    if params.CanPreventAction == nil then params.CanPreventAction = false end
+    if params.ActionPrevented == nil then params.ActionPrevented = false end
+    if params.Stopped == nil then params.Stopped = false end
+    setmetatable(params, EventBase)
+  end
+  event:Throw(params)
+end
+
+-- Ext.ModEvents[mod][event]: created on first index, as upstream's
+-- ModEventManager does. Mod Configuration Menu subscribes to events it
+-- never registers, including the one its own logger hangs off.
+local mod_events = {}
+
+local function create_mod_events(mod)
+  local events = { Events = {}, PublicTable = {} }
+  setmetatable(events.PublicTable, {
+    __index = function(_, event)
+      if events.Events[event] == nil then
+        events.Events[event] = new_event(mod .. "." .. event)
+      end
+      return events.Events[event]
     end,
+    __newindex = function()
+      error("Cannot write to Ext.ModEvents directly!")
+    end,
+    __metatable = "ModEvents",
   })
-  rawset(Ext.ModEvents, modTable, events)
   return events
 end
 
 Ext.ModEvents = setmetatable({}, {
-  __index = function(_, modTable) return events_of(modTable) end,
-})
-
-Ext.Events = setmetatable({}, {
-  -- An event upstream has that bg3le does not throw is still an event: a
-  -- mod may subscribe to it, and it simply never fires.
-  __index = function(self, name)
-    local made = new_mod_event("Ext.Events." .. name)
-    rawset(self, name, made)
-    return made
+  __index = function(_, mod)
+    if mod_events[mod] == nil then mod_events[mod] = create_mod_events(mod) end
+    return mod_events[mod].PublicTable
   end,
+  __newindex = function()
+    error("Cannot write to Ext.ModEvents directly!")
+  end,
+  __metatable = "ModEvents",
 })
 
-for _, name in ipairs(kEventNames) do
-  local _ = Ext.Events[name]
-end
-
--- Throws one of them. Params are whatever the caller has; upstream passes
--- an event object whose fields the handler reads.
-function Ext._Internal.FireEvent(name, params)
-  local event = rawget(Ext.Events, name)
-  if event == nil then return end
-  event:Throw(params or {})
-end
-
--- Anything callable, not just a function: a mod may pass a table with a
--- __call, and upstream takes it.
-local function callable(value)
-  if type(value) == "function" then return true end
-  local meta = getmetatable(value)
-  return meta ~= nil and meta.__call ~= nil
-end
-
--- Anything but nil is accepted, and anything that is not callable is
--- ignored when the event fires. That is not laxness for its own sake:
--- Mod Configuration Menu registers its server handlers by iterating a
--- registry object, which hands Subscribe the registry's own `commands`
--- table under the name "commands". Upstream takes it -- the mod works
--- there -- so refusing it here would fail the load over a subscription
--- that never fires either way.
-function ModEvent:Subscribe(handler, options)
-  if handler == nil then
-    error("ModEvent:Subscribe(handler[, options])", 2)
+-- Upstream also refuses outside a mod's bootstrap; bg3le does not track
+-- which mod is bootstrapping, so it only refuses a second registration.
+function Ext.RegisterModEvent(mod, event)
+  if mod_events[mod] == nil then mod_events[mod] = create_mod_events(mod) end
+  if mod_events[mod].Events[event] ~= nil then
+    Ext.Log.PrintWarning("Tried to register mod event '" .. mod .. "."
+                         .. event .. "' twice")
+    return
   end
-  self.NextHandle = self.NextHandle + 1
-  self.Handlers[self.NextHandle] = handler
-  -- Upstream honours Once; the rest of its options are ordering hints
-  -- that only matter with several subscribers in one frame.
-  if type(options) == "table" and options.Once then
-    self.Once[self.NextHandle] = true
-  end
-  return self.NextHandle
-end
-
-function ModEvent:Unsubscribe(handle)
-  self.Handlers[handle] = nil
-  self.Once[handle] = nil
-end
-
-function ModEvent:Throw(payload)
-  -- A copy, so a handler that subscribes or unsubscribes while the event
-  -- is being delivered does not change the set mid-iteration.
-  local handles = {}
-  for handle in pairs(self.Handlers) do handles[#handles + 1] = handle end
-  table.sort(handles)
-
-  for _, handle in ipairs(handles) do
-    local handler = self.Handlers[handle]
-    if handler ~= nil and callable(handler) then
-      local started = Ext.Utils.MonotonicTime()
-      -- pcall, not xpcall. A traceback would be worth having -- a handler
-      -- that fails with "Shield" says nothing about which mod or which
-      -- line -- but an error handler is what makes the interpreter call
-      -- nse_lua_report_handled_error, and that hook crashed the game on
-      -- the first mod error until it was hardened. Worth revisiting once
-      -- the hardened hook has seen some use.
-      local ok, err = pcall(handler, payload)
-      if not ok then
-        Ext.Log.PrintError(string.format(
-          "bg3le: handler for mod event %s failed: %s", self.Name,
-          tostring(err)))
-      end
-
-      -- A handler that holds the thread up is worth naming, with the file
-      -- and line it was defined at, as upstream does.
-      local took = Ext.Utils.MonotonicTime() - started
-      if took >= 10 then
-        local where = "?"
-        if type(handler) == "function" then
-          local info = debug.getinfo(handler, "Sl")
-          if info ~= nil then
-            where = string.format("%s:%d", info.short_src or "?",
-                                  info.linedefined or 0)
-          end
-        end
-        Ext.Log.Print(string.format("Dispatching event %s (%s) took %d ms",
-                                    self.Name, where, took))
-      end
-
-      if self.Once[handle] then self:Unsubscribe(handle) end
-    end
-  end
-end
-
-function Ext.RegisterModEvent(modTable, event)
-  if type(modTable) ~= "string" or type(event) ~= "string" then
-    error("Ext.RegisterModEvent(modTable, event)", 2)
-  end
-
-  -- Indexing is enough: the table creates the event if it is new.
-  return events_of(modTable)[event]
+  mod_events[mod].Events[event] = new_event(mod .. "." .. event)
 end
 
 local console_commands = {}
@@ -6933,9 +7116,9 @@ end
 function Ext._Internal.RunConsoleCommand(name, ...)
   local handler = console_commands[name]
   if handler == nil then return false end
-  local ok, err = pcall(handler, name, ...)
+  local ok, err = xpcall(handler, debug.traceback, name, ...)
   if not ok then
-    Ext.Log.PrintError("console command failed: " .. tostring(err))
+    Ext.Log.PrintError("Error during console command callback: ", err)
   end
   return true
 end
@@ -7251,7 +7434,7 @@ function Ext.Timer.WaitForPersistent(ms, callbackName, args, repeat_ms)
     Ext.Log.PrintWarning("bg3le: persistent timers do not survive a save "
                          .. "yet; this one behaves as an ordinary timer")
   end
-  return add_timer(ms, function() fn(args) end, repeat_ms, false)
+  return add_timer(ms, function(handle) fn(args, handle) end, repeat_ms, false)
 end
 
 -- Upstream reports the engine's game clock. bg3le counts from the first
@@ -7287,9 +7470,10 @@ function Ext._Internal.RunTimers()
   for handle, t in pairs(timers) do
     if not t.paused and now >= t.due then
       if t.every then t.due = now + t.every else timers[handle] = nil end
-      local ok, err = pcall(t.fn)
+      local ok, err = xpcall(t.fn, debug.traceback, handle)
       if not ok then
-        Ext.Log.PrintError("Timer callback failed: " .. tostring(err))
+        Ext.Log.PrintError("Error while dispatching user function call: "
+                           .. tostring(err))
       end
     end
   end
@@ -9378,9 +9562,11 @@ function Ext._Internal.FireEntityEvent(kind, component, entity, ...)
     if sub.Kind == kind and sub.Component == component
        and (sub.Entity == nil or sub.Entity == entity) then
       if sub.Once then entity_subs[id] = nil end
-      local ok, err = pcall(sub.Handler, entity, component, ...)
+      local ok, err = xpcall(sub.Handler, debug.traceback, entity, component,
+                             ...)
       if not ok then
-        Ext.Log.PrintError("entity subscription failed: " .. tostring(err))
+        Ext.Log.PrintError("Error while dispatching user function call: "
+                           .. tostring(err))
       end
     end
   end

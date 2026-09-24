@@ -36,6 +36,16 @@ component's declared size with the size the engine recorded, and
   Norbyte's Lua fork, the same one bg3se uses — see
   [external/lua/README.bg3le](external/lua/README.bg3le) for why that is not
   optional
+- **`Ext.Events` and `Ext.ModEvents` are upstream's own library**, ported
+  from bg3se's `LuaScripts/Libs/Events`: handlers run by `Priority`,
+  `e:StopPropagation()` ends a throw, a subscription id carries its event in
+  the high 32 bits, and subscribing or unsubscribing during a throw takes
+  effect after it. Each context has upstream's event set, and any other name
+  is a missing event that says so when subscribed to. Every handler —
+  events, net channels and listeners, console commands, timers, Osiris
+  listeners, IMGUI callbacks — runs under `xpcall` with `debug.traceback`
+  and fails with upstream's message for that kind of handler; a timer
+  callback gets its handle, as upstream's does
 - **Installed mods run.** Mods ship their Lua inside a `.pak`, so bg3le reads
   the archives in the profile's `Mods` directory and the install's
   `Data/Mods`, finds each module by its `ScriptExtender/Config.json`, and
