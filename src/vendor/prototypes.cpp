@@ -1,5 +1,6 @@
-// The spell and status prototype managers, which is what
-// Ext.Stats.GetCachedSpell and GetCachedStatus read.
+// The spell, status, interrupt and passive prototype managers, which is
+// what Ext.Stats.GetCachedSpell, GetCachedStatus, GetCachedInterrupt and
+// GetCachedPassive read.
 //
 // A prototype is the engine's parsed form of a stat: the stats object says
 // what the .txt file said, the prototype is what the engine actually runs.
@@ -26,6 +27,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unistd.h>
 #include <vector>
 
 #include "../log.h"
@@ -92,9 +94,7 @@ constexpr Kind kKinds[] = {
     // pointer, so what varies is the stride between them; the name still
     // has to match the key, which is what derives it.
     {"interrupt", 0},
-    // Passives are a LegacyRefMap -- chained nodes rather than parallel
-    // arrays -- so this scan cannot see them; the entry is kept so the
-    // table indices stay stable.
+    // Passives are a LegacyRefMap of chained nodes; see refmap_consistent.
     {"passive", 4},
 };
 constexpr std::size_t kSpell = 0;
@@ -111,18 +111,18 @@ constexpr std::size_t kPassive = 3;
 // Unanimity is required. A split vote means the map is neither, and
 // guessing from a majority is how you end up with one wrong entry that
 // nobody notices.
-int kind_of(void const* keys, std::uint32_t count) {
-    std::size_t spells = 0;
-    std::size_t statuses = 0;
+constexpr char const* kStatTypes[] = {"SpellData", "StatusData",
+                                      "InterruptData", "PassiveData"};
+
+int kind_of_names(std::uint32_t const* keys, std::size_t count) {
+    std::size_t votes[std::size(kKinds)] = {};
     std::size_t asked = 0;
 
     constexpr std::size_t kVotes = 3;
-    for (std::uint32_t i = 0; i < count && asked < kVotes; ++i) {
-        std::uint32_t key = 0;
-        if (!read_as((char const*)keys + i * kKeyStride, &key)) break;
-        if (key == 0 || key == kNullFixedString) continue;
+    for (std::size_t i = 0; i < count && asked < kVotes; ++i) {
+        if (keys[i] == 0 || keys[i] == kNullFixedString) continue;
 
-        char const* name = bg3le_fixed_string(key, nullptr);
+        char const* name = bg3le_fixed_string(keys[i], nullptr);
         if (name == nullptr) continue;
 
         void* object = bg3le_stats_find(name);
@@ -131,14 +131,23 @@ int kind_of(void const* keys, std::uint32_t count) {
         if (type == nullptr) continue;
 
         ++asked;
-        if (std::strcmp(type, "SpellData") == 0) ++spells;
-        else if (std::strcmp(type, "StatusData") == 0) ++statuses;
+        for (std::size_t k = 0; k < std::size(kKinds); ++k) {
+            if (std::strcmp(type, kStatTypes[k]) == 0) ++votes[k];
+        }
     }
 
     if (asked < kVotes) return -1;
-    if (spells == asked) return (int)kSpell;
-    if (statuses == asked) return (int)kStatus;
+    for (std::size_t k = 0; k < std::size(kKinds); ++k) {
+        if (votes[k] == asked) return (int)k;
+    }
     return -1;
+}
+
+int kind_of(void const* keys, std::uint32_t count) {
+    std::uint32_t sample[16] = {};
+    const std::size_t n = count < std::size(sample) ? count : std::size(sample);
+    if (!safe_read(keys, sample, n * sizeof(sample[0]))) return -1;
+    return kind_of_names(sample, n);
 }
 
 struct Table {
@@ -272,11 +281,137 @@ std::size_t harvest(void const* keys, void const* values,
     return added;
 }
 
+// Whether the first value names itself at nameOffset the way the first key
+// does: the cheap test that lets an inline-valued map into the candidates,
+// with the stride derived later by inline_stride.
+bool inline_head(void const* keys, void const* values, std::size_t nameOffset) {
+    std::uint32_t key = 0;
+    std::uint32_t own = 0;
+    return read_as(keys, &key) && key != 0 && key != kNullFixedString
+           && read_as((char const*)values + nameOffset, &own) && own == key;
+}
+
+// A LegacyRefMap: ItemCount, HashSize, then a table of chains of
+// MapNode { Next; Key; Value }, with the value 8-aligned after the key.
+constexpr std::size_t kRefMapHashSize = 4;
+constexpr std::size_t kRefMapTable = 8;
+constexpr std::size_t kNodeKey = 8;
+constexpr std::size_t kNodeValue = 16;
+
+// Every node of the map, stopping at `limit`; false if the table is not
+// readable. A chain longer than the item count is a cycle, not a map.
+bool refmap_nodes(unsigned long long at, std::size_t limit,
+                  std::vector<void const*>* out) {
+    std::uint32_t count = 0;
+    std::uint32_t hashSize = 0;
+    std::uint64_t table = 0;
+    auto const* head = (char const*)(std::uintptr_t)at;
+    if (!read_as(head, &count) || !read_as(head + kRefMapHashSize, &hashSize)
+        || !read_as(head + kRefMapTable, &table) || table == 0) {
+        return false;
+    }
+
+    std::vector<std::uint64_t> buckets(256);
+    for (std::uint32_t b = 0; b < hashSize && out->size() < limit;) {
+        const std::uint32_t n = std::min<std::uint32_t>(256, hashSize - b);
+        if (!safe_read((void const*)(std::uintptr_t)(table + b * 8ull),
+                       buckets.data(), n * 8)) {
+            return false;
+        }
+        for (std::uint32_t i = 0; i < n && out->size() < limit; ++i) {
+            std::uint64_t node = buckets[i];
+            for (std::uint32_t hops = 0; node != 0 && out->size() < limit;
+                 ++hops) {
+                if (hops > count) return false;
+                out->push_back((void const*)(std::uintptr_t)node);
+                if (!read_as((void const*)(std::uintptr_t)node, &node)) {
+                    return false;
+                }
+            }
+        }
+        b += n;
+    }
+    return true;
+}
+
+// Whether the first few nodes hold prototypes that name themselves the way
+// they are keyed, and the keys they carry.
+bool refmap_consistent(unsigned long long at, std::size_t nameOffset,
+                       std::vector<std::uint32_t>* keys) {
+    std::vector<void const*> nodes;
+    if (!refmap_nodes(at, kAgreeing, &nodes) || nodes.size() < kAgreeing) {
+        return false;
+    }
+    for (void const* node : nodes) {
+        std::uint32_t key = 0;
+        std::uint32_t own = 0;
+        if (!read_as((char const*)node + kNodeKey, &key) || key == 0
+            || key == kNullFixedString
+            || !read_as((char const*)node + kNodeValue + nameOffset, &own)
+            || own != key) {
+            return false;
+        }
+        keys->push_back(key);
+    }
+    return true;
+}
+
+std::size_t harvest_refmap(unsigned long long at, std::size_t nameOffset,
+                           Table* into) {
+    std::uint32_t count = 0;
+    if (!read_as((void const*)(std::uintptr_t)at, &count)) return 0;
+
+    std::vector<void const*> nodes;
+    if (!refmap_nodes(at, count, &nodes)) return 0;
+
+    std::size_t added = 0;
+    for (void const* node : nodes) {
+        std::uint32_t key = 0;
+        std::uint32_t own = 0;
+        if (!read_as((char const*)node + kNodeKey, &key)
+            || !read_as((char const*)node + kNodeValue + nameOffset, &own)
+            || own != key) {
+            continue;
+        }
+        char const* name = bg3le_fixed_string(key, nullptr);
+        if (name == nullptr || name[0] == '\0') continue;
+        auto const value = (std::uint64_t)(std::uintptr_t)node + kNodeValue;
+        if (into->ByName.emplace(name, value).second) ++added;
+    }
+    return added;
+}
+
+// The executable's own mapping, where a vtable lives.
+std::pair<std::uint64_t, std::uint64_t> image_span() {
+    static std::pair<std::uint64_t, std::uint64_t> span{};
+    if (span.second != 0) return span;
+
+    char exe[512] = {};
+    const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (n <= 0) return span;
+
+    std::FILE* maps = std::fopen("/proc/self/maps", "r");
+    if (maps == nullptr) return span;
+    char line[1024];
+    while (std::fgets(line, sizeof(line), maps) != nullptr) {
+        if (std::strstr(line, exe) == nullptr) continue;
+        unsigned long long from = 0;
+        unsigned long long to = 0;
+        if (std::sscanf(line, "%llx-%llx", &from, &to) != 2) continue;
+        if (span.first == 0 || from < span.first) span.first = from;
+        if (to > span.second) span.second = to;
+    }
+    std::fclose(maps);
+    return span;
+}
+
 struct Candidate {
     void const* Keys{nullptr};
     void const* Values{nullptr};
     std::uint32_t Count{0};
     unsigned long long At{0};
+    // Prototypes held in the map rather than behind a pointer.
+    bool Inline{false};
 };
 
 // A validated prototype map is rare; this only exists so a pathological
@@ -295,6 +430,15 @@ std::string static_key(std::size_t k) {
 // between the scan and a recorded static so neither adopts what the other
 // would reject.
 bool harvest_map(unsigned long long at, std::size_t k, Table* into) {
+    if (k == kPassive) {
+        std::vector<std::uint32_t> keys;
+        if (!refmap_consistent(at, kKinds[k].NameOffset, &keys)
+            || kind_of_names(keys.data(), keys.size()) != (int)k) {
+            return false;
+        }
+        return harvest_refmap(at, kKinds[k].NameOffset, into) > 0;
+    }
+
     std::uint32_t capacity = 0;
     std::uint32_t count = 0;
     std::uint64_t keysWord = 0;
@@ -313,10 +457,10 @@ bool harvest_map(unsigned long long at, std::size_t k, Table* into) {
     auto const* keys = (void const*)(std::uintptr_t)keysWord;
     auto const* values = (void const*)(std::uintptr_t)valuesWord;
 
-    if (k >= kInterrupt) {
+    if (k == kInterrupt) {
         const std::size_t stride =
             inline_stride(keys, values, count, kKinds[k].NameOffset);
-        if (stride == 0) return false;
+        if (stride == 0 || kind_of(keys, count) != (int)k) return false;
         return harvest_inline(keys, values, count, kKinds[k].NameOffset,
                               stride, into) > 0;
     }
@@ -333,11 +477,13 @@ bool harvest_map(unsigned long long at, std::size_t k, Table* into) {
 
 // The managers a previous run recorded a path to, with no scanning.
 //
-// Only the kinds that run found are recorded, so this publishes the same
-// set the scan would -- but if a later game state would expose a manager
-// the recording run never saw, the cache has to be deleted for the scan
-// to look again.
+// Published only when every kind resolves, and tried once: a cache that
+// lacks a kind -- one recorded before that kind could be found -- leaves
+// the scan to look for all of them.
 bool build_from_statics() {
+    static std::atomic<bool> tried{false};
+    if (tried.exchange(true)) return false;
+
     struct { Table Kinds[std::size(kKinds)]; } found{};
     std::size_t kinds = 0;
 
@@ -361,7 +507,11 @@ bool build_from_statics() {
         }
     }
 
-    if (kinds == 0) return false;
+    if (kinds < std::size(kKinds)) {
+        logf("prototypes: %zu of %zu managers have a recorded path; "
+             "scanning for all of them", kinds, std::size(kKinds));
+        return false;
+    }
 
     Prototypes& live = state();
     for (std::size_t k = 0; k < std::size(kKinds); ++k) {
@@ -380,6 +530,8 @@ bool build() {
     struct { Table Kinds[std::size(kKinds)]; } found{};
     unsigned long long at[std::size(kKinds)] = {};
     std::vector<Candidate> candidates;
+    std::vector<unsigned long long> refmaps;
+    const auto image = image_span();
 
     std::FILE* maps = std::fopen("/proc/self/maps", "r");
     if (maps == nullptr) return false;
@@ -403,6 +555,31 @@ bool build() {
             if (got < kMapSize) continue;
 
             for (std::size_t off = 0; off + kMapSize <= got; off += 8) {
+                // The passive manager: a vtable into the executable, then
+                // a LegacyRefMap. Shape from the block, contents after.
+                if (off >= 8 && refmaps.size() < kMaxCandidates) {
+                    std::uint64_t vmt = 0;
+                    std::uint32_t items = 0;
+                    std::uint32_t buckets = 0;
+                    std::uint64_t table = 0;
+                    std::memcpy(&vmt, block.data() + off - 8, sizeof(vmt));
+                    std::memcpy(&items, block.data() + off, sizeof(items));
+                    std::memcpy(&buckets, block.data() + off + 4,
+                                sizeof(buckets));
+                    std::memcpy(&table, block.data() + off + 8, sizeof(table));
+                    std::vector<std::uint32_t> names;
+                    if (vmt >= image.first && vmt < image.second
+                        && items >= kMinEntries && items <= kMaxEntries
+                        && buckets != 0 && buckets <= kMaxEntries
+                        && table > 0x10000 && table < 0x800000000000ull
+                        && (table & 7) == 0
+                        && refmap_consistent(base + off,
+                                             kKinds[kPassive].NameOffset,
+                                             &names)) {
+                        refmaps.push_back(base + off);
+                    }
+                }
+
                 // From the block, no syscalls: the counts have to be in
                 // range before anything is dereferenced.
                 std::uint32_t capacity = 0;
@@ -473,13 +650,18 @@ bool build() {
                 // per candidate meant a linear walk of 15,754 stats for
                 // each one, which starved the story thread until the
                 // debugger could not get a tick.
+                bool isInline = false;
                 if (!self_consistent(keys, values, count,
                                      kKinds[kSpell].NameOffset)) {
-                    continue;
+                    if (!inline_head(keys, values,
+                                     kKinds[kInterrupt].NameOffset)) {
+                        continue;
+                    }
+                    isInline = true;
                 }
                 if (candidates.size() < kMaxCandidates) {
                     candidates.push_back(Candidate{keys, values, count,
-                                                   base + off});
+                                                   base + off, isInline});
                 }
             }
         }
@@ -500,6 +682,9 @@ bool build() {
     // out entirely. The inline test costs reads rather than stat lookups,
     // so it can afford the whole list.
     std::vector<Candidate> const inlineCandidates = candidates;
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                    [](Candidate const& c) { return c.Inline; }),
+                     candidates.end());
     if (candidates.size() > kClassify) candidates.resize(kClassify);
 
     for (Candidate const& candidate : candidates) {
@@ -530,23 +715,42 @@ bool build() {
     // layout: the prototype sits in the map rather than behind a pointer,
     // so the stride is derived and the name still has to match the key.
     for (Candidate const& candidate : inlineCandidates) {
-        for (std::size_t k = kInterrupt; k <= kPassive; ++k) {
-            if (!found.Kinds[k].ByName.empty()) continue;
+        constexpr std::size_t k = kInterrupt;
+        if (!candidate.Inline || !found.Kinds[k].ByName.empty()) continue;
 
-            const std::size_t stride = inline_stride(
-                candidate.Keys, candidate.Values, candidate.Count,
-                kKinds[k].NameOffset);
-            if (stride == 0) continue;
+        const std::size_t stride = inline_stride(
+            candidate.Keys, candidate.Values, candidate.Count,
+            kKinds[k].NameOffset);
+        if (stride == 0) continue;
+        if (kind_of(candidate.Keys, candidate.Count) != (int)k) continue;
 
-            const std::size_t added = harvest_inline(
-                candidate.Keys, candidate.Values, candidate.Count,
-                kKinds[k].NameOffset, stride, &found.Kinds[k]);
-            if (added > 0) {
-                at[k] = candidate.At;
-                logf("prototypes: %zu %s prototypes at %#llx, stride %zu",
-                     added, kKinds[k].Name, candidate.At, stride);
-            }
-            break;
+        const std::size_t added = harvest_inline(
+            candidate.Keys, candidate.Values, candidate.Count,
+            kKinds[k].NameOffset, stride, &found.Kinds[k]);
+        if (added > 0) {
+            at[k] = candidate.At;
+            logf("prototypes: %zu %s prototypes at %#llx, stride %zu",
+                 added, kKinds[k].Name, candidate.At, stride);
+        }
+    }
+
+    // The passive manager's chained map, confirmed by the stats its names
+    // belong to.
+    for (unsigned long long refmap : refmaps) {
+        constexpr std::size_t k = kPassive;
+        if (!found.Kinds[k].ByName.empty()) break;
+
+        std::vector<std::uint32_t> names;
+        if (!refmap_consistent(refmap, kKinds[k].NameOffset, &names)
+            || kind_of_names(names.data(), names.size()) != (int)k) {
+            continue;
+        }
+        const std::size_t added =
+            harvest_refmap(refmap, kKinds[k].NameOffset, &found.Kinds[k]);
+        if (added > 0) {
+            at[k] = refmap;
+            logf("prototypes: %zu %s prototypes at %#llx", added,
+                 kKinds[k].Name, refmap);
         }
     }
 
@@ -584,9 +788,11 @@ bool build() {
                                  kOwnerWindow);
     }
 
-    logf("prototypes: %zu spells and %zu statuses available",
-         live.Kinds[kSpell].ByName.size(),
-         live.Kinds[kStatus].ByName.size());
+    logf("prototypes: %zu spells, %zu statuses, %zu interrupts and %zu "
+         "passives available",
+         live.Kinds[kSpell].ByName.size(), live.Kinds[kStatus].ByName.size(),
+         live.Kinds[kInterrupt].ByName.size(),
+         live.Kinds[kPassive].ByName.size());
     return true;
 }
 

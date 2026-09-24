@@ -120,12 +120,21 @@ component's declared size with the size the engine recorded, and
   does not show them; bg3le says so once rather than leaving it to be
   discovered
 - **The engine's own managers found once and remembered.** Everything located
-  by content — `RPGStats`, the mod load order, the spell and status
-  prototype managers — has the path from a static pointer to it recorded
-  under the build id, so later runs dereference instead of scanning. The
-  search runs backwards: what points at the manager, what points at that,
-  until something in the executable's own writable data does. Story-load
-  work went from 30.3s to 0.07s
+  by content — `RPGStats`, the mod load order, the four prototype managers —
+  has the path from a static pointer to it recorded under the build id, so
+  later runs dereference instead of scanning. The search runs backwards:
+  what points at the manager, what points at that, until something in the
+  executable's own writable data does. Story-load work went from 30.3s to
+  0.07s
+- **`Ext.Stats.GetCachedSpell`, `GetCachedStatus`, `GetCachedInterrupt` and
+  `GetCachedPassive`**, over 8,707 spells, 7,430 statuses, 416 interrupts
+  and 2,498 passives. The last two never resolved before: interrupts are
+  held in their map rather than behind a pointer, and passives in a chained
+  `LegacyRefMap`, and the scan only admitted maps of pointers. Each manager
+  is confirmed by the stat type its names belong to. A cached prototype's
+  conditions match the stat's for every passive but one and 395 of 416
+  interrupts; the rest are the conditions 5eSpells rewrites, which the stat
+  shows and the compiled prototype does not until it is synced
 - **An entity-valued field is an entity.** Upstream's push for an
   `EntityHandle` or an `EntityRef` makes an entity proxy, or `nil` for the
   null handle — which is `0xFFC0000000000000`, not all ones. bg3le handed back
