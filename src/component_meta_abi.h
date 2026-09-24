@@ -145,6 +145,11 @@ struct FieldDesc {
     // the engine, so it is worth knowing about before a read goes wrong.
     // Last, for the reason Assign's comment gives.
     std::uint16_t CompiledSize;
+    // ecs::EntityRef only: where its World pointer sits, from the start of
+    // the field. Zero means the field is not one -- Handle comes first, so
+    // World is never at zero. See bg3le_meta_after_write.
+    // Last, for the reason Assign's comment gives.
+    std::uint16_t EntityWorldAt;
 };
 
 }  // namespace bg3le

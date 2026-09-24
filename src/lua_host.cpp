@@ -1389,13 +1389,60 @@ bool push_field(lua_State* L, const void* address, FieldKind kind,
     }
 }
 
-// Writes a field. Narrower than the read side on purpose: only the numeric
-// and boolean kinds, because writing a GUID or an entity handle by value is
-// not something a mod should be doing by accident.
+extern "C" bool bg3le_meta_parse_guid(const char* text, void* out);
+
+// Writes a field, converting the Lua value the way upstream's get<T> does.
+//
+// This used to refuse GUIDs and entity handles on purpose, as "not something
+// a mod should be doing by accident". Upstream writes both, so the refusal
+// was a gap rather than a safeguard: a mod written against it failed here.
+// What upstream does insist on is the type -- a GUID must be a string that
+// parses, an entity must be an entity or nil -- and so does this.
 bool write_field(lua_State* L, int index, void* address, FieldKind kind,
                  FieldKind elemKind = FieldKind::Unsupported,
                  std::uint16_t elemCount = 0) {
     switch (kind) {
+        case FieldKind::Guid: {
+            // luaL_checklstring and Guid::ParseGuidString, as upstream's
+            // do_get<Guid>, with its message for one that does not parse.
+            std::size_t length = 0;
+            const char* text = luaL_checklstring(L, index, &length);
+            unsigned char guid[16] = {};
+            if (!bg3le_meta_parse_guid(text, guid)) {
+                luaL_error(L, "Param %d: not a valid GUID value: '%s'", index,
+                           text);
+                return false;
+            }
+            std::memcpy(address, guid, sizeof(guid));
+            return true;
+        }
+        case FieldKind::Entity: {
+            // nil is the null handle; anything else has to be an entity.
+            // Upstream takes it out of an entity proxy and rejects anything
+            // else, a bare number included -- a handle's bits are not
+            // something to type in.
+            std::uint64_t handle = 0xFFC0000000000000ull;  // NullHandle
+            if (!lua_isnil(L, index)) {
+                bool isEntity = false;
+                if (lua_istable(L, index) && lua_getmetatable(L, index)) {
+                    lua_getfield(L, -1, "__name");
+                    isEntity = lua_isstring(L, -1)
+                               && std::strcmp(lua_tostring(L, -1),
+                                              "EntityProxy") == 0;
+                    lua_pop(L, 2);
+                }
+                if (!isEntity) {
+                    luaL_error(L, "Param %d: expected an entity or nil, got %s",
+                               index, luaL_typename(L, index));
+                    return false;
+                }
+                lua_getfield(L, index, "Handle");
+                handle = (std::uint64_t)lua_tointeger(L, -1);
+                lua_pop(L, 1);
+            }
+            std::memcpy(address, &handle, sizeof(handle));
+            return true;
+        }
         case FieldKind::ScalarArray: {
             const std::size_t stride = field_kind_size(elemKind);
             if (stride == 0 || !lua_istable(L, index)) return false;
@@ -1646,8 +1693,11 @@ extern "C" bool bg3le_meta_optional_set(void const* handle, char const* path,
                                         std::uint8_t* elemKind,
                                         std::uint16_t* elemCount);
 
-extern "C" bool bg3le_meta_mark_overridden(void const* handle, char const* path,
-                                          void* component);
+extern "C" bool bg3le_meta_after_write(void const* handle, char const* path,
+                                      void* component, bool unserializing,
+                                      void* entityWorld);
+extern "C" void* bg3le_entity_world(void* container);
+void* server_container();
 
 // Writing an optional field: engage it and write the payload, or clear it.
 //
@@ -1735,9 +1785,11 @@ int l_set_field(lua_State* L) {
                         field_kind_name((FieldKind)kind));
         return 2;
     }
-    // Upstream's setter for an OverrideableProperty builds {value, true}.
-    // A no-op for any other field.
-    bg3le_meta_mark_overridden(meta, path, component);
+    // Whatever upstream's setter does beyond the value: an
+    // OverrideableProperty marked overridden, an empty EntityRef given a
+    // world. A no-op for any other field.
+    bg3le_meta_after_write(meta, path, component, false,
+                           bg3le_entity_world(server_container()));
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -1824,7 +1876,6 @@ extern "C" void const* bg3le_meta_class(const char* className);
 extern "C" char const* bg3le_meta_class_name(void const* handle);
 extern "C" std::size_t bg3le_meta_class_count();
 extern "C" void const* bg3le_meta_class_at(std::size_t index);
-extern "C" bool bg3le_meta_parse_guid(const char* text, void* out);
 extern "C" void* bg3le_resource_get(std::int32_t typeIndex, void const* guid,
                                     std::size_t resourceSize);
 extern "C" std::size_t bg3le_resource_count(std::int32_t typeIndex);
@@ -2317,9 +2368,8 @@ int l_object_set_field(lua_State* L) {
     // the Value and leaves the flag alone, and Ext.Types.Unserialize says
     // which it is. A no-op for any other field.
     const bool unserializing = lua_toboolean(L, 5) != 0;
-    if (!unserializing) {
-        bg3le_meta_mark_overridden(subject.Meta, path, subject.Base);
-    }
+    bg3le_meta_after_write(subject.Meta, path, subject.Base, unserializing,
+                           bg3le_entity_world(server_container()));
     lua_pushboolean(L, 1);
     return 1;
 }

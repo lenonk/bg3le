@@ -133,7 +133,11 @@ component's declared size with the size the engine recorded, and
   works. Entities also compare equal by handle, order by handle and print as
   `Entity (0200000100000086)`, as upstream's do; two reads of one entity used
   to compare unequal. `esv::Character.MyHandle` coming back equal to the
-  character it was read from is the check
+  character it was read from is the check. Entity and GUID fields are
+  writable too, converting as upstream's `get` does: an entity or `nil` for
+  an entity, anything else refused; a string that parses for a GUID, with
+  upstream's own error for one that does not. An `EntityRef` keeps the world
+  the engine paired it with, and gets the server world only when it has none
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -342,8 +346,7 @@ component's declared size with the size the engine recorded, and
   already resolve through the condition pool), component handles (91),
   `Path` (41) and `NetId` (27); and the ImGui widgets' 391 delegate fields
   are handled by `Ext.IMGUI`'s own callbacks rather than the field tables.
-  Entity fields are readable but not yet writable, by an earlier decision
-  that is now the gap: upstream writes them. Naming an unsupported
+  Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
 - **The client-side modules.** `Ext.ClientUI` in particular is blocked on the

@@ -292,6 +292,12 @@ bg3se::ecs::EntityWorld* world_from_container(void* container) {
 
 }  // namespace
 
+// The EntityWorld a captured container belongs to, or null. What an EntityRef
+// written from Lua is paired with when it has no world of its own.
+extern "C" void* bg3le_entity_world(void* container) {
+    return world_from_container(container);
+}
+
 // Reports everything needed to judge whether the recovered world is real: the
 // pointer itself, its Replication buffers, the size of the replication pool
 // array -- which should be close to the number of ReplicatedTypeContext

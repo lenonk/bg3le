@@ -752,16 +752,13 @@ constexpr FieldDesc make_field(char const* name, std::size_t offset) {
         // a bare EntityHandle; World never reaches Lua. So it reads as its
         // handle, at the same offset.
         //
-        // Writing is where World would matter -- upstream's get fills it with
-        // the calling context's world -- but bg3le does not write entity
-        // handles at all yet (see write_field). When it does, this needs
-        // care: the 227 of these split 77 server, 77 client and 73 in effects
-        // and genome blueprints, and bg3le lets either context write server
-        // components, so the object's own existing world is the right one to
-        // keep, not the caller's.
+        // Writing is where World matters; see bg3le_meta_after_write.
         static_assert(offsetof(bg3se::ecs::EntityRef, Handle) == 0,
                       "EntityRef keeps its Handle first");
-        return make_plain_field<EntityHandle>(name, offset);
+        FieldDesc handle = make_plain_field<EntityHandle>(name, offset);
+        handle.EntityWorldAt =
+            (std::uint16_t)offsetof(bg3se::ecs::EntityRef, World);
+        return handle;
     } else {
         return make_plain_field<T>(name, offset);
     }
@@ -1791,24 +1788,47 @@ extern "C" bool bg3le_meta_field_sizes(void const* handle, char const* name,
     return true;
 }
 
-// Marks an OverrideableProperty overridden after it has been assigned, which
-// is what upstream's setter does by building {value, true}. False if the
-// field at this path is not one -- a member of one reached by a longer path
-// is not either, and that matches upstream too: such a write goes through
-// MakeObjectRef(&value->Value), which leaves the flag alone.
-extern "C" bool bg3le_meta_mark_overridden(void const* handle, char const* path,
-                                          void* component) {
+// What a write has to do beyond the bytes of the value, to match the setter
+// upstream would have run. Called after every successful field write; a
+// no-op for most fields.
+//
+// An OverrideableProperty is marked overridden, because upstream's setter is
+// get<OverrideableProperty<T>>, which builds {value, true} -- but not by
+// Ext.Types.Unserialize, whose Unserialize writes only the value. A member of
+// one reached by a longer path is not marked either, matching upstream:
+// that write goes through MakeObjectRef(&value->Value).
+//
+// An EntityRef is given a World if it has none. Upstream's get fills World
+// with the calling context's world, on both paths, since EntityRef is a
+// by-value type. bg3le keeps the world the engine already paired with the
+// ref instead, and fills it only when empty -- with the server world, since
+// every handle bg3le hands out is resolved there. Two reasons. These refs
+// split 77 server, 77 client and 73 in effects and genome blueprints, so the
+// object knows its world better than the caller does. And bg3le lets either
+// context write server components, which upstream's per-context world cannot
+// express. For a server-context write -- the common case -- the two agree.
+extern "C" bool bg3le_meta_after_write(void const* handle, char const* path,
+                                      void* component, bool unserializing,
+                                      void* entityWorld) {
     if (handle == nullptr || path == nullptr || component == nullptr) {
         return false;
     }
     const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
                                 component);
-    if (!r.Ok || r.Address == nullptr || r.Field.OverrideFlagAt == 0) {
-        return false;
+    if (!r.Ok || r.Address == nullptr) return false;
+
+    if (r.Field.OverrideFlagAt != 0 && !unserializing) {
+        const std::uint8_t overridden = 1;
+        std::memcpy((char*)r.Address + r.Field.OverrideFlagAt, &overridden,
+                    sizeof(overridden));
     }
-    const std::uint8_t overridden = 1;
-    std::memcpy((char*)r.Address + r.Field.OverrideFlagAt, &overridden,
-                sizeof(overridden));
+
+    if (r.Field.EntityWorldAt != 0 && entityWorld != nullptr) {
+        void* world = nullptr;
+        char* at = (char*)r.Address + r.Field.EntityWorldAt;
+        std::memcpy(&world, at, sizeof(world));
+        if (world == nullptr) std::memcpy(at, &entityWorld, sizeof(void*));
+    }
     return true;
 }
 
