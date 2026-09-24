@@ -52,7 +52,12 @@ component's declared size with the size the engine recorded, and
   loads its bootstrap, `Ext.Require` targets and plain `require()` calls
   straight out of the archive. Each mod gets `Mods[ModTable]` as its
   environment with the real globals behind it, and `ModuleUUID` set before
-  its table enters `Mods` — Mod Configuration Menu watches that assignment,
+  its table enters `Mods`. The environment is upstream's `ModLoader`'s: the
+  mod's own `Ext` over the real one (a write to it is refused with
+  upstream's message), its own `Ext.Log` with `Debug`, `MakePrinter`,
+  topics and the `Log` event, `Sandboxed`, `print`/`_P`/`_PW`/`_PE`, `_G`
+  as the mod's own table, and an `Ext.Require` that resolves against the mod
+  and runs each file once — Mod Configuration Menu watches that assignment,
   so filling it in afterwards makes every mod look anonymous. Loose
   directories still work, via `BG3LE_MOD_PATH`. Of one 57-mod set, all five
   script mods load and run, MCM included (v1.40.1, "SE version 32")

@@ -10190,6 +10190,98 @@ table.insert(package.searchers, mod_searcher)
 
 -- `read` takes a path under the mod's ScriptExtender directory and returns
 -- its contents, so a loose mod and a packed one differ only in that.
+-- A mod's view of Ext and of the log, ported from upstream's
+-- LuaScripts/Libs/ModLoader.lua and Logger.lua.
+local Logger = {
+  EnabledLogLevels = {},
+  EnabledMods = {},
+  EnabledTopics = {},
+  DispatchingLogEvent = false,
+}
+local LOG_LEVELS = {"Debug", "Info", "Warning", "Error"}
+
+function Logger:Log(moduleUuid, level, topic, ...)
+  if self.EnabledLogLevels[level] == false then return end
+  if self.EnabledMods[moduleUuid] == false then return end
+  if self.EnabledTopics[topic] == false then return end
+
+  local prevented = false
+  if not self.DispatchingLogEvent then
+    self.DispatchingLogEvent = true
+    local evt = {
+      Stopped = false,
+      ActionPrevented = false,
+      Module = moduleUuid,
+      Topic = topic,
+      Level = level,
+      Message = {...},
+    }
+    Ext.Events.Log:Throw(evt)
+    prevented = evt.ActionPrevented
+    self.DispatchingLogEvent = false
+  end
+
+  if not prevented then
+    if level == "Error" then
+      Ext.Log.PrintError(...)
+    elseif level == "Warning" then
+      Ext.Log.PrintWarning(...)
+    else
+      Ext.Log.Print(...)
+    end
+  end
+end
+
+function Logger:SetLogLevel(level)
+  local enable = false
+  for _, llevel in ipairs(LOG_LEVELS) do
+    if level == llevel then enable = true end
+    self.EnabledLogLevels[llevel] = enable
+  end
+  if not enable then error("Unknown log level: " .. tostring(level)) end
+end
+
+function Logger:CreateLogModule(moduleUuid)
+  local log = setmetatable({}, {__index = Ext.Log})
+  log.Log = function(level, topic, ...) self:Log(moduleUuid, level, topic, ...) end
+  log.Debug = function(...) self:Log(moduleUuid, "Debug", "", ...) end
+  log.Print = function(...) self:Log(moduleUuid, "Info", "", ...) end
+  log.PrintWarning = function(...) self:Log(moduleUuid, "Warning", "", ...) end
+  log.PrintError = function(...) self:Log(moduleUuid, "Error", "", ...) end
+  log.MakePrinter = function(level, topic)
+    return function(...) self:Log(moduleUuid, level, topic, ...) end
+  end
+  log.SetLogLevel = function(level) self:SetLogLevel(level) end
+  log.EnableModLogging = function(modUuid, enable)
+    self.EnabledMods[modUuid] = enable
+  end
+  log.EnableTopic = function(topic, enable) self.EnabledTopics[topic] = enable end
+  return log
+end
+
+-- A mod's own Ext: the real one behind it, its own Log, Utils and Require,
+-- and closed to writes once built, as upstream's is.
+local function create_mod_ext(moduleUuid, require_fn)
+  local ext = setmetatable({}, {__index = Ext})
+  ext.Log = Logger:CreateLogModule(moduleUuid)
+  ext.Utils = setmetatable({
+    Print = function(...) ext.Log.Print(...) end,
+    PrintWarning = function(...) ext.Log.PrintWarning(...) end,
+    PrintError = function(...) ext.Log.PrintError(...) end,
+  }, {__index = Ext.Utils})
+  ext.Net = Ext.Net
+  ext.Require = require_fn
+  setmetatable(ext, {
+    __index = Ext,
+    __newindex = function(_, k)
+      Ext.Log.PrintError("Couldn't set Ext." .. tostring(k)
+        .. ": Please avoid extending the Ext table - it is dangerous and may "
+        .. "break compatibility!")
+    end,
+  })
+  return ext
+end
+
 local function load_mod_from(name, uuid, read, report)
   local config = read("Config.json")
   if not config then
@@ -10239,12 +10331,56 @@ local function load_mod_from(name, uuid, read, report)
   -- puts a __newindex on Mods to notice new mods and reads ModuleUUID off
   -- the value as it arrives, so assigning an empty table first and
   -- filling it afterwards makes every mod look anonymous.
-  local env = Mods[table_name]
+  -- Ext.Require for this mod: resolved against it whenever it is called,
+  -- and each file run once, its results kept, as upstream's FileLoader
+  -- does -- a file two scripts require must not subscribe its handlers
+  -- twice.
+  local env
+  local required = {}
+  local function mod_require(path, second)
+    if second ~= nil then
+      -- Ext.Require(mod, path): another mod's file. bg3le reaches only
+      -- the mod being loaded, so say so rather than load the wrong one.
+      if path ~= uuid then
+        error("bg3le: Ext.Require(mod, path) can only load files of the "
+              .. "calling mod", 2)
+      end
+      path = second
+    end
+    if required[path] ~= nil then return table.unpack(required[path]) end
+    local text = read("Lua/" .. path)
+    if not text then
+      error("bg3le: Ext.Require could not read " .. path, 0)
+    end
+    local chunk, err = load(text, "@" .. path, "bt", env)
+    if not chunk then error(err, 0) end
+    local results = table.pack(chunk())
+    required[path] = results
+    return table.unpack(results, 1, results.n)
+  end
+
+  -- Upstream's ModLoader:CreateModEnv.
+  env = Mods[table_name]
+  local ext = create_mod_ext(uuid, mod_require)
+  local fields = {
+    type = type, tostring = tostring, tonumber = tonumber, pairs = pairs,
+    ipairs = ipairs, error = error, next = next,
+    string = string, math = math, table = table,
+    Ext = ext, Osi = Osi, Sandboxed = true,
+    _P = ext.Log.Print, _PW = ext.Log.PrintWarning, _PE = ext.Log.PrintError,
+    Print = ext.Log.Print, print = ext.Log.Print,
+  }
   if env == nil then
     env = setmetatable({ ModuleUUID = uuid }, { __index = _G })
+    for k, v in pairs(fields) do rawset(env, k, v) end
+    env._G = env
     Mods[table_name] = env
-  elseif getmetatable(env) == nil then
-    setmetatable(env, { __index = _G })
+  else
+    if getmetatable(env) == nil then setmetatable(env, { __index = _G }) end
+    for k, v in pairs(fields) do
+      if rawget(env, k) == nil then rawset(env, k, v) end
+    end
+    if rawget(env, "_G") == nil then rawset(env, "_G", env) end
   end
 
   -- ModuleUUID is the mod being loaded, set for the duration and cleared
@@ -10260,29 +10396,24 @@ local function load_mod_from(name, uuid, read, report)
   local outer = loading_mod
   loading_mod = reader
 
-  -- Ext.Require resolves against the mod currently being loaded, as it does
-  -- in bg3se.
-  function Ext.Require(path)
-    local text = read("Lua/" .. path)
-    if not text then
-      error("bg3le: Ext.Require could not read " .. path, 0)
-    end
-    local chunk, err = load(text, "@" .. path, "bt", env)
-    if not chunk then error(err, 0) end
-    return chunk()
-  end
+  -- A bootstrap that calls the global Ext.Require rather than its own
+  -- still reaches this mod while it loads; the global is put back after.
+  local global_require = Ext.Require
+  Ext.Require = mod_require
 
   local chunk, err = load(source, "@" .. name .. "/" .. boot,
                           "bt", env)
   if not chunk then
     ModuleUUID = previous
     loading_mod = outer
+    Ext.Require = global_require
     Ext.Log.PrintError(string.format("bg3le: %s failed to compile: %s", name, err))
     return
   end
   local ok, run_err = pcall(chunk)
   ModuleUUID = previous
   loading_mod = outer
+  Ext.Require = global_require
   if not ok then
     Ext.Log.PrintError(string.format("bg3le: %s failed to load: %s", name, run_err))
     return
