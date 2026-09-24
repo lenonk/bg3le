@@ -178,6 +178,19 @@ component's declared size with the size the engine recorded, and
   `RemoveComponent`, `WasAdded`/`WasRemoved` and the current-frame lists —
   and `GetNetId`, which needs the server's replication authority; those
   raise and say so
+- **`Ext.Entity.OnCreate`/`OnDestroy` and their variants fire.** As
+  upstream's `EntityComponentEventHooks` does, bg3le adds a connection to
+  the engine's own per-type construct and destroy signals in the world's
+  `ComponentCallbacks`. The engine's function objects match bg3se's
+  pointer-table `Function`; the signal's `EntityRef` argument, which bg3se
+  writes as a pointer because MSVC passes a 16-byte struct by hidden
+  reference, arrives by value in two registers under System V. Events are
+  queued and delivered on the next server tick, immediate subscribers
+  before deferred ones, because the Lua states may only be entered from
+  their own thread — so a destroy handler gets `nil` for the component,
+  which no longer exists by then. Applying `BLESS` with Osiris reaches an
+  `OnCreate("ServerStatus")` handler with the status readable. `OnChange`,
+  which upstream drives from replication, does not fire yet
 - **Map keys arrive as upstream pushes them**: an entity key as the entity
   and an enum key as its label. `StatusContainer.Statuses` is keyed by the
   status entities, and each one can be looked up by the entity or followed

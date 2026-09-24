@@ -22,6 +22,15 @@
 #include <GameDefinitions/EntitySystem.h>
 #include <GameDefinitions/Components/All.h>
 
+#include "../log.h"
+
+#include <atomic>
+#include <mutex>
+#include <pthread.h>
+#include <vector>
+
+extern "C" bool bg3le_game_allocator_ready();
+
 namespace bg3le {
 
 // Returns the component of the given type for an entity, or nullptr if the
@@ -528,6 +537,221 @@ extern "C" std::size_t bg3le_entity_changed_types(void* container,
         }
     }
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// Component construct/destroy events, as upstream's EntityComponentEventHooks
+// (Lua/Shared/EntityComponentEvents.inl): a connection on the engine's own
+// per-type signals in world->ComponentCallbacks.
+//
+// Events are queued here and delivered by Lua from the server tick, because
+// the engine fires these from inside its own update and bg3le's Lua states
+// must only be entered from their own thread.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct ComponentEvent {
+    std::uint64_t Entity;
+    std::uint16_t Type;
+    std::uint8_t Kind;  // 1 construct, 2 destroy
+};
+
+std::mutex& events_lock() {
+    static std::mutex m;
+    return m;
+}
+
+std::vector<ComponentEvent>& event_queue() {
+    static std::vector<ComponentEvent> q;
+    return q;
+}
+
+std::vector<bool>& watched_types() {
+    static std::vector<bool> w;
+    return w;
+}
+
+void queue_event(std::uint16_t type, std::uint64_t entity, std::uint8_t kind) {
+    static std::atomic<int> said{0};
+    if (said.fetch_add(1) < 3) {
+        bg3le::logf("component events: %s of type %u for %#llx on thread %lu",
+                    kind == 1 ? "construct" : "destroy", type,
+                    (unsigned long long)entity, (unsigned long)pthread_self());
+    }
+    const std::lock_guard<std::mutex> held(events_lock());
+    if (event_queue().size() < (1u << 20)) {
+        event_queue().push_back(ComponentEvent{entity, type, kind});
+    }
+}
+
+using Connection = bg3se::ecs::ComponentSignal::Connection;
+using Storage = bg3se::FunctionStorage<void(bg3se::ecs::EntityRef*, void*)>;
+
+// The engine's signal passes its EntityRef by value. bg3se writes the
+// parameter as EntityRef* because MSVC passes a 16-byte struct by hidden
+// reference; System V passes it in two registers, so it arrives as the
+// handle and the world, with the component third.
+template <std::uint8_t Kind>
+void component_signal_call(Storage const& self, std::uint64_t handle,
+                           std::uint64_t /*world*/, void* /*component*/) {
+    queue_event(*self.data<std::uint16_t>(), handle, Kind);
+}
+
+Storage* component_signal_copy(Storage const&, Storage const& src, Storage* dst) {
+    if (dst == nullptr) return nullptr;
+    dst->call_ = src.call_;
+    dst->copy_ = src.copy_;
+    dst->move_ = src.move_;
+    std::memcpy(dst->data_, src.data_, sizeof(dst->data_));
+    return dst;
+}
+
+Storage* component_signal_move(Storage const& self, Storage&& src, Storage* dst) {
+    return component_signal_copy(self, src, dst);
+}
+
+// A Connection handler that calls component_signal_call<Kind> for one type.
+template <std::uint8_t Kind>
+bg3se::ecs::ComponentSignal::Function component_handler(std::uint16_t type) {
+    Storage storage;
+    storage.call_ = reinterpret_cast<Storage::CallProc*>(
+        &component_signal_call<Kind>);
+    storage.copy_ = &component_signal_copy;
+    storage.move_ = &component_signal_move;
+    std::memset(storage.data_, 0, sizeof(storage.data_));
+    *storage.data<std::uint16_t>() = type;
+    return bg3se::ecs::ComponentSignal::Function(storage);
+}
+
+// Signal::Add without its push_back: the array is the engine's, so a full one
+// moves to a fresh engine allocation and the old buffer is left, never
+// freed. A Function points at its own storage, so a moved one is re-pointed.
+// An engine Array's own three members, which bg3se keeps private.
+struct RawArray {
+    void* Buffer;
+    std::uint32_t Capacity;
+    std::uint32_t Size;
+};
+static_assert(sizeof(RawArray) == sizeof(bg3se::Array<Connection>));
+
+bool add_connection(bg3se::ecs::ComponentSignal& signal,
+                    bg3se::ecs::ComponentSignal::Function const& handler) {
+    auto* array = reinterpret_cast<RawArray*>(&signal.Connections);
+    const std::uint32_t size = array->Size;
+    const std::uint32_t capacity = array->Capacity;
+    auto* buffer = static_cast<Connection*>(array->Buffer);
+
+    if (size >= capacity) {
+        if (!bg3le_game_allocator_ready()) return false;
+        const std::uint32_t grown = capacity + capacity / 2 + 2;
+        auto* fresh = static_cast<Connection*>(
+            bg3se::GameAllocRaw(sizeof(Connection) * grown));
+        if (fresh == nullptr) return false;
+        std::memset((void*)fresh, 0, sizeof(Connection) * grown);
+        for (std::uint32_t i = 0; i < size; ++i) {
+            std::memcpy((void*)&fresh[i], (void const*)&buffer[i],
+                        sizeof(Connection));
+            auto** self = reinterpret_cast<void**>(&fresh[i].Handler);
+            auto* oldStorage = reinterpret_cast<char*>(&buffer[i].Handler) + 8;
+            if (*self == oldStorage) {
+                *self = reinterpret_cast<char*>(&fresh[i].Handler) + 8;
+            }
+        }
+        buffer = fresh;
+        array->Buffer = fresh;
+        array->Capacity = grown;
+    }
+
+    // Built in place, so its storage pointer is its own.
+    new (&buffer[size]) Connection(handler, signal.NextRegistrantId++);
+    __atomic_store_n(&array->Size, size + 1, __ATOMIC_RELEASE);
+    return true;
+}
+
+}  // namespace
+
+// Starts delivering construct and destroy events for one component type.
+extern "C" bool bg3le_component_events_watch(void* container,
+                                             std::uint16_t componentIndex) {
+    auto* world = container ? world_from_container(container) : nullptr;
+    if (world == nullptr) return false;
+    auto& registry = world->ComponentCallbacks;
+    if (componentIndex >= registry.Callbacks.size()) return false;
+    auto* callbacks = registry.Callbacks[componentIndex];
+    if (callbacks == nullptr) return false;
+
+    // The connections belong to this world's registry; another world
+    // (another save) starts with none.
+    static bg3se::ecs::EntityWorld* watchedWorld = nullptr;
+    auto& watched = watched_types();
+    if (watchedWorld != world) {
+        watched.clear();
+        watchedWorld = world;
+    }
+    if (watched.size() <= componentIndex) watched.resize(componentIndex + 1);
+    if (watched[componentIndex]) return true;
+
+    const std::uint16_t type = componentIndex;
+    if (!add_connection(callbacks->OnConstruct, component_handler<1>(type))
+        || !add_connection(callbacks->OnDestroy, component_handler<2>(type))) {
+        return false;
+    }
+    watched[componentIndex] = true;
+    bg3le::logf("component events: watching type %u", componentIndex);
+    return true;
+}
+
+// Takes up to max queued events; returns how many were written.
+extern "C" std::size_t bg3le_component_events_take(std::uint64_t* entities,
+                                                   std::uint16_t* types,
+                                                   std::uint8_t* kinds,
+                                                   std::size_t max) {
+    const std::lock_guard<std::mutex> held(events_lock());
+    auto& q = event_queue();
+    const std::size_t n = q.size() < max ? q.size() : max;
+    for (std::size_t i = 0; i < n; ++i) {
+        entities[i] = q[i].Entity;
+        types[i] = q[i].Type;
+        kinds[i] = q[i].Kind;
+    }
+    q.erase(q.begin(), q.begin() + (std::ptrdiff_t)n);
+    return n;
+}
+
+// Diagnostic: one component type's construct/destroy signals, as bg3se lays
+// them out, to confirm the layout before anything is added to them.
+extern "C" void bg3le_component_callbacks_probe(void* container,
+                                                std::uint16_t componentIndex) {
+    auto* world = container ? world_from_container(container) : nullptr;
+    if (world == nullptr) {
+        bg3le::logf("callbacks probe: no world");
+        return;
+    }
+    auto& registry = world->ComponentCallbacks;
+    bg3le::logf("callbacks probe: registry holds %u entries (capacity %u)",
+                registry.Callbacks.size(), registry.Callbacks.capacity());
+    if (componentIndex >= registry.Callbacks.size()) return;
+    auto* cb = registry.Callbacks[componentIndex];
+    bg3le::logf("callbacks probe: type %u -> %p", componentIndex, (void*)cb);
+    if (cb == nullptr) return;
+
+    auto dump = [](char const* which, bg3se::ecs::ComponentSignal const& sig) {
+        bg3le::logf("callbacks probe:   %s next id %llu, %u connections "
+                    "(capacity %u)", which,
+                    (unsigned long long)sig.NextRegistrantId,
+                    sig.Connections.size(), sig.Connections.capacity());
+        for (unsigned i = 0; i < sig.Connections.size() && i < 3; ++i) {
+            auto const& c = sig.Connections[i];
+            auto const* raw = reinterpret_cast<std::uintptr_t const*>(&c.Handler);
+            bg3le::logf("callbacks probe:     [%u] at %p: %#lx %#lx %#lx %#lx "
+                        "%#lx %#lx %#lx registrant %llu", i, (void const*)&c,
+                        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6],
+                        (unsigned long long)c.RegistrantIndex);
+        }
+    };
+    dump("construct", cb->OnConstruct);
+    dump("destroy", cb->OnDestroy);
 }
 
 // GetRegisteredComponentTypes: every component type the world registers,

@@ -4852,6 +4852,72 @@ extern "C" std::size_t bg3le_registered_component_types(void* container,
                                                         std::uint16_t* out,
                                                         std::size_t max);
 
+extern "C" void bg3le_component_callbacks_probe(void* container,
+                                                std::uint16_t componentIndex);
+extern "C" bool bg3le_component_events_watch(void* container,
+                                             std::uint16_t componentIndex);
+extern "C" std::size_t bg3le_component_events_take(std::uint64_t* entities,
+                                                   std::uint16_t* types,
+                                                   std::uint8_t* kinds,
+                                                   std::size_t max);
+
+// Ext._Internal.WatchComponentEvents(component) -> bool
+int l_watch_component_events(lua_State* L) {
+    const auto index = component_index(engine_name_of(luaL_checkstring(L, 1)));
+    lua_pushboolean(L, index && !(*index & 0x8000)
+                           && bg3le_component_events_watch(
+                               server_container(),
+                               static_cast<std::uint16_t>(*index)));
+    return 1;
+}
+
+// Ext._Internal.TakeComponentEvents()
+//   -> { { handle, component short name, "create" | "destroy" }, ... }
+int l_take_component_events(lua_State* L) {
+    constexpr std::size_t kBatch = 4096;
+    static std::uint64_t entities[kBatch];
+    static std::uint16_t types[kBatch];
+    static std::uint8_t kinds[kBatch];
+    const std::size_t n = bg3le_component_events_take(entities, types, kinds,
+                                                      kBatch);
+    lua_createtable(L, (int)n, 0);
+    int at = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        auto name = ecs::name_of(ecs::Context::Component, types[i]);
+        if (!name) continue;
+        void const* meta = bg3le_meta_component(name->c_str());
+        const char* shortName = meta ? bg3le_meta_short_name(meta) : nullptr;
+        lua_createtable(L, 3, 0);
+        lua_pushinteger(L, (lua_Integer)entities[i]);
+        lua_rawseti(L, -2, 1);
+        lua_pushstring(L, shortName != nullptr ? shortName : name->c_str());
+        lua_rawseti(L, -2, 2);
+        lua_pushstring(L, kinds[i] == 1 ? "create" : "destroy");
+        lua_rawseti(L, -2, 3);
+        lua_rawseti(L, -2, ++at);
+    }
+    return 1;
+}
+
+// Ext._Internal.ComponentShortName(name) -> upstream's name for a component
+int l_component_short_name(lua_State* L) {
+    void const* meta = bg3le_meta_component(luaL_checkstring(L, 1));
+    const char* shortName = meta ? bg3le_meta_short_name(meta) : nullptr;
+    if (shortName == nullptr) return 0;
+    lua_pushstring(L, shortName);
+    return 1;
+}
+
+// Ext._Internal.ComponentCallbacksProbe(component) -- diagnostics only.
+int l_component_callbacks_probe(lua_State* L) {
+    const auto index = component_index(engine_name_of(luaL_checkstring(L, 1)));
+    if (index) {
+        bg3le_component_callbacks_probe(server_container(),
+                                        static_cast<std::uint16_t>(*index));
+    }
+    return 0;
+}
+
 // Ext._Internal.RegisteredComponentTypes()
 //   -> { { engine name, one-frame, short name or false }, ... }
 int l_registered_component_types(lua_State* L) {
@@ -5162,6 +5228,14 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "SetHealth");
     lua_pushcfunction(g_lua, l_entity_mark_changed);
     lua_setfield(g_lua, -2, "MarkChanged");
+    lua_pushcfunction(g_lua, l_component_callbacks_probe);
+    lua_setfield(g_lua, -2, "ComponentCallbacksProbe");
+    lua_pushcfunction(g_lua, l_watch_component_events);
+    lua_setfield(g_lua, -2, "WatchComponentEvents");
+    lua_pushcfunction(g_lua, l_take_component_events);
+    lua_setfield(g_lua, -2, "TakeComponentEvents");
+    lua_pushcfunction(g_lua, l_component_short_name);
+    lua_setfield(g_lua, -2, "ComponentShortName");
     lua_pushcfunction(g_lua, l_registered_component_types);
     lua_setfield(g_lua, -2, "RegisteredComponentTypes");
     lua_pushcfunction(g_lua, l_entity_alive);
@@ -7888,6 +7962,11 @@ function Ext._Internal.RunTimers()
   -- And what the overlay's widgets queued, for the same reason.
   Ext._Internal.ImguiPump()
 
+  -- And the component events the engine raised.
+  if Ext._Internal.DeliverComponentEvents then
+    Ext._Internal.DeliverComponentEvents()
+  end
+
   local now = Ext.Utils.MonotonicTime() / 1000.0
   local delta = last_tick ~= nil and (now - last_tick) or 0.0
   last_tick = now
@@ -10156,9 +10235,19 @@ end
 local entity_subs = {}
 local next_sub = 1
 
+local COMPONENT_EVENT_KINDS = {
+  ["create"] = true, ["create-deferred"] = true,
+  ["destroy"] = true, ["destroy-deferred"] = true,
+}
+
 local function subscribe(kind, component, handler, entity, once)
   if type(handler) ~= "function" then
     error("Ext.Entity subscriptions expect a handler function", 3)
+  end
+  -- Under upstream's name, which is what events are delivered under.
+  if type(component) == "string" and COMPONENT_EVENT_KINDS[kind] then
+    component = Ext._Internal.ComponentShortName(component) or component
+    Ext._Internal.WatchComponentEvents(component)
   end
   local id = next_sub
   next_sub = next_sub + 1
@@ -10167,6 +10256,24 @@ local function subscribe(kind, component, handler, entity, once)
     Entity = entity, Once = once or false,
   }
   return id
+end
+
+-- Construct and destroy events the engine raised since the last tick.
+-- Upstream calls a non-deferred handler from inside the engine's own
+-- callback; bg3le delivers both kinds here, the immediate ones first, since
+-- its Lua states may only be entered from their own thread. A destroyed
+-- component can no longer be read by then, so its handler gets nil for it.
+function Ext._Internal.DeliverComponentEvents()
+  local events = Ext._Internal.TakeComponentEvents()
+  for _, e in ipairs(events) do
+    local entity = Ext._Internal.EntityValue(e[1])
+    if entity ~= nil then
+      local component = e[3] == "create" and entity[e[2]] or nil
+      Ext._Internal.FireEntityEvent(e[3], e[2], entity, component)
+      Ext._Internal.FireEntityEvent(e[3] .. "-deferred", e[2], entity,
+                                    e[3] == "create" and entity[e[2]] or nil)
+    end
+  end
 end
 
 Ext._Internal.SubscribeEntity = subscribe
