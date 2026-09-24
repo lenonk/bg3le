@@ -5805,91 +5805,255 @@ local function walkable(v)
 end
 Ext._Internal.Walkable = walkable
 
-local function encode(v, indent, depth, opts, seen, out)
-  local t = walkable(v) and "table" or type(v)
-  if v == nil then out[#out+1] = "null"
-  elseif t == "boolean" then out[#out+1] = tostring(v)
+-- Ext.Json.Stringify, ported from upstream's Lua/Libs/Json.inl.
+--
+-- A plain table is walked raw: an array when its keys are exactly 1..n,
+-- otherwise an object, its keys sorted when beautifying (strings, then
+-- integers, then floats). One of bg3le's proxies -- anything carrying a
+-- __pairs metamethod, which is what upstream's userdata objects are -- is
+-- walked through __pairs only with IterateUserdata, as upstream's are; a
+-- function, an entity or a proxy it may not walk becomes tostring() with
+-- StringifyInternalTypes and an error without.
+
+local function proxy_meta(v)
+  local meta = getmetatable(v)
+  if type(meta) == "table" and (meta.__pairs ~= nil or meta.__name ~= nil) then
+    return meta
+  end
+  return nil
+end
+
+-- What upstream's CheckForRecursion keys on: the object's pointer. A view
+-- is made fresh on each read here, so it names the engine object instead.
+local function identity(v, meta)
+  local id = meta and meta.__bg3leIdentity
+  if type(id) == "function" then return id(v) end
+  if id ~= nil then return id end
+  if type(v) == "userdata" then
+    local handle = Ext._Internal.EntityProxyHandle(v)
+    if handle ~= nil then return "e:" .. handle end
+  end
+  return v
+end
+
+local function json_number(v)
+  -- Floats print to full round-trip precision and keep a decimal point
+  -- even when whole, as the real extender's writer does: Weight is
+  -- 1.350000023841858 and ValueScale 1.0.
+  if math.type(v) == "integer" then return tostring(v) end
+  if v ~= v or v == math.huge or v == -math.huge then
+    error("Attempted to stringify a non-finite number", 0)
+  end
+  local text = string.format("%.17g", v)
+  for _, fmt in ipairs({"%.15g", "%.16g"}) do
+    local short = string.format(fmt, v)
+    if tonumber(short) == v then text = short break end
+  end
+  if not text:find("[.eE]") then text = text .. ".0" end
+  return text
+end
+
+local function is_linear_array(t)
+  local n = 0
+  for k in next, t do
+    if math.type(k) ~= "integer" or k < 1 then return false end
+    n = n + 1
+  end
+  for i = 1, n do
+    if rawget(t, i) == nil then return false end
+  end
+  return true
+end
+
+local stringify
+
+-- Emits a container: items is a list of { key text or nil, value }.
+local function emit(items, array, indent, depth, ctx, out)
+  local open, close = array and "[" or "{", array and "]" or "}"
+  if #items == 0 then
+    out[#out + 1] = open .. close
+    return
+  end
+  local pad = ctx.Beautify and (indent .. "    ") or ""
+  out[#out + 1] = open
+  for i, item in ipairs(items) do
+    if ctx.Beautify then out[#out + 1] = "\n" .. pad end
+    if not array then
+      out[#out + 1] = json_string(item[1]) .. (ctx.Beautify and ": " or ":")
+    end
+    stringify(item[2], pad, depth + 1, ctx, out)
+    if i < #items then out[#out + 1] = "," end
+  end
+  if ctx.Beautify then out[#out + 1] = "\n" .. indent end
+  out[#out + 1] = close
+end
+
+-- A key as upstream writes it; an object key -- an entity, say -- only
+-- from a proxy, and only with StringifyInternalTypes.
+local function key_text(k, ctx)
+  if type(k) == "string" then return k end
+  if type(k) == "number" then return tostring(k) end
+  if ctx ~= nil and ctx.StringifyInternalTypes and type(k) == "userdata" then
+    return tostring(k)
+  end
+  error("Can only stringify string or number table keys", 0)
+end
+
+local function stringify_table(t, indent, depth, ctx, out)
+  if ctx.AvoidRecursion then
+    if ctx.Seen[t] then out[#out + 1] = '"*RECURSION*"' return end
+    ctx.Seen[t] = true
+  end
+
+  local items = {}
+  if is_linear_array(t) then
+    for i = 1, #t do items[i] = {nil, rawget(t, i)} end
+    return emit(items, true, indent, depth, ctx, out)
+  end
+
+  for k, v in next, t do items[#items + 1] = {k, v} end
+  if ctx.Beautify then
+    local rank = function(k)
+      if type(k) == "string" then return 0 end
+      if math.type(k) == "integer" then return 1 end
+      return 2
+    end
+    table.sort(items, function(a, b)
+      local ra, rb = rank(a[1]), rank(b[1])
+      if ra ~= rb then return ra < rb end
+      if ra == 0 then return a[1] < b[1] end
+      return a[1] < b[1]
+    end)
+  end
+  for _, item in ipairs(items) do
+    local k = item[1]
+    if type(k) == "number" and math.type(k) == "float" and ctx.Beautify then
+      item[1] = string.format("%f", k)
+    else
+      item[1] = key_text(k)
+    end
+  end
+  emit(items, false, indent, depth, ctx, out)
+end
+
+local function internal_type(v, out, ctx)
+  if not ctx.StringifyInternalTypes then
+    error("Attempted to stringify unsupported type: "
+          .. Ext.Types.GetValueType(v), 0)
+  end
+  out[#out + 1] = json_string(tostring(v))
+end
+
+local function stringify_proxy(v, meta, indent, depth, ctx, out)
+  if ctx.IterateUserdata then
+    if ctx.LimitDepth ~= -1 and depth > ctx.LimitDepth then
+      out[#out + 1] = '"*DEPTH LIMIT EXCEEDED*"'
+      return
+    end
+    if ctx.AvoidRecursion then
+      local id = identity(v, meta)
+      if ctx.Seen[id] then out[#out + 1] = '"*RECURSION*"' return end
+      ctx.Seen[id] = true
+    end
+    if meta.__pairs ~= nil then
+      local container = meta.__bg3leContainer
+      local array = container == "array"
+      local items = {}
+      for k, val in pairs(v) do
+        if container ~= nil and ctx.LimitArrayElements ~= -1
+           and #items > ctx.LimitArrayElements then
+          break
+        end
+        items[#items + 1] = {not array and key_text(k, ctx) or nil, val}
+      end
+      -- An object's members come out in name order, as the reference
+      -- captures show upstream's do; an array or map keeps its own.
+      if container == nil and not meta.__bg3leOrdered then
+        table.sort(items, function(a, b) return a[1] < b[1] end)
+      end
+      return emit(items, array, indent, depth, ctx, out)
+    end
+  end
+  internal_type(v, out, ctx)
+end
+
+stringify = function(v, indent, depth, ctx, out)
+  if depth > ctx.MaxDepth then
+    error("Recursion depth exceeded while stringifying JSON", 0)
+  end
+
+  local t = type(v)
+  if v == nil then
+    out[#out + 1] = "null"
+  elseif t == "boolean" then
+    out[#out + 1] = tostring(v)
   elseif t == "number" then
-    -- Floats print to full round-trip precision, and keep a decimal point
-    -- even when whole, because that is what the real extender emits:
-    -- Weight is 1.350000023841858 there and ValueScale is 1.0, where %.14g
-    -- gave 1.3500000238419 and 1. A float and an integer are different
-    -- types in Lua and the output should not blur them.
-    if math.type(v) == "integer" then
-      out[#out+1] = tostring(v)
-    else
-      local text = string.format("%.17g", v)
-      -- %.17g is round-trip exact but verbose; prefer the shortest form
-      -- that still reads back identically.
-      for _, fmt in ipairs({"%.15g", "%.16g"}) do
-        local short = string.format(fmt, v)
-        if tonumber(short) == v then text = short break end
-      end
-      if not text:find("[.eE]") then text = text .. ".0" end
-      out[#out+1] = text
-    end
+    out[#out + 1] = json_number(v)
   elseif t == "string" then
-    out[#out+1] = json_string(v)
-  elseif t ~= "table" then
-    out[#out+1] = string.format("%q", tostring(v))
-  else
-    if seen[v] then out[#out+1] = "\"<recursion>\"" return end
-    if opts.LimitDepth and depth > opts.LimitDepth then
-      out[#out+1] = "\"<...>\"" return
-    end
-    seen[v] = true
-
-    -- Walked once, keeping the values, rather than collecting keys and
-    -- indexing them back. On a component view every index is a read from the
-    -- game, so re-indexing would double the work -- and it would bypass the
-    -- view's __pairs, which is what turns a field of an unconvertible kind
-    -- into a marker rather than an error.
-    local items = {}
-    local n = 0
-    local array = true
-    for k, val in pairs(v) do
-      n = n + 1
-      items[n] = {k = k, v = val}
-      if type(k) ~= "number" then array = false end
-    end
-    array = array and n == #v
-
-    local pad = indent .. "    "
-    if n == 0 then
-      out[#out+1] = array and "[]" or "{}"
-    elseif array then
-      table.sort(items, function(a, b) return a.k < b.k end)
-      out[#out+1] = "[\n"
-      for i = 1, n do
-        out[#out+1] = pad
-        encode(items[i].v, pad, depth + 1, opts, seen, out)
-        out[#out+1] = (i < n) and ",\n" or "\n"
+    out[#out + 1] = json_string(v)
+  elseif t == "table" or t == "userdata" then
+    local meta = proxy_meta(v)
+    if t == "table" and (meta == nil or meta.__pairs == nil) then
+      if ctx.LimitDepth ~= -1 and depth > ctx.LimitDepth then
+        out[#out + 1] = '"*DEPTH LIMIT EXCEEDED*"'
+      else
+        stringify_table(v, indent, depth, ctx, out)
       end
-      out[#out+1] = indent .. "]"
+    elseif meta ~= nil then
+      stringify_proxy(v, meta, indent, depth, ctx, out)
     else
-      table.sort(items, function(a, b) return tostring(a.k) < tostring(b.k) end)
-      out[#out+1] = "{\n"
-      for i = 1, n do
-        out[#out+1] = pad .. string.format("%q", tostring(items[i].k)) .. ": "
-        encode(items[i].v, pad, depth + 1, opts, seen, out)
-        out[#out+1] = (i < n) and ",\n" or "\n"
-      end
-      out[#out+1] = indent .. "}"
+      internal_type(v, out, ctx)
     end
-    seen[v] = nil
+  else
+    internal_type(v, out, ctx)
   end
 end
 
-function Ext.Json.Stringify(v, opts)
+-- Json.Stringify(value[, options]) or the older
+-- Json.Stringify(value, beautify[, stringifyInternalTypes[, iterateUserdata]]).
+function Ext.Json.Stringify(...)
+  local nargs = select("#", ...)
+  if nargs < 1 then error("Stringify expects at least one parameter.", 2) end
+  if nargs > 4 then error("Stringify expects at most three parameters.", 2) end
+  local v, opts, internal, iterate = ...
+
+  local ctx = {
+    Beautify = true, StringifyInternalTypes = false, IterateUserdata = false,
+    AvoidRecursion = false, MaxDepth = 64, LimitDepth = -1,
+    LimitArrayElements = -1, Seen = {},
+  }
+  if type(opts) == "table" then
+    for _, k in ipairs({"Beautify", "StringifyInternalTypes", "IterateUserdata",
+                        "AvoidRecursion"}) do
+      if opts[k] ~= nil then ctx[k] = opts[k] == true end
+    end
+    for _, k in ipairs({"MaxDepth", "LimitDepth", "LimitArrayElements"}) do
+      if type(opts[k]) == "number" then ctx[k] = math.floor(opts[k]) end
+    end
+    if ctx.MaxDepth > 64 then ctx.MaxDepth = 64 end
+  elseif nargs >= 2 then
+    ctx.Beautify = opts == true
+    if nargs >= 3 then ctx.StringifyInternalTypes = internal == true end
+    if nargs >= 4 then ctx.IterateUserdata = iterate == true end
+  end
+
   local out = {}
-  encode(v, "", 1, opts or {}, {}, out)
+  local ok, err = pcall(stringify, v, "", 0, ctx, out)
+  if not ok then error(err, 2) end
   return table.concat(out)
 end
 
-function Ext.DumpExport(v) return Ext.Json.Stringify(v, {Beautify = true}) end
+-- Upstream's BuiltinLibrary.lua.
+function Ext.DumpExport(v)
+  return Ext.Json.Stringify(v, {Beautify = true, StringifyInternalTypes = true,
+                                IterateUserdata = true, AvoidRecursion = true})
+end
 function Ext.Dump(v) Ext.Log.Print(Ext.DumpExport(v)) end
 function Ext.DumpShallow(v)
-  Ext.Log.Print(Ext.Json.Stringify(v, {Beautify = true, LimitDepth = 1}))
+  Ext.Log.Print(Ext.Json.Stringify(v, {
+    Beautify = true, StringifyInternalTypes = true, IterateUserdata = true,
+    AvoidRecursion = true, LimitDepth = 1, LimitArrayElements = 3,
+  }))
 end
 
 -- Modules needing engine reflection are stubbed so a mod gets a specific
@@ -6736,7 +6900,7 @@ local function value_type(object, base)
   local t = type(object)
   if t == "userdata" and Ext._Internal.EntityProxyHandle(object) ~= nil then
     return "Entity"
-  elseif t == "table" then
+  elseif t == "table" or t == "userdata" then
     local meta = getmetatable(object)
     if type(meta) == "table" and type(meta.__name) == "string"
        and meta.__name ~= "EntityProxy" then
@@ -8259,6 +8423,10 @@ make_array = function(handle, comp, path)
   end
 
   return Ext._Internal.NewObjectProxy({
+    __bg3leContainer = "array",
+    __bg3leIdentity = function()
+      return "c:" .. handle .. ":" .. comp .. ":" .. path
+    end,
     -- Out of range is nil, as upstream's ArrayProxy answers, which is also
     -- what stops ipairs.
     __index = function(_, i)
@@ -8326,6 +8494,10 @@ make_map = function(handle, comp, path)
   end
 
   return Ext._Internal.NewObjectProxy({
+    __bg3leContainer = "map",
+    __bg3leIdentity = function()
+      return "c:" .. handle .. ":" .. comp .. ":" .. path
+    end,
     __index = function(_, key)
       -- A method rather than a field, so a map whose keys cannot be converted
       -- is still walkable.
@@ -8419,6 +8591,9 @@ make_fields = function(handle, comp, prefix, fields)
     -- What Ext.Types.GetObjectType reports, and what a custom member is
     -- registered against.
     __name = type_of_view(comp, prefix),
+    __bg3leIdentity = function()
+      return "c:" .. handle .. ":" .. comp .. ":" .. prefix
+    end,
     __index = function(self, key)
       local kind = fields[key]
       if kind == nil then
@@ -9525,27 +9700,36 @@ stat_proxy.__pairs = function(self)
   local addr = rawget(self, "__addr")
   local cache = rawget(self, "__cache")
 
-  local n = Ext._Internal.StatsAttrCount(addr)
-  for i = 0, n - 1 do
-    local attr, value = read_attribute(addr, i)
-    if attr ~= nil and cache[attr] == nil then
-      cache[attr] = value == nil and STAT_NIL or value
-    end
-  end
+  -- Upstream's order: the object's own members and methods by name, then
+  -- the attributes in the modifier list's order.
+  local keys, listed = {}, {}
   for key in pairs(STAT_EXTRAS) do
     if cache[key] == nil then
       local value = STAT_EXTRAS[key](self)
       cache[key] = value == nil and STAT_NIL or value
     end
+    if not (STAT_DIAGNOSTICS[key] and cache[key] == STAT_NIL) then
+      keys[#keys + 1] = key
+    end
+    listed[key] = true
   end
-  local keys = {}
-  for k in pairs(cache) do
-    if not (STAT_DIAGNOSTICS[k] and cache[k] == STAT_NIL) then
-      keys[#keys + 1] = k
+  for k in pairs(STAT_METHODS) do
+    keys[#keys + 1] = k
+    listed[k] = true
+  end
+  table.sort(keys)
+
+  local n = Ext._Internal.StatsAttrCount(addr)
+  for i = 0, n - 1 do
+    local attr, value = read_attribute(addr, i)
+    if attr ~= nil and not listed[attr] then
+      if cache[attr] == nil then
+        cache[attr] = value == nil and STAT_NIL or value
+      end
+      keys[#keys + 1] = attr
+      listed[attr] = true
     end
   end
-  for k in pairs(STAT_METHODS) do keys[#keys + 1] = k end
-  table.sort(keys)
 
   local i = 0
   return function()
@@ -9561,6 +9745,12 @@ stat_proxy.__pairs = function(self)
 end
 
 stat_proxy.__name = "Stat"
+-- Its __pairs order is upstream's, so a dump keeps it.
+stat_proxy.__bg3leOrdered = true
+
+stat_proxy.__bg3leIdentity = function(self)
+  return "s:" .. tostring(rawget(self, "__addr"))
+end
 
 local function make_stat(name, addr)
   return setmetatable({__name = name, __addr = addr, __cache = {}},
@@ -9640,8 +9830,9 @@ local read_object
 -- A snapshot array or map, as a userdata over the values read, as
 -- upstream's are userdata. source is where a set came from, for
 -- Ext.Types.Unserialize to write it back.
-local function snapshot_container(items, source)
+local function snapshot_container(items, source, container)
   return Ext._Internal.NewObjectProxy({
+    __bg3leContainer = container,
     __index = items,
     __newindex = function(_, k, v) items[k] = v end,
     __len = function() return #items end,
@@ -9682,7 +9873,8 @@ local function read_object_path(addr, class, path, kind)
     -- rather than filling in a copy nothing reads. A hash set -- a spell
     -- list, say -- is the case that matters: it reads as an array of its
     -- keys and can only be written whole.
-    return snapshot_container(items, {addr = addr, class = class, path = path})
+    return snapshot_container(items, {addr = addr, class = class, path = path},
+                              "array")
   end
 
   -- Keyed by the map's own keys; an unreadable key gets make_map's
@@ -9703,7 +9895,7 @@ local function read_object_path(addr, class, path, kind)
       items[k] = read_object_path(addr, class, element,
                                   Ext._Internal.ObjectFieldInfo(class, element))
     end
-    return snapshot_container(items)
+    return snapshot_container(items, nil, "map")
   end
 
   local value, err = Ext._Internal.ObjectGetField(addr, class, path)
@@ -9744,6 +9936,7 @@ function read_object(addr, class, prefix, out)
   local viewType = Ext._Internal.ViewTypeName(class, prefix)
 
   return Ext._Internal.NewObjectProxy({
+    __bg3leIdentity = function() return "o:" .. addr .. ":" .. prefix end,
     __name = viewType,
     __index = function(self, key)
       local held = values[key]
