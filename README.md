@@ -287,14 +287,16 @@ component's declared size with the size the engine recorded, and
   fields are writable.
   [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
   the three theories that were tested and eliminated
-- **The parameters of a pooled stats expression.** Functors, conditions and
-  requirements themselves are decoded: a status' `Damage` functor reads back
-  with its `DamageType`, `FunctorUuid`, flags and contexts, and matches the
-  real extender's capture. What does not is
-  `StatsExpressionPooled.Params` — upstream decodes `1d4` into
-  `["Roll", {AmountOfDices = 1, DiceValue = "D4", …}]` and bg3le returns the
-  `Code` and an empty array. The elements are `std::variant`s, which is the
-  kind the field machinery reaches last. See
+- **Two of a long stats expression's parameters.**
+  `StatsExpressionPooled.Params` decodes now — `"Placeholder0"` reads as
+  `["Placeholder", 0]`, matching the real extender's capture, and a
+  52-character expression reads as its token stream in prefix order. The
+  elements are `std::variant`s, and the standard library does not lay one out
+  the way the engine does: this libc++ makes `Param` 40 bytes where the
+  engine makes it 32, so the metadata describes the engine's layout instead,
+  measured from its own memory. Thirteen of that expression's fifteen
+  parameters decode; the two that do not are nested variants one level down.
+  How the layout was measured is in
   [reference/REFERENCE-DIFFS.md](reference/REFERENCE-DIFFS.md)
 - **The last 4% of the field kinds.** 3,426 of 3,558 fields convert
   (96.3%, from `tools/meta-check.c`; `std::optional` became writable as well
