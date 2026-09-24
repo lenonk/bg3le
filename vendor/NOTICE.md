@@ -302,12 +302,12 @@ under python3, and with protoc:
     protoc --cpp_out=. Osiris/Debugger/osidebug.proto
     protoc --cpp_out=. Lua/Debugger/LuaDebug.proto
 
-### Three changes of behaviour, not of syntax
+### Four changes of behaviour, not of syntax
 
 Everything above is a clang or ABI fix: the code still does what upstream
-wrote. These three do something different, because on Linux the thing
+wrote. These four do something different, because on Linux the thing
 upstream relies on is not reachable. `tools/check-vendor-patches.py` checks
-all three, since re-copying a file from upstream reverts them silently.
+all four, since re-copying a file from upstream reverts them silently.
 
 **`GameDefinitions/GameHelpers.cpp` — `MakeFileReader` reads the archives.**
 Upstream opens a data file through `ls::FileReader`'s constructor, and no
@@ -338,6 +338,14 @@ no methods on it. So `LuaDelegate` holds an id into bg3le's own table and
 `Call` posts the arguments to a queue drained on the thread that owns the
 context which registered the callback — `src/vendor/imgui_events.cpp`. A
 widget fires on the render thread, which must not touch a Lua state.
+
+**`Lua/LuaBinding.cpp` — `nse_lua_report_handled_error` returns while
+there is no `gExtender`.** The Lua fork calls it on every error raised under
+`xpcall`, and upstream reads `gExtender->GetLuaDebugger()` unconditionally.
+Upstream creates the extender before any Lua runs; bg3le creates it when the
+overlay starts, which is after the engine heap is up and never when running
+headless. Until then `xpcall(f, debug.traceback)` around any error killed
+the game.
 
 ## vendor/compat — bg3le's own code
 

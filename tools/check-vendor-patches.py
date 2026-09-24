@@ -127,6 +127,9 @@ CHECKS = [
     ("LuaDelegate posts to bg3le's callback queue",
      lambda: "bg3le::delegate_post"
              in text("BG3Extender/Lua/Shared/LuaDelegate.h")),
+    ("handled-error hook tolerates a missing gExtender",
+     lambda: "if (!bg3se::gExtender) return;"
+             in text("BG3Extender/Lua/LuaBinding.cpp")),
 ]
 
 

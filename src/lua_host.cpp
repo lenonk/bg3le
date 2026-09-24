@@ -10039,37 +10039,3 @@ void lua_run(const char* code) {
 
 }  // namespace bg3le
 
-
-// Norbyte's Lua fork calls this from luaG_errormsg whenever an error is raised
-// while an error handler is installed, so a debugger can see errors that pcall
-// would otherwise swallow. The host has to supply it or the fork does not link.
-//
-// Weak, because bg3se's Lua/LuaBinding.cpp defines it too: once
-// vendor/bg3se is linked in, its strong definition takes precedence and this
-// one falls away.
-//
-// It fires for every handled error, including the deliberate ones in our timer
-// and mod-loading paths, so this goes to the log rather than the console.
-//
-// Called from luaG_errormsg while an error is being raised and an error
-// handler is installed -- which is to say from inside xpcall, and from
-// nowhere else. That made it effectively dead code here until something
-// used xpcall, and then it segfaulted on the first mod error: this ran
-// with the interpreter mid-throw and read the stack as though it were in
-// a normal call.
-//
-// So it touches as little as possible. No conversion, which can run a
-// metamethod or allocate and raise again; no assumption that there is
-// anything on the stack at all, which is not true for a stack-overflow or
-// memory error.
-__attribute__((weak))
-void nse_lua_report_handled_error(lua_State* L) {
-    if (L == nullptr || lua_gettop(L) < 1) return;
-    if (lua_type(L, -1) != LUA_TSTRING) return;
-
-    std::size_t length = 0;
-    const char* err = lua_tolstring(L, -1, &length);
-    if (err == nullptr || length == 0) return;
-
-    bg3le::logf("lua: handled error: %.*s", (int)length, err);
-}

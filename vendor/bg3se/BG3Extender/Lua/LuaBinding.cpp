@@ -24,6 +24,9 @@
 //
 void nse_lua_report_handled_error(lua_State* L)
 {
+    // bg3le: gExtender is created lazily, and an xpcall can raise before it is.
+    if (!bg3se::gExtender) return;
+
     char const* err = "(Unknown)";
     if (lua_type(L, -1) == LUA_TSTRING) {
         err = lua_tostring(L, -1);
