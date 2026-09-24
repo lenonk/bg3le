@@ -169,26 +169,61 @@ So the earlier reading was wrong on both counts: the header is right, the
 buffer pointer is right, and the pooled expression bg3le resolved is the
 right one. `"ONE_AURA"` at +36 is the next object's `Code`, not a stray.
 
-### Where it actually stands
+### Solved: the engine's `Param` is 32 bytes with the discriminant at +24
 
-The buffer is a genuine two-element `Param[]`, and it does not contain
-`"Placeholder"`. The one real lead in it is symmetry at a 64-byte stride:
+`"Placeholder0"` was a bad subject — its parameters are a word and a zero,
+identifiable in nothing. `Target_HeartStopper`'s `SpellSuccess` damage has a
+52-character code, `"Placeholder0+max(DexterityModifier,StrengthModifier)"`,
+and fifteen parameters. Its object reads:
 
-    +  0  07 3f 0b 44 b5 05 00 00     -> 0x5b5440b3f07
-    + 64  00 3c 0b 44 b5 05 00 00     -> 0x5b5440b3c00
+      +  0  00 22 58 8f b5 05 00 00  0f 00 00 00 0f 00 00 00
+      + 16  00 ea 0b 44 b5 05 00 00  34 00 00 00 38 00 00 80
+      + 32  0e 00 00 00 ...
 
-two pointer-shaped values into the same pool, 64 bytes apart, with the byte
-at `+56` reading `07` and the one at `+120` reading `04` — in range for a
-nine-alternative discriminant sitting after a 56-byte union. That would make
-`sizeof(Param)` 64 against the 40 bg3le compiles.
+`Params` holds 15, and `Code` is a *heap* string this time: a pointer, size
+`0x34` = 52 — the code's exact length — and a capacity with the top bit set,
+which is the heap flag. Two independent confirmations of the same offsets.
 
-It does not fit upstream's answer, though. `["Placeholder", 0]` is
-alternative 1 then alternative 7, and the tokens are derived from the code
-itself, so any expression whose `Code` is `"Placeholder0"` must have those
-two parameters. Something between the buffer and that answer is still
-unaccounted for, and the 64-byte reading is a lead rather than a conclusion.
+The buffer is where the answer was. It looks like garbage — fragments of stat
+file text, `"MINDWEAVER_FR"`, `"data \"DisplayName\""`, `"ealDamage(5d8,Cold)"`
+— because the pool handed out memory that had held a stats file and a
+`Param` only writes the bytes it uses. What is regular is *where* the writes
+land:
 
-The next thing to try is the other direction: an expression whose `Code` is
-long and distinctive, so its parameters are identifiable in the bytes on
-sight. `"Placeholder0"` was a poor choice of subject precisely because its
-parameters are a word and a zero.
+    small values at +0, +24, +32, +56, +64, +88, +96, +120, +128, +152, ...
+
+which is +0 and +24 of every 32 bytes. So **`sizeof(Param)` is 32, the
+payload is at +0 and the discriminant is one byte at +24.** Reading it that
+way gives, for the fifteen elements, discriminants
+`0 0 7 0 7 0 2 1 3 6 …` — every one inside a nine-alternative variant's
+range.
+
+And it decodes `"Placeholder0"` to upstream's answer exactly:
+
+    element 0   payload 7   discriminant 0 -> StatsExpressionType[7]
+    element 1   payload 0   discriminant 7 -> int32_t
+
+`StatsExpressionType` label 7 is `"Placeholder"`, so that reads
+`["Placeholder", 0]`, which is what the captured reference says. The
+parameters are the code's tokens in prefix order, which is also why the
+52-character code produces `Add, Placeholder, 0, Max, 2, Variable, …`.
+
+### What is left, and it is not a mystery
+
+bg3le compiles `sizeof(Param)` as **40**, not 32. Every alternative is small
+enough for 32 — `RollDefinition` 12, `ResourceRollDefinition` 24,
+`Variant2` 24, `StatusGroup` 8, the enums 1, `int32_t` 4, `bool` 1 — and
+`Variant2` is 24 here, matching the engine. But even
+`std::variant<StatsExpressionType, Variant2>` measures 40 under this libc++,
+so the eight extra bytes come from the standard library's own nesting rather
+than from anything bg3se declared. `StatsExpressionPooled` itself is 40 and
+matches the engine, so this is the one type in the chain where the compiler
+and the engine disagree.
+
+Which means the fix does not depend on winning that argument. The engine's
+layout is measured and confirmed twice over, so the field metadata should
+describe the engine's `Param` — stride 32, discriminant at +24 — rather than
+what this compiler happens to produce, the same principle that gave
+`STDString` this build's sixteen-byte layout instead of `std::string`'s.
+`variant_index_thunk` reads through `index()` on bg3le's own type and cannot
+be used for this one; it needs the measured offsets.
