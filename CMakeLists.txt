@@ -301,6 +301,7 @@ add_library(bg3le SHARED
     src/log.cpp
     src/mem.cpp
     src/lua_host.cpp
+    src/savegame.cpp
     src/osi.cpp
     src/debug_server.cpp
     src/hook.cpp

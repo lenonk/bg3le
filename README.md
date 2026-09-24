@@ -273,9 +273,13 @@ component's declared size with the size the engine recorded, and
   work every frame, and the default is to leave the engine's rendering
   exactly as it was. See
   [reference/IMGUI-ASSESSMENT.md](reference/IMGUI-ASSESSMENT.md)
-- **A line on the main menu**, as upstream has: the localisation string is
-  patched from the game's own heap the moment it appears, before the
-  interface resolves it into its own copy
+- **`PersistentVars` in the savegame**, as upstream writes them: a
+  `ScriptExtenderSave` region (save version 12) with a `LuaVariables` node
+  per mod, visited through the save's own LSF visitor by pre-hooking the
+  engine's `OsirisVariableHelper::SavegameVisit`. A save loaded at launch is
+  read before any mod exists, so the values are held and restored after the
+  bootstraps and before `SessionLoaded`, which is upstream's order. The saves
+  read and write in bg3se's format, deprecation warnings included
 - `Ext.Entity` against the live ECS: `Ext.Entity.Get(uuid)`, component reads
   and writes, and `entity:Replicate(name)` that reaches the client. The engine
   names every ECS type index in its symbol table, so the component and
@@ -463,9 +467,20 @@ component's declared size with the size the engine recorded, and
   so `src/vendor/noesis_rtti_linux.cpp` aliases 19 of them to one real
   placeholder type. That is safe only while no Noesis `dynamic_cast` runs. The
   real fix is keeping Noesis types out of the generated property maps
-- **`PersistentVars`, and saving `Ext.Vars` and persistent timers.** In
-  progress: upstream writes them into its own region of the save through
-  the engine's Osiris-variable save visitor, which has no symbol here.
+- **Saving `Ext.Vars` and persistent timers.** They go in the same save
+  region as `PersistentVars`, which is in place; their nodes are not written
+  yet.
+- **Client mods before the main menu.** Upstream loads the client state when
+  the game leaves `LoadModule`, before the menu is built; bg3le loads mods
+  once a story is up. Mod Configuration Menu notices: its menu button keeps
+  the "load order is likely being reset" text it uses to detect a missing
+  script extender. In progress.
+- **`Ext.Loca.UpdateTranslatedString` reaching the engine, and the menu
+  line.** Upstream writes into `ls::TranslatedStringRepository`; bg3le's
+  writes go to its own index, so the interface never sees them. The menu
+  line is patched into the string's memory instead, and with a large mod set
+  that loses the race against the menu copying it. Both move to the
+  repository. In progress.
 - **Osiris user queries (`QRY_*`).** Not callable yet: upstream evaluates
   them through the Rete node's `IsValid` with an identity adapter, and
   neither is located in this build.

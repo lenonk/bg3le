@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "elf_symbols.h"
@@ -41,5 +42,14 @@ void lua_eval_in(bool client, const char* code, std::string* result,
 bool lua_has_client();
 
 void lua_eval(const char* code, std::string* result, std::string* error);
+
+// Hands the PersistentVars of a save just read to the mods, if they are up;
+// otherwise LoadMods does it after the bootstraps.
+void lua_restore_persistent_vars();
+
+// (mod UUID, JSON) for every mod whose PersistentVars a save should carry.
+// False if the server context could not be asked.
+bool lua_persistent_vars_to_save(
+    std::vector<std::pair<std::string, std::string>>* out);
 
 }  // namespace bg3le

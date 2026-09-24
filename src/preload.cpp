@@ -29,6 +29,7 @@
 #include "ecs_world.h"
 #include "elf_symbols.h"
 #include "hook.h"
+#include "savegame.h"
 #include "debug_server.h"
 #include "lua_host.h"
 #include "osi.h"
@@ -1374,6 +1375,9 @@ __attribute__((constructor)) static void bg3le_init() {
     cleanup_sanity_check();
     // Before main and the fork, so load caches see it.
     bg3le::ensure_achievement_gate_patch();
+
+    // Before the launch's save is read, so its PersistentVars are seen.
+    bg3le::install_savegame_hook();
 
     // Before the game creates its Vulkan instance, which is what the
     // overlay's first hook is on. Does nothing unless BG3LE_IMGUI=1.

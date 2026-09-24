@@ -56,6 +56,9 @@ bool patch_bytes(std::uintptr_t offset, const unsigned char* expected,
 // Compares len bytes at offset against expected, without writing.
 bool bytes_match(std::uintptr_t offset, const unsigned char* expected, std::size_t len);
 
+// Where the executable was loaded; add it to a link-time address.
+std::uintptr_t load_bias();
+
 // True when the range lies inside the main object's .text.
 bool in_text(std::uintptr_t offset, std::size_t len);
 

@@ -22,6 +22,9 @@ void statusf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // Called from Osiris entry points, which run on the story thread.
 void debug_server_note_story_thread();
 
+// Whether the caller is that thread. False until it has been recorded.
+bool debug_server_on_story_thread();
+
 // Cheap poll from a hot interposed libc call: pumps only when work is
 // pending and we are on the story thread. Designed to cost ~nothing
 // otherwise, since it runs on every clock_gettime.

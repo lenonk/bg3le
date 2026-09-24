@@ -19,6 +19,7 @@
 #include "ecs_types.h"
 #include "ecs_world.h"
 #include "mem.h"
+#include "savegame.h"
 #include "log.h"
 #include "vendor/ls_string.h"
 #include "vendor/mods.h"
@@ -53,6 +54,32 @@ int l_is_client_state(lua_State* L) {
     lua_pushboolean(L, in_client_state() ? 1 : 0);
     return 1;
 }
+// Ext._Internal.SavedPersistentVars() -- {modId = json} from the last save
+// read. TakeSavedPersistentVars() is the same once per read, else nil.
+void push_saved_vars(lua_State* L,
+                     std::vector<std::pair<std::string, std::string>> const& vars) {
+    lua_createtable(L, 0, static_cast<int>(vars.size()));
+    for (auto const& [mod, json] : vars) {
+        lua_pushlstring(L, json.data(), json.size());
+        lua_setfield(L, -2, mod.c_str());
+    }
+}
+
+int l_saved_persistent_vars(lua_State* L) {
+    push_saved_vars(L, saved_persistent_vars());
+    return 1;
+}
+
+int l_take_saved_persistent_vars(lua_State* L) {
+    std::vector<std::pair<std::string, std::string>> vars;
+    if (!take_saved_persistent_vars(&vars)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    push_saved_vars(L, vars);
+    return 1;
+}
+
 const SymbolTable* g_symbols = nullptr;
 
 // Bound functions must outlive the closures that reference them, and the
@@ -5291,6 +5318,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ListDir");
     lua_pushcfunction(g_lua, l_extender_root);
     lua_setfield(g_lua, -2, "ExtenderRoot");
+    lua_pushcfunction(g_lua, l_saved_persistent_vars);
+    lua_setfield(g_lua, -2, "SavedPersistentVars");
+    lua_pushcfunction(g_lua, l_take_saved_persistent_vars);
+    lua_setfield(g_lua, -2, "TakeSavedPersistentVars");
     lua_pushcfunction(g_lua, l_component_index);
     lua_setfield(g_lua, -2, "ComponentIndex");
     lua_pushcfunction(g_lua, l_ecs_counts);
@@ -10134,6 +10165,11 @@ function Ext.Entity.UuidToHandle(uuid) return Ext._Internal.UuidToHandle(uuid) e
 -- development convenience and never appear in modsettings.lsx at all.
 local loaded = {}
 
+-- Config.json of every mod seen, by module UUID: upstream's GetConfigs(),
+-- which PersistentVars are keyed by.
+local mod_configs = {}
+local mods_loaded = false
+
 local function read_file(path)
   local f = io.open(path, "rb")
   if not f then return nil end
@@ -10352,6 +10388,10 @@ local function load_mod_from(name, uuid, read, report)
       "bg3le: %s has no ModTable in Config.json; skipping", name))
     return
   end
+  if uuid ~= nil then
+    mod_configs[uuid] = {ModTable = table_name,
+                         MinimumVersion = mod_required_version(config) or 0}
+  end
   if loaded[table_name] then return end
 
   -- Each context runs its own bootstrap, as upstream does: the server
@@ -10552,6 +10592,87 @@ local function load_positions(modules)
   return positions
 end
 
+-- ---- PersistentVars ----
+--
+-- Upstream's BuiltinLibraryServer.lua and ExtensionState's bookkeeping. The
+-- savegame half is src/savegame.cpp.
+function Ext._Internal._GetModPersistentVars(modTable)
+  local tab = Mods[modTable]
+  if tab ~= nil then
+    local persistent = tab.PersistentVars
+    if persistent ~= nil then
+      return Ext.Json.Stringify(persistent)
+    end
+  end
+end
+
+function Ext._Internal._RestoreModPersistentVars(modTable, vars)
+  local tab = Mods[modTable]
+  if tab ~= nil then
+    tab.PersistentVars = Ext.Json.Parse(vars)
+  end
+end
+
+-- ExtensionState::RestoreModPersistentVars, for each mod in the save.
+function Ext._Internal.RestorePersistentVars()
+  if not mods_loaded or Ext.IsClient() then return end
+  local saved = Ext._Internal.TakeSavedPersistentVars()
+  if saved == nil then return end
+
+  for mod, vars in pairs(saved) do
+    local config = mod_configs[mod]
+    if config ~= nil then
+      Ext._Internal._RestoreModPersistentVars(config.ModTable, vars)
+      if #vars > 3 then
+        Ext.Log.PrintWarning(string.format("Mod %s: PersistentVars is "
+          .. "deprecated; consider using ModVars/UserVars instead", mod))
+      end
+    else
+      Ext.Log.PrintWarning(string.format("Savegame has persistent variables "
+        .. "for mod %s, but it is not loaded or has no ModTable! Variables "
+        .. "may be lost on next save!", mod))
+    end
+  end
+end
+
+-- GetPersistentVarMods and GetModPersistentVars: {{modId, json}, ...}.
+function Ext._Internal.CollectPersistentVars()
+  local cached = Ext._Internal.SavedPersistentVars()
+  local mods = {}
+  for mod in pairs(cached) do mods[mod] = true end
+  for mod, config in pairs(mod_configs) do
+    if config.MinimumVersion >= 4 then mods[mod] = true end
+  end
+
+  local out = {}
+  for mod in pairs(mods) do
+    local config = mod_configs[mod]
+    local vars
+    if config ~= nil then
+      local ok, result = pcall(Ext._Internal._GetModPersistentVars,
+                               config.ModTable)
+      if ok then
+        vars = result
+      else
+        Ext.Log.PrintError(tostring(result))
+      end
+    end
+    if vars == nil and cached[mod] ~= nil then
+      Ext.Log.PrintError(string.format("Persistent variables for mod %s could "
+        .. "not be retrieved, saving cached values!", mod))
+      vars = cached[mod]
+    end
+    if vars ~= nil then
+      if #vars > 3 then
+        Ext.Log.PrintWarning(string.format("Mod %s: PersistentVars is "
+          .. "deprecated; consider using ModVars/UserVars instead", mod))
+      end
+      out[#out + 1] = {mod, vars}
+    end
+  end
+  return out
+end
+
 function Ext._Internal.LoadMods()
   Ext._Internal.FireEvent("SessionLoading")
 
@@ -10633,6 +10754,11 @@ function Ext._Internal.LoadMods()
   for _, module in ipairs(packed) do
     load_mod_from(module.Name, module.Uuid, readers[module.Name], nil)
   end
+
+  -- A save read before the mods existed restores into them now: after the
+  -- bootstraps set their defaults, before SessionLoaded, as upstream's order.
+  mods_loaded = true
+  Ext._Internal.RestorePersistentVars()
 
   -- After every mod's bootstrap, as upstream does: a mod subscribes in
   -- its bootstrap and expects to be called once everything is up.
@@ -11452,6 +11578,45 @@ void lua_reset() {
 
     g_reset_events_pending = true;
     logf("lua: reset -- both contexts rebuilt and every mod reloaded");
+}
+
+void lua_restore_persistent_vars() {
+    if (g_server_lua == nullptr) return;
+    InContext server(g_server_lua);
+    call_internal("RestorePersistentVars");
+}
+
+bool lua_persistent_vars_to_save(
+    std::vector<std::pair<std::string, std::string>>* out) {
+    if (g_server_lua == nullptr) return false;
+    InContext server(g_server_lua);
+    lua_State* L = g_lua;
+    const int top = lua_gettop(L);
+    lua_getglobal(L, "Ext");
+    if (lua_istable(L, -1)) lua_getfield(L, -1, "_Internal");
+    if (lua_istable(L, -1)) lua_getfield(L, -1, "CollectPersistentVars");
+    if (!lua_isfunction(L, -1)) {
+        lua_settop(L, top);
+        return false;
+    }
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK || !lua_istable(L, -1)) {
+        logf("lua: Ext._Internal.CollectPersistentVars failed: %s",
+             lua_isstring(L, -1) ? lua_tostring(L, -1) : "no table");
+        lua_settop(L, top);
+        return false;
+    }
+    const lua_Integer n = luaL_len(L, -1);
+    for (lua_Integer i = 1; i <= n; ++i) {
+        lua_geti(L, -1, i);
+        lua_geti(L, -1, 1);
+        lua_geti(L, -2, 2);
+        if (lua_isstring(L, -2) && lua_isstring(L, -1)) {
+            out->emplace_back(lua_tostring(L, -2), lua_tostring(L, -1));
+        }
+        lua_pop(L, 3);
+    }
+    lua_settop(L, top);
+    return true;
 }
 
 void lua_tick() {

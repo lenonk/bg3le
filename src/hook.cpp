@@ -41,11 +41,6 @@ bool find_text(Elf64_Addr* addr, std::size_t* size) {
     return ctx.size > 0;
 }
 
-std::uintptr_t load_bias() {
-    std::uintptr_t bias = 0;
-    ::dl_iterate_phdr(main_object, &bias);
-    return bias;
-}
 
 // A 12-byte absolute jump, placed near the executable's text so a rel32 call
 // can reach it: movabs rax, target; jmp rax.
@@ -82,6 +77,12 @@ void* make_trampoline(std::uintptr_t anchor, void* target) {
 }
 
 }  // namespace
+
+std::uintptr_t load_bias() {
+    std::uintptr_t bias = 0;
+    ::dl_iterate_phdr(main_object, &bias);
+    return bias;
+}
 
 std::size_t hook_call_sites(std::uintptr_t func_offset, void* replacement,
                             void** original) {

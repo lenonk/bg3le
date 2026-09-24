@@ -329,6 +329,11 @@ void debug_server_note_story_thread() {
     g_story_tid.compare_exchange_strong(expected, this_tid());
 }
 
+bool debug_server_on_story_thread() {
+    const long owner = g_story_tid.load(std::memory_order_relaxed);
+    return owner != 0 && this_tid() == owner;
+}
+
 void debug_server_tick() {
     if (g_pending.load(std::memory_order_acquire) == 0) return;
     const long owner = g_story_tid.load(std::memory_order_relaxed);
