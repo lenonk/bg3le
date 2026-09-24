@@ -47,6 +47,45 @@ find_library(LIBCXX_STATIC NAMES libc++.a REQUIRED)
 find_library(LIBCXXABI_STATIC NAMES libc++abi.a REQUIRED)
 link_libraries(${LIBCXX_STATIC} ${LIBCXXABI_STATIC})
 
+# std::variant laid out as the game lays it out.
+#
+# The game is built against libc++ ABI version 2 -- every standard-library
+# symbol in it is in std::__2 -- and bg3le against the stable ABI 1, because
+# that is the libc++.a there is to link. For almost everything the two agree
+# on layout. std::variant is where they do not: version 2 stores the index in
+# one byte straight after the union, version 1 in four. A variant with a
+# small union is then a different size, every struct holding one inline is
+# laid out differently from the engine's, and bg3le reads those by offsetof.
+#
+# libc++ keeps the one-byte form behind this macro, which only <variant>
+# reads and which touches nothing compiled into libc++.a. Measured against a
+# genuine ABI-2 configuration, it produces the same size for every flat
+# variant. It does not change how this libc++ pads a variant nested inside a
+# variant -- that differs between libc++ versions rather than ABIs, and
+# src/vendor/component_meta.cpp supplies those from measurement.
+#
+# Everything C++ in the library has to agree, including the prebuilt
+# externals: protobuf-lite takes a std::variant by value and abseil aliases
+# absl::variant to it. tools/fetch-externals.sh builds them with the same
+# flags and records them; configuring against anything else is refused.
+set(BG3LE_LIBCXX_ABI_FLAGS -D_LIBCPP_ABI_VARIANT_INDEX_TYPE_OPTIMIZATION)
+add_compile_options(${BG3LE_LIBCXX_ABI_FLAGS})
+
+set(BG3LE_ABI_STAMP ${CMAKE_CURRENT_SOURCE_DIR}/external/third_party/.libcxx-abi-flags)
+if(EXISTS ${BG3LE_ABI_STAMP})
+    file(READ ${BG3LE_ABI_STAMP} BG3LE_EXTERNALS_ABI)
+    string(STRIP "${BG3LE_EXTERNALS_ABI}" BG3LE_EXTERNALS_ABI)
+else()
+    set(BG3LE_EXTERNALS_ABI "<not recorded>")
+endif()
+if(NOT BG3LE_EXTERNALS_ABI STREQUAL "${BG3LE_LIBCXX_ABI_FLAGS}")
+    message(FATAL_ERROR
+        "abseil and protobuf were built with libc++ ABI flags "
+        "'${BG3LE_EXTERNALS_ABI}', not '${BG3LE_LIBCXX_ABI_FLAGS}'. Linking "
+        "them would give std::variant two layouts in one library. Run "
+        "tools/fetch-externals.sh, which rebuilds them.")
+endif()
+
 # ---------------------------------------------------------------------------
 # Lua (Norbyte's fork; see external/lua/README.bg3le)
 # ---------------------------------------------------------------------------

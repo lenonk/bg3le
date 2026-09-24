@@ -19,6 +19,32 @@ EXT="$ROOT/external/third_party"
 mkdir -p "$EXT"
 cd "$EXT"
 
+# libc++'s layout for std::variant, which has to be the game's.
+#
+# The stable libc++ ABI stores a variant's index as four bytes; the game's
+# build stores one, straight after the union, as libstdc++ and MSVC both do.
+# That is not a detail: a variant with a small union is a different size, so
+# every struct holding one inline is laid out differently from the engine's,
+# and bg3le reads those structs by offsetof. libc++ keeps the one-byte form
+# behind this macro, which only <variant> reads.
+#
+# It has to apply to every piece of C++ linked into libbg3le.so, not only
+# bg3le's own: protobuf-lite's FailDynamicCast takes a std::variant by value,
+# abseil aliases absl::variant to std::variant, and both leave weak template
+# instantiations whose mangled names are the same under either layout. So
+# they are built with it too, and CMakeLists.txt refuses to configure
+# against externals built with anything else. The stamp is how it knows.
+LIBCXX_ABI_FLAGS="-D_LIBCPP_ABI_VARIANT_INDEX_TYPE_OPTIMIZATION"
+ABI_STAMP="$EXT/.libcxx-abi-flags"
+if [ "$(cat "$ABI_STAMP" 2>/dev/null || true)" != "$LIBCXX_ABI_FLAGS" ]; then
+    # Built with some other layout, or before this was recorded at all: the
+    # prebuilt archives are the thing that disagrees, so they go.
+    if [ -d "$EXT/abseil/build" ] || [ -d "$EXT/protobuf/build" ]; then
+        echo "== libc++ ABI flags changed; rebuilding abseil and protobuf =="
+    fi
+    rm -rf "$EXT/abseil/build" "$EXT/abseil/install" "$EXT/protobuf/build"
+fi
+
 clone() {  # clone <dir> <url> [branch]
     if [ -d "$1" ]; then echo "  $1: present"; return; fi
     if [ -n "${3:-}" ]; then git clone --depth 1 --branch "$3" "$2" "$1"
@@ -61,7 +87,7 @@ if [ ! -f "$ABSL_PREFIX/lib/libabsl_strings.a" ]; then
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_COMPILER=clang++ \
         -DCMAKE_C_COMPILER=clang \
-        -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+        -DCMAKE_CXX_FLAGS="-stdlib=libc++ $LIBCXX_ABI_FLAGS" \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DCMAKE_CXX_STANDARD=17 \
         -DABSL_PROPAGATE_CXX_STD=ON \
@@ -92,7 +118,7 @@ else
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_COMPILER=clang++ \
         -DCMAKE_C_COMPILER=clang \
-        -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+        -DCMAKE_CXX_FLAGS="-stdlib=libc++ $LIBCXX_ABI_FLAGS" \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DCMAKE_CXX_STANDARD=17 \
         -Dprotobuf_BUILD_TESTS=OFF \
@@ -102,6 +128,9 @@ else
         -DCMAKE_PREFIX_PATH="$ABSL_PREFIX"
     cmake --build protobuf/build --target libprotobuf-lite
 fi
+
+# Only once both have been built with the flags above.
+echo "$LIBCXX_ABI_FLAGS" > "$ABI_STAMP"
 
 echo "== patch Noesis for clang =="
 # NsCore/TypePropertyImpl.h marks void Get(const void*, void*) const as

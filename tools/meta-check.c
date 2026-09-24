@@ -168,6 +168,59 @@ static void expect_path_adds(char const* component, char const* outer,
            pathOffset, outer, outerOffset, pathOffset - outerOffset);
 }
 
+// Fields whose type this build compiles to a different size from the engine.
+//
+// The game is built against libc++ ABI 2 and bg3le against ABI 1; the build
+// gives std::variant the game's one-byte index, which makes every flat
+// variant agree, but a variant nested inside a variant is still padded
+// differently by this libc++ version. A struct holding one is then the wrong
+// size -- and if anything follows it, those members sit at the wrong
+// offsets, which no size-only correction repairs. That case fails the check.
+// The size-only case is listed, and passes only if component_meta.cpp gives
+// the struct its engine size, which it asserts at compile time.
+static void check_layout_differences(void* lib) {
+    size_t (*class_count)(void) = dlsym(lib, "bg3le_meta_class_count");
+    void const* (*class_at)(size_t) = dlsym(lib, "bg3le_meta_class_at");
+    char const* (*class_name)(void const*) = dlsym(lib, "bg3le_meta_class_name");
+    int (*field_sizes)(void const*, char const*, uint16_t*, uint16_t*,
+                       uint32_t*) = dlsym(lib, "bg3le_meta_field_sizes");
+    if (!class_count || !class_at || !class_name || !field_sizes) {
+        printf("layout: exports missing\n");
+        failures++;
+        return;
+    }
+
+    int differing = 0;
+    printf("\nlayout differences from the engine (compiled size != engine size):\n");
+    for (size_t c = 0; c < class_count(); ++c) {
+        void const* cls = class_at(c);
+        if (cls == NULL) continue;
+        char const* names[512];
+        uint8_t kinds[512];
+        size_t n = meta_fields_at(cls, NULL, names, kinds, 512);
+
+        uint32_t last = 0;
+        for (size_t i = 0; i < n; ++i) {
+            uint16_t e = 0, cs = 0;
+            uint32_t off = 0;
+            if (field_sizes(cls, names[i], &e, &cs, &off) && off > last) last = off;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            uint16_t e = 0, cs = 0;
+            uint32_t off = 0;
+            if (!field_sizes(cls, names[i], &e, &cs, &off) || cs == 0) continue;
+            ++differing;
+            const int followed = off < last;
+            printf("  %-44s %-12s +%-4u engine %-4u compiled %-4u %s\n",
+                   class_name(cls), names[i], off, e, cs,
+                   followed ? "FAIL: members after it are misplaced"
+                            : "last member; struct size corrected");
+            if (followed) failures++;
+        }
+    }
+    printf("  %d field(s)\n", differing);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <path to libbg3le.so>\n", argv[0]);
@@ -317,6 +370,8 @@ int main(int argc, char** argv) {
     // Any further arguments are components to dump, by either name, which is
     // how to find out what a component actually offers before writing script
     // against it.
+    check_layout_differences(h);
+
     for (int i = 2; i < argc; i++) {
         void const* m = meta_component(argv[i]);
         if (m == NULL) {

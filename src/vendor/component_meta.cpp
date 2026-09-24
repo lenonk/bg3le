@@ -36,6 +36,7 @@
 #include <Lua/Shared/Proxies/PropertyMapDependencies.h>
 
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <new>
 #include <string>
@@ -453,33 +454,83 @@ struct VariantTraits {
 template <class T>
 struct EngineLayout {
     static constexpr std::size_t Size = sizeof(T);
-    // Where the discriminant is, or -1 to use the type's own index().
+    // Where the discriminant is, or -1 for a type that has none.
     static constexpr int IndexAt = -1;
 };
 
-// 32 rather than the 40 this libc++ produces, with the discriminant one byte
-// at +24 and the payload at +0. Confirmed by decoding: "Placeholder0" reads
-// as StatsExpressionType[7] then int32 0, which is upstream's
-// ["Placeholder", 0], and label 7 is "Placeholder".
-template <>
-struct EngineLayout<bg3se::StatsExpressionInternal::Param> {
-    static constexpr std::size_t Size = 32;
-    static constexpr int IndexAt = 24;
+constexpr std::size_t round_up(std::size_t n, std::size_t to) {
+    return (n + to - 1) / to * to;
+}
+
+// A variant, laid out the way the game's libc++ lays it out: the union,
+// rounded to the alternatives' alignment, then the index in one byte, then
+// padding to the same alignment. The payload is at the start whichever
+// alternative is held.
+//
+// The game is built against libc++ ABI version 2. CMakeLists.txt gives this
+// build the same one-byte index, which makes a flat variant compile to
+// exactly this. What it cannot fix is nesting: this libc++ version pads a
+// variant held inside another variant by eight bytes and the game's does
+// not, which is why the size of an alternative is taken from its own engine
+// layout rather than from sizeof. Two measurements below pin the rule.
+template <class... Ts>
+struct EngineLayout<std::variant<Ts...>> {
+    static_assert(sizeof...(Ts) < 255, "a one-byte index holds 254");
+    static constexpr std::size_t Align = std::max({alignof(Ts)...});
+    static constexpr std::size_t UnionSize =
+        round_up(std::max({EngineLayout<Ts>::Size...}), Align);
+    static constexpr int IndexAt = (int)UnionSize;
+    static constexpr std::size_t Size = round_up(UnionSize + 1, Align);
 };
 
-// And the variant nested inside it, for the same reason one level down. Its
-// size agrees at 24 either way -- a sixteen-byte union of which the largest
-// alternative is an STDString, padded to the alignment -- so the size alone
-// gave no hint that anything was wrong. What differs is the width of the
-// discriminant: this libc++ keeps four bytes of it at +16, the engine one,
-// and the three bytes after it are whatever the pool last held. Reading all
-// four gave inner indices of 1818322177 and 1414745857 -- `Axal` and `AORT`,
-// stat file text -- where the engine had written 1.
-template <>
-struct EngineLayout<bg3se::StatsExpressionInternal::Variant2> {
-    static constexpr std::size_t Size = 24;
-    static constexpr int IndexAt = 16;
+// An optional is its value then its flag, so it inherits any difference in
+// its value's size.
+template <class V>
+struct EngineLayout<std::optional<V>> {
+    static constexpr std::size_t Size =
+        round_up(EngineLayout<V>::Size + 1, alignof(V));
+    static constexpr int IndexAt = -1;
 };
+
+// A struct whose last member is a variant this libc++ lays out differently.
+// Every member sits where offsetof says; only the struct's size differs, and
+// that is what an array of them strides by. The static_assert is the
+// assumption: a member added after this one would sit at a wrong offset,
+// and should stop the build rather than be read from the wrong place.
+#define BG3LE_ENGINE_SIZE_LAST_MEMBER(Type, Member)                           \
+    template <>                                                               \
+    struct EngineLayout<Type> {                                               \
+        static_assert(offsetof(Type, Member) + sizeof(Type::Member)            \
+                          == sizeof(Type),                                    \
+                      #Member " must be the last member of " #Type);         \
+        static constexpr std::size_t Size =                                   \
+            round_up(offsetof(Type, Member)                                   \
+                         + EngineLayout<decltype(Type::Member)>::Size,        \
+                     alignof(Type));                                          \
+        static constexpr int IndexAt = -1;                                    \
+    };
+
+// The three tools/meta-check.c finds. Each holds a variant nested inside a
+// variant, the one case the compile flag cannot make agree.
+BG3LE_ENGINE_SIZE_LAST_MEMBER(bg3se::GlobalConfigParameter, Value)
+BG3LE_ENGINE_SIZE_LAST_MEMBER(bg3se::esv::spell_cast::PreviewSetRequest, Param)
+BG3LE_ENGINE_SIZE_LAST_MEMBER(bg3se::esv::spell_cast::SystemEvent, Args)
+
+// GlobalConfigParameter is the one that faulted: a root template holds an
+// Array of them, and at 56 bytes rather than 48 the fifth element was read
+// from inside the fourth.
+static_assert(EngineLayout<bg3se::GlobalConfigParameter>::Size == 48);
+
+// The two measurements the rule has to reproduce, taken from the engine's
+// own memory -- see reference/REFERENCE-DIFFS.md. A 52-character stats
+// expression whose fifteen parameters wrote only their payload and their
+// discriminant showed Param's stride and index; "Axal" and "AORT" read as
+// Variant2's index showed its width. Both decode to upstream's captured
+// answers.
+static_assert(EngineLayout<bg3se::StatsExpressionInternal::Param>::Size == 32);
+static_assert(EngineLayout<bg3se::StatsExpressionInternal::Param>::IndexAt == 24);
+static_assert(EngineLayout<bg3se::StatsExpressionInternal::Variant2>::Size == 24);
+static_assert(EngineLayout<bg3se::StatsExpressionInternal::Variant2>::IndexAt == 16);
 
 template <class V>
 std::size_t variant_alternative_count();
@@ -658,12 +709,59 @@ std::size_t variant_alternative_count() {
 
 // Builds a field descriptor from its type. Having every kind decision here
 // rather than spelled out in each macro means adding a kind is one edit.
+// A root template's property: its value, and whether the template overrides
+// the one it inherits. See CoreLib/Base/BaseUtilities.h.
+template <class T>
+struct OverrideableTraits {
+    static constexpr bool kIsOverrideable = false;
+    using Value = void;
+};
+
+template <class V>
+struct OverrideableTraits<OverrideableProperty<V>> {
+    static constexpr bool kIsOverrideable = true;
+    using Value = V;
+};
+
+template <class T>
+constexpr FieldDesc make_plain_field(char const* name, std::size_t offset);
+
 template <class T>
 constexpr FieldDesc make_field(char const* name, std::size_t offset) {
+    // An OverrideableProperty is described as its Value, at the same offset,
+    // because that is what upstream makes it: GetStaticTypeInfo hands back
+    // the value type's information, and push, Serialize and MakeObjectRef
+    // all go straight to .Value. So every read path here works unchanged --
+    // the bytes at the field's address are a V.
+    //
+    // What is added is where the flag is, for the one place the wrapper
+    // shows: upstream's setter is get<OverrideableProperty<V>>, which builds
+    // {value, true}, so assigning the property marks it overridden.
+    if constexpr (OverrideableTraits<T>::kIsOverrideable) {
+        using V = typename OverrideableTraits<T>::Value;
+        static_assert(offsetof(T, Value) == 0,
+                      "OverrideableProperty keeps its Value first");
+        FieldDesc inner = make_plain_field<V>(name, offset);
+        inner.OverrideFlagAt = (std::uint16_t)offsetof(T, IsOverridden);
+        return inner;
+    } else {
+        return make_plain_field<T>(name, offset);
+    }
+}
+
+template <class T>
+constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
     FieldDesc f{};
     f.Name = name;
     f.Offset = (std::uint32_t)offset;
     f.Size = (std::uint16_t)EngineLayout<T>::Size;
+    // Where this build's sizeof disagrees with the engine, a struct holding
+    // the field has its later members at the wrong offsets too. Recorded so
+    // tools/meta-check.c can list every one rather than waiting for a read to
+    // go wrong.
+    if constexpr (EngineLayout<T>::Size != sizeof(T)) {
+        f.CompiledSize = (std::uint16_t)sizeof(T);
+    }
     f.Kind = kind_of<T>();
     f.ElemKind = FieldKind::Unsupported;
     f.ElemCount = 0;
@@ -717,14 +815,10 @@ constexpr FieldDesc make_field(char const* name, std::size_t offset) {
         }
     } else if constexpr (VariantTraits<T>::kIsVariant) {
         f.Alternatives = VariantTraits<T>::kAlternatives;
-        if constexpr (EngineLayout<T>::IndexAt >= 0) {
-            // Measured, not compiled. See EngineLayout.
-            f.ActiveIndex = &variant_index_at_thunk<T>;
-            f.Data = &variant_payload_thunk<T>;
-        } else {
-            f.ActiveIndex = &variant_index_thunk<T>;
-            f.Data = &variant_data_thunk<T>;
-        }
+        // The engine's layout, never index() or std::visit: those are this
+        // libc++'s, and a nested variant is laid out differently by it.
+        f.ActiveIndex = &variant_index_at_thunk<T>;
+        f.Data = &variant_payload_thunk<T>;
     } else if constexpr (MapTraits<T>::kIsMap) {
         using K = typename MapTraits<T>::Key;
         using V = typename MapTraits<T>::Value;
@@ -1659,6 +1753,44 @@ extern "C" bool bg3le_meta_optional_get(void const* handle, char const* path,
     if (kind != nullptr) *kind = reportable_kind(*inner);
     if (elemKind != nullptr) *elemKind = (std::uint8_t)inner->ElemKind;
     if (elemCount != nullptr) *elemCount = inner->ElemCount;
+    return true;
+}
+
+// A field's size as the engine lays it out and as this build compiles it,
+// where they differ; `compiled` is zero where they agree. For
+// tools/meta-check.c, which lists every disagreement.
+extern "C" bool bg3le_meta_field_sizes(void const* handle, char const* name,
+                                      std::uint16_t* engine,
+                                      std::uint16_t* compiled,
+                                      std::uint32_t* offset) {
+    if (handle == nullptr || name == nullptr) return false;
+    const auto r =
+        resolve_path(static_cast<ClassFields const*>(handle), name, nullptr);
+    if (!r.Ok) return false;
+    if (engine != nullptr) *engine = r.Field.Size;
+    if (compiled != nullptr) *compiled = r.Field.CompiledSize;
+    if (offset != nullptr) *offset = r.Field.Offset;
+    return true;
+}
+
+// Marks an OverrideableProperty overridden after it has been assigned, which
+// is what upstream's setter does by building {value, true}. False if the
+// field at this path is not one -- a member of one reached by a longer path
+// is not either, and that matches upstream too: such a write goes through
+// MakeObjectRef(&value->Value), which leaves the flag alone.
+extern "C" bool bg3le_meta_mark_overridden(void const* handle, char const* path,
+                                          void* component) {
+    if (handle == nullptr || path == nullptr || component == nullptr) {
+        return false;
+    }
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
+                                component);
+    if (!r.Ok || r.Address == nullptr || r.Field.OverrideFlagAt == 0) {
+        return false;
+    }
+    const std::uint8_t overridden = 1;
+    std::memcpy((char*)r.Address + r.Field.OverrideFlagAt, &overridden,
+                sizeof(overridden));
     return true;
 }
 

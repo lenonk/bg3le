@@ -126,6 +126,19 @@ component's declared size with the size the engine recorded, and
   search runs backwards: what points at the manager, what points at that,
   until something in the executable's own writable data does. Story-load
   work went from 30.3s to 0.07s
+- **Root templates read as upstream presents them.** Most of a template is
+  `OverrideableProperty<T>` — a value and a flag saying whether this
+  template overrides the one it inherits — and upstream presents each as a
+  plain `T`: `push`, `Serialize` and `MakeObjectRef` all go straight to the
+  value. So bg3le does the same, and a character template went from 172 of
+  its 181 fields reading `<unsupported>` to 4: `Icon`, `Stats`,
+  `DisplayName`, `Race`, `VisualTemplate` and the rest read their real
+  values. Assigning one marks it overridden, because upstream's setter
+  builds `{value, true}`; `Ext.Types.Unserialize` does not, because
+  upstream's writes only the value. Both are checked against the flag byte
+  in the engine's memory. An empty `FixedString` reads as `""` rather than
+  `nil` everywhere, which is upstream's push, and which put twenty-six
+  missing fields back on that template
 - **The parameters of a pooled stats expression.**
   `StatsExpressionPooled.Params` reads `["Placeholder", 0]` for
   `"Placeholder0"`, matching the real extender's capture, and a 52-character
@@ -308,13 +321,21 @@ component's declared size with the size the engine recorded, and
   (96.3%, from `tools/meta-check.c`; it was 94.0% before `STDString` was
   given this build's sixteen-byte layout): scalars, enums and bitmasks, nested
   structs, fixed and dynamic arrays, hash sets, hash maps, glm vectors,
-  `std::optional`, `std::variant` and `FixedString`. Two of those were
-  finished recently — an `std::optional` is written as well as read, through
-  the container's own `emplace()` and `reset()` rather than by guessing where
-  libc++ keeps the flag, and a `std::variant` is read at the engine's stride
-  rather than this compiler's. What is left is mostly `TranslatedString` and
-  raw pointers. Naming an unsupported field raises rather than returning nil,
-  so a mod cannot mistake a missing conversion for a missing value
+  `std::optional`, `std::variant`, `FixedString` and
+  `OverrideableProperty`. An `std::optional` is written as well as read,
+  through the container's own `emplace()` and `reset()`, and a
+  `std::variant` is read by the engine's layout rather than this compiler's
+  — the game is libc++ ABI 2, see
+  [reference/LIBCXX-ABI.md](reference/LIBCXX-ABI.md). Counting every class
+  the metadata describes rather than only components, 2,215 of 21,365 fields
+  do not convert yet. The largest named groups are `ecs::EntityRef` (227),
+  `stats::ConditionId` (102, which functors already resolve through the
+  condition pool), component handles (91), `Path` (41) and `NetId` (27); the
+  ImGui widgets' 391 delegate fields are handled by `Ext.IMGUI`'s own
+  callbacks rather than the field tables; and 1,026 have no type name
+  recorded, which is the next thing to characterise. Naming an unsupported
+  field raises rather than returning nil, so a mod cannot mistake a missing
+  conversion for a missing value
 - **The client-side modules.** `Ext.ClientUI` in particular is blocked on the
   placeholder Noesis RTTI — the native game ships no Noesis typeinfo at all,
   so `src/vendor/noesis_rtti_linux.cpp` aliases 19 of them to one real
@@ -329,6 +350,17 @@ Vulkan loader. protobuf and abseil are built from source by
 `tools/fetch-externals.sh` rather than taken from the distribution, because the
 packaged builds are compiled against libstdc++ and export `std::__cxx11`
 symbols that cannot link into a libc++ library.
+
+They are also built with one libc++ ABI flag the whole library shares. The
+game is built against libc++ ABI version 2 and bg3le against ABI 1, and the
+one place that shows is `std::variant`, whose index ABI 2 keeps in one byte
+where ABI 1 keeps four — enough to change the size of every struct holding a
+small variant inline. `_LIBCPP_ABI_VARIANT_INDEX_TYPE_OPTIMIZATION` gives
+this build the game's layout, and it has to reach protobuf and abseil too,
+since one passes a variant across its boundary and both alias it. CMake
+refuses to configure against externals built without it; re-run
+`tools/fetch-externals.sh` if it says so. See
+[reference/LIBCXX-ABI.md](reference/LIBCXX-ABI.md).
 
     tools/fetch-externals.sh    # Noesis, glm, imgui, lua, rapidjson, Vulkan
     cmake -S . -B build && cmake --build build

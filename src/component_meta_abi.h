@@ -128,6 +128,23 @@ struct FieldDesc {
     //
     // After Assign, for the reason above.
     void (*Engage)(void* container, bool engaged);
+    // OverrideableProperty only: where its IsOverridden flag sits, from the
+    // start of the field. Zero means the field is not one -- Value comes
+    // first, so the flag is never at zero.
+    //
+    // Such a field is otherwise described as its Value, because that is how
+    // upstream presents it: it reads as a plain T. Assigning it is the one
+    // place the wrapper shows, since upstream's setter builds
+    // {value, true} and so marks the property overridden.
+    //
+    // Last, for the reason Assign's comment gives.
+    std::uint16_t OverrideFlagAt;
+    // This build's sizeof for the field's type, where it differs from the
+    // engine's (Size); zero where they agree. A difference means any struct
+    // holding the field inline lays out its later members differently from
+    // the engine, so it is worth knowing about before a read goes wrong.
+    // Last, for the reason Assign's comment gives.
+    std::uint16_t CompiledSize;
 };
 
 }  // namespace bg3le

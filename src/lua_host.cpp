@@ -1345,8 +1345,14 @@ bool push_field(lua_State* L, const void* address, FieldKind kind,
             // read as a value and it is not one.
             std::uint32_t index = 0;
             if (!safe_read(address, &index, 4)) return false;
+            // The null FixedString is the empty string to Lua, not nil: that
+            // is upstream's push, which sends anything falsy -- Index ==
+            // NullIndex -- to "". It matters beyond looks, since a mod
+            // testing `x ~= ""` gets the opposite answer from nil, and a key
+            // holding nil does not exist in the table at all. Reading these
+            // as nil left twenty-six of a character template's fields absent.
             if (index == 0xffffffffu) {
-                lua_pushnil(L);
+                lua_pushliteral(L, "");
                 return true;
             }
             std::uint32_t length = 0;
@@ -1640,6 +1646,9 @@ extern "C" bool bg3le_meta_optional_set(void const* handle, char const* path,
                                         std::uint8_t* elemKind,
                                         std::uint16_t* elemCount);
 
+extern "C" bool bg3le_meta_mark_overridden(void const* handle, char const* path,
+                                          void* component);
+
 // Writing an optional field: engage it and write the payload, or clear it.
 //
 // Separate from write_field because engaging one needs the field's own
@@ -1726,6 +1735,9 @@ int l_set_field(lua_State* L) {
                         field_kind_name((FieldKind)kind));
         return 2;
     }
+    // Upstream's setter for an OverrideableProperty builds {value, true}.
+    // A no-op for any other field.
+    bg3le_meta_mark_overridden(meta, path, component);
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -2242,7 +2254,8 @@ int l_set_set(lua_State* L) {
     return assign_set(L, subject, name, path, 4);
 }
 
-// Ext._Internal.ObjectSetField(address, class, path, value) -> true
+// Ext._Internal.ObjectSetField(address, class, path, value[, unserializing])
+//   -> true
 //
 // The same write SetField makes on a component, against an address that
 // arrived some other way -- a static data resource, for one. Reading one
@@ -2298,6 +2311,14 @@ int l_object_set_field(lua_State* L) {
         lua_pushfstring(L, "%s.%s is not writable (%s)", className, path,
                         field_kind_name((FieldKind)kind));
         return 2;
+    }
+    // Upstream's setter for an OverrideableProperty builds {value, true}, so
+    // an assignment marks it overridden -- but its Unserialize writes only
+    // the Value and leaves the flag alone, and Ext.Types.Unserialize says
+    // which it is. A no-op for any other field.
+    const bool unserializing = lua_toboolean(L, 5) != 0;
+    if (!unserializing) {
+        bg3le_meta_mark_overridden(subject.Meta, path, subject.Base);
     }
     lua_pushboolean(L, 1);
     return 1;
@@ -6093,7 +6114,16 @@ function Ext.Types.Unserialize(object, values)
     error("bg3le: " .. tostring(err), 2)
   end
 
-  for k, v in pairs(values) do object[k] = v end
+  -- Through the same setter an assignment uses, with one difference that
+  -- upstream makes too: its Unserialize writes an OverrideableProperty's
+  -- Value and leaves IsOverridden as it was, where assigning the property
+  -- marks it overridden. So the setter is told which this is.
+  Ext._Internal.Unserializing = true
+  local ok, err = pcall(function()
+    for k, v in pairs(values) do object[k] = v end
+  end)
+  Ext._Internal.Unserializing = false
+  if not ok then error(err, 2) end
   return object
 end
 
@@ -8461,7 +8491,8 @@ function read_object(addr, class, prefix, out)
       end
 
       local path = (prefix == "") and key or (prefix .. "." .. key)
-      local ok, err2 = Ext._Internal.ObjectSetField(addr, class, path, value)
+      local ok, err2 = Ext._Internal.ObjectSetField(
+        addr, class, path, value, Ext._Internal.Unserializing == true)
       -- As on a component: a hash set refuses a plain write, and a table is
       -- the whole set.
       if not ok and type(value) == "table" then
