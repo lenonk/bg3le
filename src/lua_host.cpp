@@ -7600,14 +7600,8 @@ end
 
 -- ---- top level ----
 
--- Deferred to the next server tick, which is where the timer queue already
--- runs, so the callback lands on the story thread like upstream's.
-function Ext.OnNextTick(fn)
-  if type(fn) ~= "function" then
-    error("Ext.OnNextTick expects a function", 2)
-  end
-  return Ext.Timer.WaitFor(0, fn)
-end
+-- Upstream's: a one-shot Tick subscription, so fn gets the tick event.
+-- Defined once the events exist; see below.
 
 -- ---- Ext.Events and Ext.ModEvents ----
 --
@@ -7881,6 +7875,10 @@ Ext.Events = setmetatable({}, {
     error("Cannot write to Ext.Events directly!")
   end,
 })
+
+function Ext.OnNextTick(fn)
+  Ext.Events.Tick:Subscribe(fn, {Once = true})
+end
 
 -- An engine event's object: its fields, plus upstream's EventBase members.
 local EventBase = {}
