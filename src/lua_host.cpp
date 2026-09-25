@@ -22,6 +22,7 @@
 #include "ecs_world.h"
 #include "mem.h"
 #include "game_state.h"
+#include "hook.h"
 #include "savegame.h"
 #include "log.h"
 #include "vendor/ls_string.h"
@@ -3483,6 +3484,22 @@ int l_imgui_status(lua_State* L) {
 //
 // ls::GlobalSwitches has no symbol; src/vendor/global_switches.cpp finds it by
 // its own contents and verifies the base before reporting it.
+// Ext._Internal.InputManager() -> address of ls::gInputManager's object.
+// Found through upstream's anchor (the keyboard_WhiteBoxing.json path is
+// loaded beside it); its two CRITICAL_SECTIONs are 48 bytes here, as the
+// compiled layout has them.
+int l_input_manager(lua_State* L) {
+    constexpr std::uintptr_t kInputManager = 0x7d9d0a8;
+    void* manager = nullptr;
+    if (!safe_read(reinterpret_cast<void*>(load_bias() + kInputManager),
+                   &manager, sizeof(manager))
+        || manager == nullptr) {
+        return 0;
+    }
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)manager);
+    return 1;
+}
+
 int l_global_switches(lua_State* L) {
     void* at = bg3le_global_switches();
     if (at == nullptr) return 0;
@@ -5582,6 +5599,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsCopyFrom");
     lua_pushcfunction(g_lua, l_global_switches);
     lua_setfield(g_lua, -2, "GlobalSwitches");
+    lua_pushcfunction(g_lua, l_input_manager);
+    lua_setfield(g_lua, -2, "InputManager");
     lua_pushcfunction(g_lua, l_imgui_status);
     lua_setfield(g_lua, -2, "ImguiStatus");
     lua_pushcfunction(g_lua, l_imgui_new_window);
@@ -8304,6 +8323,18 @@ function Ext.Utils.GetGlobalSwitches()
           .. "extender log and reference/GLOBAL-SWITCHES.md", 2)
   end
   return Ext._Internal.ReadObject(addr, "GlobalSwitches", "", {})
+end
+
+-- ---- Ext.Input ----
+--
+-- Upstream's client module.
+if Ext._Internal.IsClientState() then
+  Ext.Input = Ext.Input or {}
+  function Ext.Input.GetInputManager()
+    local addr = Ext._Internal.InputManager()
+    if addr == nil then return nil end
+    return Ext._Internal.ReadObject(addr, "input::InputManager", "", {})
+  end
 end
 
 function Ext.Utils.GetDialogManager()

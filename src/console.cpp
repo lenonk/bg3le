@@ -1,6 +1,7 @@
 #include "console.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -213,12 +214,30 @@ void maybe_open_console() {
     for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);
 
+    // What the launcher and the terminal say, so a window that never
+    // appears leaves a reason behind.
+    char outPath[128];
+    std::snprintf(outPath, sizeof(outPath), "/tmp/bg3le-console.%d.log",
+                  (int)::getpid());
+    posix_spawn_file_actions_t files;
+    ::posix_spawn_file_actions_init(&files);
+    ::posix_spawn_file_actions_addopen(&files, 1, outPath,
+                                       O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ::posix_spawn_file_actions_adddup2(&files, 1, 2);
+
     pid_t pid = 0;
     posix_spawnattr_t attr;
     ::posix_spawnattr_init(&attr);
     ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
-    const int rc = ::posix_spawnp(&pid, argv[0], nullptr, &attr, argv.data(), environ);
+    // Without LD_PRELOAD: the launcher and the terminal have no use for bg3le.
+    std::vector<char*> env;
+    for (char** e = environ; *e != nullptr; ++e) {
+        if (std::strncmp(*e, "LD_PRELOAD=", 11) != 0) env.push_back(*e);
+    }
+    env.push_back(nullptr);
+    const int rc = ::posix_spawnp(&pid, argv[0], &files, &attr, argv.data(), env.data());
     ::posix_spawnattr_destroy(&attr);
+    ::posix_spawn_file_actions_destroy(&files);
 
     if (rc != 0) {
         statusf("CreateConsole: failed to launch %s (%s)", launch.command.c_str(),
@@ -227,7 +246,16 @@ void maybe_open_console() {
     }
 
     // Reap it ourselves rather than touching the game's SIGCHLD handling.
-    std::thread([pid] { int status = 0; ::waitpid(pid, &status, 0); }).detach();
+    std::thread([pid] {
+        int status = 0;
+        ::waitpid(pid, &status, 0);
+        if (WIFSIGNALED(status)) {
+            logf("CreateConsole: launcher killed by signal %d", WTERMSIG(status));
+        } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            logf("CreateConsole: launcher exited with status %d",
+                 WEXITSTATUS(status));
+        }
+    }).detach();
     statusf("CreateConsole: opened %s%s running %s", launch.command.c_str(),
             launch.via_host ? " (on host)" : "", client.c_str());
 }

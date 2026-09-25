@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "log.h"
+#include "mem.h"
 
 namespace bg3le {
 namespace {
@@ -138,9 +139,10 @@ bool hook_slot(std::uintptr_t slot_offset, std::uintptr_t expected_offset,
     auto* slot = reinterpret_cast<void**>(bias + slot_offset);
     void* expected = reinterpret_cast<void*>(bias + expected_offset);
 
-    if (*slot != expected) {
+    void* held = nullptr;
+    if (!safe_read(slot, &held, sizeof(held)) || held != expected) {
         logf("hook: slot %#lx holds %p, expected %p -- refusing to patch",
-             (unsigned long)slot_offset, *slot, expected);
+             (unsigned long)slot_offset, held, expected);
         return false;
     }
 

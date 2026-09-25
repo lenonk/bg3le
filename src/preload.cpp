@@ -693,7 +693,7 @@ bool host_is_game() {
         const char* base = std::strrchr(exe, '/');
         base = base != nullptr ? base + 1 : exe;
         const bool ok = std::strcmp(base, "bg3") == 0;
-        if (!ok) logf("EnableAchievements: host is %s, not bg3 -- skipping", base);
+        if (!ok) logf("host is %s, not bg3 -- bg3le stays inactive", base);
         return ok;
     }();
     return game;
@@ -1330,6 +1330,10 @@ void cleanup_sanity_check() {
 __attribute__((constructor)) static void bg3le_init() {
     log_init();
     logf("bg3le loaded");
+    // LD_PRELOAD reaches every process the game starts -- the console's
+    // launcher, the crash reporter -- and engine offsets mean nothing there.
+    if (!bg3le::host_is_game()) return;
+
     cleanup_sanity_check();
     // Before main and the fork, so load caches see it.
     bg3le::ensure_achievement_gate_patch();

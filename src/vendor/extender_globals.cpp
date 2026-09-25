@@ -46,6 +46,7 @@
 #include <memory>
 #include <mutex>
 
+#include "../hook.h"
 #include "../log.h"
 
 namespace bg3le {
@@ -80,14 +81,27 @@ void extender_globals_init() {
     g_ready = true;
 
     if (bg3se::gStaticSymbols == nullptr) {
-        // Every member stays null. That is not a gap: each accessor on it
-        // checks, and ToPath says so and returns an empty string, which is
-        // what upstream's caller already expects when path roots are absent.
+        // Members bg3le has not located stay null; each accessor checks.
         bg3se::gStaticSymbols = new bg3se::StaticSymbols();
     }
 
     if (g_switches == nullptr) g_switches = &default_switches();
     bg3se::gStaticSymbols->ls__GlobalSwitches = &g_switches;
+
+    // ls::PathRoots: STDString*[19] by PathRootType, found by content in a
+    // live game (Public at [2], Projects at [9], the rest in enum order).
+    // Upstream's ToPath checks each entry, so one the engine has not filled
+    // yet reads as unset rather than as garbage.
+    constexpr std::uintptr_t kPathRoots = 0x7d9cd60;
+    bg3se::gStaticSymbols->ls__PathRoots =
+        reinterpret_cast<bg3se::STDString**>(bg3le::load_bias() + kPathRoots);
+
+    // ls::gTextureAtlasMap: found by content (46 atlases keyed by their .lsx
+    // paths, 7089 icons); IconMap is what ImageReference::BindIcon reads.
+    constexpr std::uintptr_t kTextureAtlasMap = 0x7d1c438;
+    bg3se::gStaticSymbols->ls__gTextureAtlasMap =
+        reinterpret_cast<bg3se::TextureAtlasMap**>(bg3le::load_bias()
+                                                   + kTextureAtlasMap);
 
     if (bg3se::gExtender == nullptr) {
         bg3se::gExtender = std::make_unique<bg3se::ScriptExtender>();
