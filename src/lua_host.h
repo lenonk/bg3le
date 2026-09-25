@@ -43,6 +43,10 @@ bool lua_has_client();
 
 void lua_eval(const char* code, std::string* result, std::string* error);
 
+// Runs the client context's mod bootstraps, once: upstream does this as the
+// game leaves LoadModule, before the main menu is built.
+void lua_load_client_scripts();
+
 // Hands the PersistentVars of a save just read to the mods, if they are up;
 // otherwise LoadMods does it after the bootstraps.
 void lua_restore_persistent_vars();

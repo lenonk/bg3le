@@ -144,12 +144,10 @@ component's declared size with the size the engine recorded, and
   state they are asked in. The console switches with `:client` / `:server` —
   the LuaDebug protocol has carried a context on every request all along.
   Osiris is server-side, as upstream has it, and says so in the client
-  context rather than blaming the save. `Ext.Loca.UpdateTranslatedString`
-  writes into the index `Ext.Loca` reads — which is bg3le's own, built from
-  the game's `.loca` files, since `ls::TranslatedStringRepository` has no
-  symbol and did not survive being fingerprinted — so a handle a mod sets
-  reads back as it set it. That is what MCM registers every interface label
-  through, and refusing it stopped its client script at line five. The
+  context rather than blaming the save. The client context's bootstraps run
+  when the game leaves `LoadModule`, before the main menu is built, as
+  upstream's do — so a UI mod's menu changes are in place when the menu
+  appears. `Ext.Utils.GetGameState()` reports the client's real state there. The
   engine's own repository is still not written, so the game's own interface
   does not show them; bg3le says so once rather than leaving it to be
   discovered
@@ -229,12 +227,10 @@ component's declared size with the size the engine recorded, and
   read too — they came back as `"<unreadable>"` before
 - **`TranslatedString:Get()`**, upstream's way to turn a `DisplayName` into
   text: a character template's reads `"Nadira"`, and a companion's
-  `DisplayName.Name:Get()` reads `"Shadowheart"`. It resolves through bg3le's
-  index of the game's `.loca` files, which `Ext.Loca.UpdateTranslatedString`
-  also writes to. What it cannot resolve yet is a string the engine made at
-  runtime — the name a player typed for their own character is
-  `ResStr_272917352`, which exists only in the engine's live string
-  repository, and finding that repository has no symbol to start from
+  `DisplayName.Name:Get()` reads `"Shadowheart"`. It resolves through the
+  engine's string repository, so strings the engine made at runtime resolve
+  too: a player-named character's `ResStr_272917352` reads back as the name
+  they typed
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -273,6 +269,13 @@ component's declared size with the size the engine recorded, and
   work every frame, and the default is to leave the engine's rendering
   exactly as it was. See
   [reference/IMGUI-ASSESSMENT.md](reference/IMGUI-ASSESSMENT.md)
+- **`Ext.Loca` on the engine's own `TranslatedStringRepository`**, read and
+  written as upstream does, so a string a mod sets is what the game's
+  interface shows — Mod Configuration Menu's main-menu button is labelled
+  this way. Strings set before the localisation loads are queued and applied
+  the moment it does
+- **A line on the main menu**, as upstream has: the copyright string gets
+  bg3le's line through the repository as the game leaves `LoadModule`
 - **`PersistentVars` in the savegame**, as upstream writes them: a
   `ScriptExtenderSave` region (save version 12) with a `LuaVariables` node
   per mod, visited through the save's own LSF visitor by pre-hooking the
@@ -470,17 +473,6 @@ component's declared size with the size the engine recorded, and
 - **Saving `Ext.Vars` and persistent timers.** They go in the same save
   region as `PersistentVars`, which is in place; their nodes are not written
   yet.
-- **Client mods before the main menu.** Upstream loads the client state when
-  the game leaves `LoadModule`, before the menu is built; bg3le loads mods
-  once a story is up. Mod Configuration Menu notices: its menu button keeps
-  the "load order is likely being reset" text it uses to detect a missing
-  script extender. In progress.
-- **`Ext.Loca.UpdateTranslatedString` reaching the engine, and the menu
-  line.** Upstream writes into `ls::TranslatedStringRepository`; bg3le's
-  writes go to its own index, so the interface never sees them. The menu
-  line is patched into the string's memory instead, and with a large mod set
-  that loses the race against the menu copying it. Both move to the
-  repository. In progress.
 - **Osiris user queries (`QRY_*`).** Not callable yet: upstream evaluates
   them through the Rete node's `IsValid` with an identity adapter, and
   neither is located in this build.
@@ -490,9 +482,8 @@ component's declared size with the size the engine recorded, and
 - **`Ext.Entity.OnSystemUpdate`/`OnSystemPostUpdate`.** Upstream swaps a
   system's update function; systems update on worker threads here, where a
   Lua state cannot be entered.
-- **`Ext.Resource`, `GetCachedBoost`, and strings the engine made at
-  runtime** (a player-named character's `DisplayName`), each waiting on an
-  engine structure that has no anchor yet.
+- **`Ext.Resource` and `GetCachedBoost`**, each waiting on an engine
+  structure that has no anchor yet.
 - **Launching.** See [Running](#running)
 
 ## Building

@@ -189,7 +189,7 @@ list(APPEND VENDOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/loca.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/templates.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/prototypes.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/version_text.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/translated_strings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/statics.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/imgui_overlay.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/global_switches.cpp
@@ -302,6 +302,7 @@ add_library(bg3le SHARED
     src/mem.cpp
     src/lua_host.cpp
     src/savegame.cpp
+    src/game_state.cpp
     src/osi.cpp
     src/debug_server.cpp
     src/hook.cpp

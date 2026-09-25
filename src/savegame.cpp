@@ -22,6 +22,8 @@
 
 extern "C" char const* bg3le_fixed_string(std::uint32_t index,
                                           std::uint32_t* length);
+extern "C" bool bg3le_fixed_string_create(char const* text, std::uint32_t* out);
+extern "C" bool bg3le_engine_strings_install();
 
 namespace bg3le {
 namespace {
@@ -33,23 +35,6 @@ constexpr unsigned char kVariableHelperPrologue[] = {
     0x49, 0x89, 0xfe, 0x48, 0x8b, 0xbe, 0xb0, 0x00, 0x00, 0x00};
 
 constexpr std::size_t kLsfVisitorOffset = 0xb0;
-
-// ls::FixedString::CreateFromString(LSStringView const&), found through
-// upstream's anchor string; checked by its prologue and its hash seed.
-constexpr std::uintptr_t kFixedStringCreate = 0x226db50;
-constexpr unsigned char kFixedStringCreatePrologue[] = {
-    0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
-    0x48, 0x81, 0xec, 0xc8, 0x00, 0x00, 0x00};
-constexpr std::uintptr_t kFixedStringCreateSeedAt = 0x226dbbc;
-constexpr unsigned char kFixedStringCreateSeed[] = {0x41, 0xba, 0xed, 0x5e,
-                                                    0xad, 0xde};
-
-struct StringView {
-    char const* data;
-    std::uint32_t size;
-};
-using CreateProc = std::uint32_t (*)(StringView const*);
-CreateProc g_create = nullptr;
 
 // ObjectVisitor slots in this build. The first twenty match bg3se's
 // Serialization.h plus one for the Itanium destructor pair; the typed
@@ -152,9 +137,8 @@ constexpr std::uint32_t kNullString = 0xffffffffu;
 
 // Held for the life of the process, so the reference is never released.
 std::uint32_t intern(char const* text) {
-    if (g_create == nullptr) return kNullString;
-    const StringView view{text, static_cast<std::uint32_t>(std::strlen(text))};
-    return g_create(&view);
+    std::uint32_t id = kNullString;
+    return bg3le_fixed_string_create(text, &id) ? id : kNullString;
 }
 
 struct Names {
@@ -235,8 +219,8 @@ void write_persistent_variables(Visitor& v, Names const& n) {
 
 // SavegameSerializer::SavegameVisit and SerializePersistentVariables.
 void savegame_visit(void* lsf) {
-    if (g_create == nullptr) return;
     Names const& n = names();
+    if (n.ScriptExtenderSave == kNullString) return;
     Visitor v(lsf);
     if (!v.EnterRegion(n.ScriptExtenderSave)) return;
 
@@ -286,13 +270,9 @@ bool take_saved_persistent_vars(
 }
 
 void install_savegame_hook() {
-    if (!bytes_match(kFixedStringCreate, kFixedStringCreatePrologue,
-                     sizeof(kFixedStringCreatePrologue)) ||
-        !bytes_match(kFixedStringCreateSeedAt, kFixedStringCreateSeed,
-                     sizeof(kFixedStringCreateSeed))) {
-        logf("savegame: FixedString::CreateFromString not at %#lx; "
-             "PersistentVars will not be saved",
-             (unsigned long)kFixedStringCreate);
+    if (!bg3le_engine_strings_install()) {
+        logf("savegame: no FixedString::CreateFromString; PersistentVars "
+             "will not be saved");
         return;
     }
     if (!bytes_match(kVariableHelperVisit, kVariableHelperPrologue,
@@ -309,7 +289,6 @@ void install_savegame_hook() {
         return;
     }
     g_original_visit = reinterpret_cast<VisitProc>(original);
-    g_create = reinterpret_cast<CreateProc>(load_bias() + kFixedStringCreate);
 }
 
 }  // namespace bg3le

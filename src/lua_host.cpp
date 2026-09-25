@@ -1,5 +1,6 @@
 #include "lua_host.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <cmath>
@@ -19,6 +20,7 @@
 #include "ecs_types.h"
 #include "ecs_world.h"
 #include "mem.h"
+#include "game_state.h"
 #include "savegame.h"
 #include "log.h"
 #include "vendor/ls_string.h"
@@ -63,6 +65,18 @@ void push_saved_vars(lua_State* L,
         lua_pushlstring(L, json.data(), json.size());
         lua_setfield(L, -2, mod.c_str());
     }
+}
+
+// Ext._Internal.GameState() -- the client state in the client context, as
+// upstream's Ext.Utils.GetGameState reports; nil where it is not known.
+int l_game_state(lua_State* L) {
+    char const* state = in_client_state() ? client_game_state() : nullptr;
+    if (state == nullptr) {
+        lua_pushnil(L);
+    } else {
+        lua_pushstring(L, state);
+    }
+    return 1;
 }
 
 int l_saved_persistent_vars(lua_State* L) {
@@ -3533,18 +3547,6 @@ int l_loca_set(lua_State* L) {
     char const* handle = luaL_checkstring(L, 1);
     char const* text = luaL_checkstring(L, 2);
     const bool ok = bg3le_loca_set(handle, text);
-
-    // Once per session: the index this writes is bg3le's own, read from
-    // the game's .loca files, not ls::TranslatedStringRepository. A handle
-    // set here reads back here, and the engine's own interface does not
-    // see it.
-    static bool said = false;
-    if (ok && !said) {
-        said = true;
-        logf("loca: a mod is setting translated strings; they read back "
-             "through Ext.Loca but the engine's own string repository is "
-             "not modified, so the game's interface will not show them");
-    }
     lua_pushboolean(L, ok ? 1 : 0);
     return 1;
 }
@@ -5318,6 +5320,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ListDir");
     lua_pushcfunction(g_lua, l_extender_root);
     lua_setfield(g_lua, -2, "ExtenderRoot");
+    lua_pushcfunction(g_lua, l_game_state);
+    lua_setfield(g_lua, -2, "GameState");
     lua_pushcfunction(g_lua, l_saved_persistent_vars);
     lua_setfield(g_lua, -2, "SavedPersistentVars");
     lua_pushcfunction(g_lua, l_take_saved_persistent_vars);
@@ -10673,8 +10677,14 @@ function Ext._Internal.CollectPersistentVars()
   return out
 end
 
-function Ext._Internal.LoadMods()
-  Ext._Internal.FireEvent("SessionLoading")
+-- The bootstraps, once per state. Upstream runs them when the game leaves
+-- LoadModule, before the main menu exists; bg3le does that for the client
+-- (src/game_state.cpp) and for the server once Osiris is bound.
+local scripts_loaded = false
+
+function Ext._Internal.LoadModScripts()
+  if scripts_loaded then return end
+  scripts_loaded = true
 
   for _, root in ipairs(mod_roots()) do
     local names = Ext._Internal.ListDir(root .. "/Mods")
@@ -10754,10 +10764,14 @@ function Ext._Internal.LoadMods()
   for _, module in ipairs(packed) do
     load_mod_from(module.Name, module.Uuid, readers[module.Name], nil)
   end
-
-  -- A save read before the mods existed restores into them now: after the
-  -- bootstraps set their defaults, before SessionLoaded, as upstream's order.
   mods_loaded = true
+end
+
+-- A session coming up: the bootstraps if they have not run, then upstream's
+-- order -- SessionLoading, the save's PersistentVars, SessionLoaded.
+function Ext._Internal.LoadMods()
+  Ext._Internal.LoadModScripts()
+  Ext._Internal.FireEvent("SessionLoading")
   Ext._Internal.RestorePersistentVars()
 
   -- After every mod's bootstrap, as upstream does: a mod subscribes in
@@ -11198,10 +11212,9 @@ end
 
 -- ---- Ext.Loca ----
 --
--- Read from the .loca archives the engine reads, rather than from the
--- repository in memory, which has no symbol: see src/vendor/loca.cpp. The
--- answers are the same and do not depend on the engine having populated
--- anything yet.
+-- Read from the engine's TranslatedStringRepository, as upstream does, and
+-- from the .loca archives before it is populated: see
+-- src/vendor/translated_strings.cpp and src/vendor/loca.cpp.
 
 -- Upstream returns the fallback when a handle is unknown, and an empty
 -- string when there is no fallback either.
@@ -11220,11 +11233,8 @@ end
 -- DisplayName is the handle, and it is what the .loca file is keyed by --
 -- so the lookup is the same one, returning nil when nothing is keyed by it
 -- rather than inventing a mapping.
--- Writes into the index Ext.Loca reads, which is bg3le's own: the strings
--- come from the game's .loca files, not from its string repository. A
--- handle set here reads back here, which is what a mod that registers its
--- own interface labels depends on; the engine's own interface does not see
--- it, and bg3le says so once.
+-- Writes into the engine's repository, as upstream's does, so the game's
+-- own interface shows it.
 function Ext.Loca.UpdateTranslatedString(handle, value)
   if type(handle) ~= "string" or type(value) ~= "string" then
     error("Ext.Loca.UpdateTranslatedString(handle, value)", 2)
@@ -11238,9 +11248,8 @@ function Ext.Loca.GetTranslatedStringKey(key)
   return key
 end
 
--- UpdateTranslatedString is implemented above, against bg3le's own index.
--- The key variant still is not: a key maps to a handle through a second
--- structure, and this one reads handles only.
+-- The key variant is not: a key maps to a handle through
+-- TranslatedStringKeyManager, which is not located in this build.
 Ext.Loca.UpdateTranslatedStringKey = needs(
   "Ext.Loca.UpdateTranslatedStringKey writes the key-to-handle map, which "
   .. "bg3le does not read either; Ext.Loca.UpdateTranslatedString takes a "
@@ -11578,6 +11587,14 @@ void lua_reset() {
 
     g_reset_events_pending = true;
     logf("lua: reset -- both contexts rebuilt and every mod reloaded");
+}
+
+void lua_load_client_scripts() {
+    static std::atomic<bool> done{false};
+    if (g_client_lua == nullptr || done.exchange(true)) return;
+    logf("lua: loading client mods as the module finishes loading");
+    InContext client(g_client_lua);
+    call_internal("LoadModScripts");
 }
 
 void lua_restore_persistent_vars() {

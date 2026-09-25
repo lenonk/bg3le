@@ -29,6 +29,7 @@
 #include "ecs_world.h"
 #include "elf_symbols.h"
 #include "hook.h"
+#include "game_state.h"
 #include "savegame.h"
 #include "debug_server.h"
 #include "lua_host.h"
@@ -103,7 +104,6 @@ extern "C" bool bg3le_stat_origins_ready();
 extern "C" bool bg3le_loca_ready();
 extern "C" bool bg3le_templates_ready();
 extern "C" bool bg3le_prototypes_ready();
-extern "C" std::size_t bg3le_version_text_install();
 
 // Finds the stats manager on a thread of our own.
 //
@@ -489,40 +489,6 @@ void ensure_symbols() {
         lua_init();
         debug_server_start();
 
-        // The menu's version line, on a thread of its own.
-        //
-        // The string does not exist at load -- the engine reads the
-        // localisation about a minute in -- and the menu's interface
-        // resolves it into its own copy within moments of it appearing.
-        // After that, editing the source changes nothing on screen. So
-        // this watches for it continuously and patches it the instant it
-        // shows up, rather than polling every few seconds and losing by a
-        // hair. It stops as soon as it succeeds.
-        //
-        // On by default, on a thread of its own, and it stops as soon as
-        // the line is ours: patching the repository copy before the menu
-        // resolves it does reach the screen, which an earlier round of
-        // this concluded it could not. BG3LE_MENU_TEXT=0 turns it off.
-        if (const char* menu = std::getenv("BG3LE_MENU_TEXT");
-            menu == nullptr || menu[0] != '0') {
-            std::thread([] {
-                scan_enable_on_this_thread();
-                for (int attempt = 0; attempt < 2000; ++attempt) {
-                    if (bg3le_version_text_install() > 0) {
-                        // Reapply for a while: the engine may build a
-                        // second pool after the first.
-                        for (int again = 0; again < 30; ++again) {
-                            std::this_thread::sleep_for(
-                                std::chrono::seconds(1));
-                            bg3le_version_text_install();
-                        }
-                        return;
-                    }
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(50));
-                }
-            }).detach();
-        }
         warm_stats_search();
         if (const char* e = std::getenv("BG3LE_CLOCK_STATS")) {
             g_clock_stats.store(e[0] == '1');
@@ -1159,16 +1125,6 @@ extern "C" long _ZN7COsiris5EventEjP16COsiArgumentDesc(
 extern "C" long _ZNK7COsiris13NoStoryLoadedEv(void* self) {
     static auto real = next<long (*)(void*)>("_ZNK7COsiris13NoStoryLoadedEv");
 
-    // The first of these means the module has loaded and the menu is
-    // coming up, which is when bg3se writes its version line -- it does it
-    // as the client leaves GameState::LoadModule. Doing it from a timer
-    // put it long after the menu had already resolved the string.
-    static bool versioned = false;
-    if (!versioned) {
-        versioned = true;
-        scan_enable_on_this_thread();
-        if (bg3le_loca_ready()) bg3le_version_text_install();
-    }
     static std::atomic<unsigned long> calls{0};
     static double last = 0.0;
 
@@ -1378,6 +1334,13 @@ __attribute__((constructor)) static void bg3le_init() {
 
     // Before the launch's save is read, so its PersistentVars are seen.
     bg3le::install_savegame_hook();
+    // Before the module loads, so its exit is seen (the menu line, client mods).
+    bg3le::install_game_state_hook();
+
+    // BG3LE_STACKDUMP_AT=<seconds>: every thread's stack, that long after load.
+    if (const char* at = std::getenv("BG3LE_STACKDUMP_AT")) {
+        bg3le::schedule_stack_dump(std::atof(at), "BG3LE_STACKDUMP_AT");
+    }
 
     // Before the game creates its Vulkan instance, which is what the
     // overlay's first hook is on. Does nothing unless BG3LE_IMGUI=1.

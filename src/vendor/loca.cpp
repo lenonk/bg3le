@@ -254,8 +254,18 @@ bool ready() {
 
 extern "C" bool bg3le_loca_ready() { return ready(); }
 
+bool translated_string_get(char const* handle, std::string* out);
+bool translated_string_set(char const* handle, char const* text);
+
+// The engine's repository first, as upstream reads it; the index when the
+// repository is not up yet.
 extern "C" char const* bg3le_loca_get(char const* handle) {
-    if (handle == nullptr || !ready()) return nullptr;
+    if (handle == nullptr) return nullptr;
+    thread_local std::string fromRepository;
+    if (translated_string_get(handle, &fromRepository)) {
+        return fromRepository.c_str();
+    }
+    if (!ready()) return nullptr;
 
     auto it = state().ByHandle.find(std::string_view(handle));
     if (it == state().ByHandle.end()) return nullptr;
@@ -264,25 +274,14 @@ extern "C" char const* bg3le_loca_get(char const* handle) {
     return it->second.data();
 }
 
-// What Ext.Loca.UpdateTranslatedString writes.
-//
-// Into this index, which is where every read here comes from: the strings
-// are taken from the .loca files in the archives rather than from
-// ls::TranslatedStringRepository, which has no symbol and did not survive
-// being fingerprinted. So a handle a mod sets reads back as the mod set
-// it, which is the contract a mod that sets one and then displays it
-// depends on -- Mod Configuration Menu registers every label in its
-// interface this way.
-//
-// What it does not do is change what the *engine* renders from its own
-// repository. Upstream writes that repository and this does not, so a mod
-// that expects the game's own tooltip to change will not see it. Said
-// once, by the caller, rather than refused: refusing blocked MCM's client
-// script at its fifth line.
+// What Ext.Loca.UpdateTranslatedString writes: the engine's repository, as
+// upstream does, so the interface shows it; and this index, so reads made
+// before the repository is up agree with it.
 extern "C" bool bg3le_loca_set(char const* handle, char const* text) {
     if (handle == nullptr || text == nullptr || handle[0] == '\0') {
         return false;
     }
+    translated_string_set(handle, text);
     // Build first, because building replaces the whole index and would
     // throw away anything written before it.
     ready();
