@@ -2355,6 +2355,107 @@ bool plausible_method(std::uintptr_t at) {
     return true;
 }
 
+// One argument as the TypedValue Osiris wants for its declared type.
+// Strings are interned, and the handles collected for the caller to release.
+bool encode_arg(char const* key, std::size_t i, std::uint16_t declared,
+                Value const& arg, TypedValueRec* out,
+                std::vector<std::uint64_t>* interned, std::string* why) {
+    TypedValueRec& value = *out;
+    // kNone is how the caller says nil, which on a retract means
+    // "any value in this column". The engine wants a cleared value
+    // for that -- no type and IsValid off -- not an absent one.
+    if (arg.type == kNone) {
+        value.Type = kNone;
+        value.Flags = 0x02;
+        return true;
+    }
+
+    value.Type = declared;
+    value.Flags = 0x02 | 0x08;  // TypedValue | IsValid
+
+    // An aliased type that appears in no fact anywhere could not be
+    // learned, so what the caller passed decides. Better than writing
+    // a zero, which is what a wrong guess produces and what sends a
+    // mod author looking in the wrong place.
+    std::uint16_t base = resolve_alias(declared);
+    if (!type_known(declared)) {
+        base = arg.type == kString
+                   ? (guid_looking(arg.text) ? kTypeGuidString
+                                                 : kTypeString)
+                   : arg.type;
+    } else if ((base == kTypeString || base == kTypeGuidString)
+               != (arg.type == kString)) {
+        if (why != nullptr) {
+            *why = std::string("argument ") + std::to_string(i + 1)
+                   + " of " + key + " is declared type "
+                   + std::to_string(declared) + ", which wants a "
+                   + ((base == kTypeString || base == kTypeGuidString)
+                          ? "string" : "number");
+        }
+        return false;
+    }
+
+    switch (base) {
+    case kTypeString:
+    case kTypeGuidString: {
+        const std::uint64_t handle = intern_string(
+            arg.text.c_str(), base == kTypeGuidString);
+        if (handle == 0) {
+            if (why != nullptr) *why = "a string argument could not be interned";
+            return false;
+        }
+        interned->push_back(handle);
+        value.Value = handle;
+        break;
+    }
+    case kReal: {
+        const float real = (float)arg.real;
+        std::memcpy(&value.Value, &real, sizeof(real));
+        break;
+    }
+    case kInteger64:
+        value.Value = (std::uint64_t)arg.integer;
+        break;
+    default: {
+        const std::int32_t narrow = (std::int32_t)arg.integer;
+        std::memcpy(&value.Value, &narrow, sizeof(narrow));
+        break;
+    }
+    }
+
+    return true;
+}
+
+// A TypedValue read back as the type it was declared with.
+Value decode_value(std::uint64_t raw, std::uint16_t type) {
+    Value value;
+    value.type = type;
+    if (!type_known(type)) return value_by_shape(raw);
+    switch (resolve_alias(type)) {
+    case kTypeString:
+    case kTypeGuidString:
+        value.type = kString;
+        string_of(raw, &value.text);
+        break;
+    case kReal: {
+        float real = 0.f;
+        std::memcpy(&real, &raw, sizeof(real));
+        value.type = kReal;
+        value.real = real;
+        break;
+    }
+    case kInteger64:
+        value.type = kInteger64;
+        value.integer = (std::int64_t)raw;
+        break;
+    default:
+        value.type = kInteger;
+        value.integer = (std::int32_t)(std::uint32_t)raw;
+        break;
+    }
+    return value;
+}
+
 // Put a tuple into a story function's node, which is what running it
 // means. `args` are already in the function's declared order.
 Status insert_tuple(char const* key, std::vector<Value> const& args,
@@ -2411,74 +2512,12 @@ Status insert_tuple(char const* key, std::vector<Value> const& args,
     list.init(listVtable);
 
     for (std::size_t i = 0; i < args.size(); ++i) {
-        const std::uint16_t declared = entry->second.Types[i];
-        TypedValueRec& value = values[i];
-
-        // kNone is how the caller says nil, which on a retract means
-        // "any value in this column". The engine wants a cleared value
-        // for that -- no type and IsValid off -- not an absent one.
-        if (args[i].type == kNone) {
-            value.Type = kNone;
-            value.Flags = 0x02;
-            list.append(&nodes[i], &value);
-            continue;
-        }
-
-        value.Type = declared;
-        value.Flags = 0x02 | 0x08;  // TypedValue | IsValid
-
-        // An aliased type that appears in no fact anywhere could not be
-        // learned, so what the caller passed decides. Better than writing
-        // a zero, which is what a wrong guess produces and what sends a
-        // mod author looking in the wrong place.
-        std::uint16_t base = resolve_alias(declared);
-        if (!type_known(declared)) {
-            base = args[i].type == kString
-                       ? (guid_looking(args[i].text) ? kTypeGuidString
-                                                     : kTypeString)
-                       : args[i].type;
-        } else if ((base == kTypeString || base == kTypeGuidString)
-                   != (args[i].type == kString)) {
-            if (why != nullptr) {
-                *why = std::string("argument ") + std::to_string(i + 1)
-                       + " of " + key + " is declared type "
-                       + std::to_string(declared) + ", which wants a "
-                       + ((base == kTypeString || base == kTypeGuidString)
-                              ? "string" : "number");
-            }
+        if (!encode_arg(key, i, entry->second.Types[i], args[i], &values[i],
+                        &interned, why)) {
             for (std::uint64_t held : interned) release_string(held);
             return Status::kUnavailable;
         }
-
-        switch (base) {
-        case kTypeString:
-        case kTypeGuidString: {
-            const std::uint64_t handle = intern_string(
-                args[i].text.c_str(), base == kTypeGuidString);
-            if (handle == 0) {
-                for (std::uint64_t held : interned) release_string(held);
-                return fail("a string argument could not be interned");
-            }
-            interned.push_back(handle);
-            value.Value = handle;
-            break;
-        }
-        case kReal: {
-            const float real = (float)args[i].real;
-            std::memcpy(&value.Value, &real, sizeof(real));
-            break;
-        }
-        case kInteger64:
-            value.Value = (std::uint64_t)args[i].integer;
-            break;
-        default: {
-            const std::int32_t narrow = (std::int32_t)args[i].integer;
-            std::memcpy(&value.Value, &narrow, sizeof(narrow));
-            break;
-        }
-        }
-
-        list.append(&nodes[i], &value);
+        list.append(&nodes[i], &values[i]);
     }
 
     reinterpret_cast<InsertProc>(target)(reinterpret_cast<void*>(node), &list);
@@ -2488,6 +2527,224 @@ Status insert_tuple(char const* key, std::vector<Value> const& args,
     for (std::uint64_t held : interned) release_string(held);
     return Status::kHandled;
 }
+// ---------------------------------------------------------------------------
+// Calling a user query: QRY_Foo(...).
+//
+// Upstream's OsiUserQuery, with the layouts read off this libOsiris:
+// CReteOsiQuery and CReteFact both implement IsValid at vtable +0x28 as
+// IsValid(SmallTuple*, adapterId), the SmallTuple being eight inline
+// TypedValues (or a pointer to more) then size at +0x80 and capacity at
+// +0x84. The adapter maps tuple columns to the node's variables; an
+// identity one, with no constants, passes the tuple through as it is.
+constexpr std::uintptr_t kIsValid = 0x28;
+
+// The adapter list, which IsValid indexes by its second argument.
+constexpr std::uintptr_t kAdapterDbHolder = 0x119ec8;
+
+// Inside an Adapter: libc++'s std::map<u8,u8> VarToColumnMaps at +0x08
+// (its size at +0x18), vector<int8> ColumnToVarMaps at +0x20, and the
+// constants SmallTuple at +0x38.
+constexpr std::uintptr_t kAdapterMapSize = 0x18;
+constexpr std::uintptr_t kAdapterColumns = 0x20;
+constexpr std::uintptr_t kAdapterConstantsSize = 0x38 + 0x80;
+
+struct SmallTupleRec {
+    union {
+        TypedValueRec Inline[8];
+        TypedValueRec* Values;
+    };
+    std::uint32_t Size = 0;
+    std::uint32_t Capacity = 8;
+
+    SmallTupleRec() : Inline{} {}
+    TypedValueRec* data() { return Capacity > 8 ? Values : Inline; }
+};
+static_assert(sizeof(SmallTupleRec) == 0x88, "SmallTuple is 0x88 bytes");
+
+using IsValidProc = bool (*)(void*, SmallTupleRec*, std::uint32_t);
+
+// The identity adapter for each column count, per adapter list.
+std::uint32_t identity_adapter(std::size_t columns) {
+    static std::uintptr_t cachedFor = 0;
+    static std::uint32_t cachedSize = 0;
+    static std::unordered_map<std::size_t, std::uint32_t> ids;
+
+    std::uintptr_t base = 0;
+    ::dl_iterate_phdr(find_osiris, &base);
+    std::uintptr_t db = 0;
+    std::uint32_t size = 0;
+    std::uintptr_t begin = 0;
+    if (base == 0 || !peek(base + kAdapterDbHolder, &db) || db < 0x1000
+        || !peek(db, &size) || !peek(db + 0x08, &begin) || begin < 0x1000
+        || size == 0 || size > (1u << 20)) {
+        return 0;
+    }
+
+    if (db != cachedFor || size != cachedSize) {
+        ids.clear();
+        cachedFor = db;
+        cachedSize = size;
+        for (std::uint32_t i = 0; i < size; ++i) {
+            std::uintptr_t adapter = 0;
+            std::uint32_t id = 0;
+            if (!peek(begin + (std::uintptr_t)i * 8, &adapter) || adapter < 0x1000
+                || !peek(adapter, &id) || id != i + 1) {
+                continue;
+            }
+            std::uint32_t constants = 0;
+            std::uint64_t mapped = 0;
+            std::uintptr_t first = 0;
+            std::uintptr_t last = 0;
+            if (!peek(adapter + kAdapterConstantsSize, &constants) || constants != 0
+                || !peek(adapter + kAdapterMapSize, &mapped)
+                || !peek(adapter + kAdapterColumns, &first)
+                || !peek(adapter + kAdapterColumns + 8, &last)) {
+                continue;
+            }
+            // The vector can be wider than the mapping; upstream checks
+            // only the mapped columns.
+            const std::size_t width = (std::size_t)mapped;
+            if (last - first < width || width > kMaxParams || ids.count(width) != 0) {
+                continue;
+            }
+            std::int8_t map[kMaxParams] = {};
+            if (width > 0 && !safe_read(reinterpret_cast<void const*>(first), map, width)) {
+                continue;
+            }
+            bool identity = true;
+            for (std::size_t c = 0; c < width && identity; ++c) {
+                identity = map[c] == (std::int8_t)c;
+            }
+            if (identity) ids.emplace(width, id);
+        }
+        logf("osiris: %zu identity adapters among %u", ids.size(), size);
+    }
+
+    auto found = ids.find(columns);
+    return found == ids.end() ? 0 : found->second;
+}
+
+// Which of a function's parameters are outputs, from its signature's
+// bitmask, MSB-first as upstream's isOutParam reads it.
+bool out_mask(std::uintptr_t def, std::size_t count, std::vector<bool>* out) {
+    std::uintptr_t signature = 0;
+    std::uintptr_t bits = 0;
+    std::uint32_t bytes = 0;
+    if (!peek(def + 0x18, &signature) || signature < 0x1000
+        || !peek(signature + 0x18, &bits) || !peek(signature + 0x20, &bytes)) {
+        return false;
+    }
+    out->assign(count, false);
+    if (bits == 0 || bytes == 0) return true;
+    unsigned char mask[64] = {};
+    if (bytes > sizeof(mask)
+        || !safe_read(reinterpret_cast<void const*>(bits), mask, bytes)) {
+        return false;
+    }
+    for (std::size_t i = 0; i < count && i / 8 < bytes; ++i) {
+        (*out)[i] = (mask[i / 8] & (0x80 >> (i % 8))) != 0;
+    }
+    return true;
+}
+
+// The user query declared with this many IN parameters.
+DbEntry const* user_query_entry(char const* name, std::size_t inputs,
+                                std::uintptr_t* node, std::vector<bool>* outs) {
+    const std::string prefix = std::string(name) + "/";
+    for (auto const& entry : database()) {
+        if (entry.first.compare(0, prefix.size(), prefix) != 0) continue;
+        if (entry.second.Def == 0) continue;
+        const std::uintptr_t n = node_for(entry.second.Def);
+        std::uintptr_t vtable = 0;
+        if (n == 0 || !peek(n, &vtable) || class_of(vtable) != "13CReteOsiQuery") {
+            continue;
+        }
+        std::vector<bool> mask;
+        if (!out_mask(entry.second.Def, entry.second.Types.size(), &mask)) continue;
+        std::size_t ins = 0;
+        for (bool o : mask) ins += o ? 0 : 1;
+        if (ins != inputs) continue;
+        *node = n;
+        *outs = std::move(mask);
+        return &entry.second;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+Status query(char const* name, std::vector<Value> const& inputs,
+             std::vector<Value>* outputs, std::string* why) {
+    const CacheLock lock(osiris_cache_lock());
+    auto fail = [why](char const* text) {
+        if (why != nullptr) *why = text;
+        return Status::kUnavailable;
+    };
+    if (!bind_defs()) return fail("Osiris' function database is unreadable");
+    if (!find_string_table()) return fail("Osiris' string pool was not found");
+
+    std::uintptr_t node = 0;
+    std::vector<bool> outs;
+    DbEntry const* entry = user_query_entry(name, inputs.size(), &node, &outs);
+    if (entry == nullptr) {
+        return fail("the story declares no user query with that many IN arguments");
+    }
+    const std::size_t n = entry->Types.size();
+    if (n > kMaxParams) return fail("too many parameters");
+
+    const std::uint32_t adapter = identity_adapter(n);
+    if (adapter == 0) return fail("Osiris has no identity adapter for that many columns");
+
+    std::uintptr_t vtable = 0;
+    std::uintptr_t target = 0;
+    if (!peek(node, &vtable) || !peek(vtable + kIsValid, &target)
+        || !plausible_method(target)) {
+        return fail("the node's IsValid slot does not hold a function");
+    }
+
+    SmallTupleRec tuple;
+    std::vector<TypedValueRec> heap;
+    if (n > 8) {
+        heap.resize(n);
+        tuple.Values = heap.data();
+        tuple.Capacity = (std::uint32_t)n;
+    }
+    TypedValueRec* values = tuple.data();
+    std::vector<std::uint64_t> interned;
+    std::size_t in = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        values[i] = TypedValueRec{};
+        if (!outs[i]
+            && !encode_arg(name, i, entry->Types[i], inputs[in++], &values[i],
+                           &interned, why)) {
+            for (std::uint64_t held : interned) release_string(held);
+            return Status::kUnavailable;
+        }
+        values[i].Index = (std::int8_t)i;
+    }
+    tuple.Size = (std::uint32_t)n;
+
+    const bool valid = reinterpret_cast<IsValidProc>(target)(
+        reinterpret_cast<void*>(node), &tuple, adapter);
+
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!outs[i]) continue;
+        TypedValueRec const& v = values[i];
+        const bool has = valid && (v.Flags & 0x08) != 0;
+        const std::uint16_t type = v.Type != kNone ? v.Type : entry->Types[i];
+        if (outputs != nullptr) outputs->push_back(has ? decode_value(v.Value, type) : Value{});
+        // The engine's copy into the tuple took a reference, as upstream's
+        // ~TypedValue gives back.
+        if (has) {
+            const std::uint16_t base = resolve_alias(type);
+            if (base == kTypeString || base == kTypeGuidString) release_string(v.Value);
+        }
+    }
+    for (std::uint64_t held : interned) release_string(held);
+    return valid ? Status::kHandled : Status::kRejected;
+}
+
+namespace {
 // ---------------------------------------------------------------------------
 // Watching the story: Ext.Osiris.RegisterListener.
 //
@@ -2781,7 +3038,9 @@ bool watch_story_triggers() {
 // cannot be cached across runs, and walking Osiris' database to get them
 // costs half a second that a session which never calls one should not
 // pay. bg3se resolves its Osi.* the same way, through a metatable.
-bool story_function(char const* name, bool* is_database, std::string* real) {
+bool story_function(char const* name, bool* is_database, std::string* real,
+                    bool* is_query) {
+    if (is_query != nullptr) *is_query = false;
     const CacheLock lock(osiris_cache_lock());
     if (name == nullptr || !bind_defs()) return false;
 
@@ -2823,6 +3082,12 @@ bool story_function(char const* name, bool* is_database, std::string* real) {
         if (!peek(node, &vtable) || vtable < 0x1000) continue;
 
         const std::string cls = class_of(vtable);
+        if (cls == "13CReteOsiQuery") {
+            if (is_query != nullptr) *is_query = true;
+            found = true;
+            database_only = false;
+            continue;
+        }
         if (cls != "10CReteEvent" && cls != "9CReteFact") continue;
 
         found = true;
@@ -2885,35 +3150,7 @@ bool facts(char const* key, std::vector<std::vector<Value>>* rows) {
                 break;
             }
 
-            Value value;
-            value.type = type;
-            if (!type_known(type)) {
-                row.push_back(value_by_shape(raw));
-                continue;
-            }
-            switch (resolve_alias(type)) {
-            case kTypeString:
-            case kTypeGuidString:
-                value.type = kString;
-                string_of(raw, &value.text);
-                break;
-            case kReal: {
-                float real = 0.f;
-                std::memcpy(&real, &raw, sizeof(real));
-                value.type = kReal;
-                value.real = real;
-                break;
-            }
-            case kInteger64:
-                value.type = kInteger64;
-                value.integer = (std::int64_t)raw;
-                break;
-            default:
-                value.type = kInteger;
-                value.integer = (std::int32_t)(std::uint32_t)raw;
-                break;
-            }
-            row.push_back(std::move(value));
+            row.push_back(decode_value(raw, type));
         }
         rows->push_back(std::move(row));
 

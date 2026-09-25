@@ -107,9 +107,14 @@ component's declared size with the size the engine recorded, and
   database sees the fact a procedure's own rule inserts. The engine's own
   calls have no node, so they are seen where upstream sees them, at the DIV
   call handler: `before` and `after` on `SetCanGossip` fire for a call made
-  from Lua, and on `TimerLaunch` for the story's own. User queries (`QRY_*`)
-  are not callable yet — upstream evaluates them through the Rete node's
-  `IsValid` with an identity adapter
+  from Lua, and on `TimerLaunch` for the story's own. A listener on a user
+  query attaches to its `__DEF__` node, as upstream's does
+- **Osiris user queries (`QRY_*`) are callable.** `Osi.QRY_Foo(...)` takes
+  the IN arguments and answers `true` or `false`, or its OUT values (nils when
+  it fails), as upstream's `OsiUserQuery` does, by calling the query node's
+  `IsValid` with an identity adapter from Osiris' own adapter list.
+  `QRY_Bard_GetPerformSpell` fills `DB_QRY_RTN_Bard_GetPerformSpell` as the
+  story's own call does
 - **`Ext.Enums`**, every enum and bitfield bg3se describes, reachable by label
   or by numeric value, under the Lua name the generated metadata gives it —
   `Ext.Enums.ClientGameState.Menu`, not `ecl::GameState`. The entries are the
@@ -506,9 +511,6 @@ component's declared size with the size the engine recorded, and
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
-- **Osiris user queries (`QRY_*`).** Not callable yet: upstream evaluates
-  them through the Rete node's `IsValid` with an identity adapter, and
-  neither is located in this build.
 - **Client-side entities.** Entity reads go to the server world, so the
   client context sees the server's entities and none of its own
   (`ClientControl`, client visuals).

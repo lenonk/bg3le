@@ -112,7 +112,15 @@ enum class Status {
 // cached between runs, and recovering them walks Osiris' database.
 // `real` receives the name as the story spells it, which can differ in
 // case from what was asked for.
-bool story_function(char const* name, bool* is_database, std::string* real);
+// `is_query` is set when the name is a user query (QRY_*), called with query().
+bool story_function(char const* name, bool* is_database, std::string* real,
+                    bool* is_query = nullptr);
+
+// Runs a user query with its IN arguments, as upstream's OsiUserQuery:
+// kHandled or kRejected is its answer, and `outputs` receives one value per
+// OUT parameter (kNone when it failed). Osiris' thread only.
+Status query(char const* name, std::vector<Value> const& inputs,
+             std::vector<Value>* outputs, std::string* why);
 
 // Retracts facts from a story database. A `kNone` argument is a wildcard
 // for that column, as a nil is upstream.

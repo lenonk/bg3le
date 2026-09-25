@@ -262,6 +262,43 @@ int osi_story_dispatch(lua_State* L) {
     return 0;
 }
 
+// Osi.QRY_Name(inputs...) for a user query: its OUT values, nils when it
+// fails, or a boolean when it has none -- upstream's OsiUserQuery.
+int osi_story_query(lua_State* L) {
+    char const* name = lua_tostring(L, lua_upvalueindex(1));
+    const int argc = lua_gettop(L);
+
+    std::vector<osi::Value> args;
+    args.reserve(argc);
+    for (int i = 1; i <= argc; ++i) {
+        osi::Value v;
+        if (!to_value(L, i, &v)) {
+            return luaL_error(L, "Osi.%s: argument %d has unsupported type %s",
+                              name, i, luaL_typename(L, i));
+        }
+        args.push_back(std::move(v));
+    }
+
+    std::vector<osi::Value> outputs;
+    std::string why;
+    const osi::Status status = osi::query(name, args, &outputs, &why);
+    if (status == osi::Status::kUnavailable) {
+        return luaL_error(L, "Osi.%s: %s", name, why.c_str());
+    }
+    if (outputs.empty()) {
+        lua_pushboolean(L, status == osi::Status::kHandled);
+        return 1;
+    }
+    for (osi::Value const& v : outputs) {
+        if (v.type == osi::kNone) {
+            lua_pushnil(L);
+        } else {
+            push_value(L, v);
+        }
+    }
+    return (int)outputs.size();
+}
+
 // Does a fact match the filter the caller gave? A nil argument is a
 // wildcard, and a GUID compares on its last thirty-six characters, as
 // bg3se's MatchTuple does: the story writes "Name_<uuid>" where a caller
@@ -697,8 +734,9 @@ int osi_story_lookup(lua_State* L) {
     char const* asked = luaL_checkstring(L, 1);
 
     bool isDatabase = false;
+    bool isQuery = false;
     std::string spelling;
-    if (!osi::story_function(asked, &isDatabase, &spelling)) {
+    if (!osi::story_function(asked, &isDatabase, &spelling, &isQuery)) {
         lua_pushnil(L);
         return 1;
     }
@@ -709,6 +747,12 @@ int osi_story_lookup(lua_State* L) {
     if (spelling != asked) {
         logf("lua: COMPATIBILITY WARNING: Osiris symbol '%s' referenced "
              "using incorrect case; the correct name is '%s'", asked, name);
+    }
+
+    if (isQuery) {
+        lua_pushstring(L, name);
+        lua_pushcclosure(L, osi_story_query, 1);
+        return 1;
     }
 
     if (!isDatabase) {
@@ -6683,6 +6727,16 @@ local osiris_events = {
   before = true, after = true, beforeDelete = true, afterDelete = true
 }
 
+-- A user query runs through its QRY_X__DEF__ node, which is where upstream
+-- attaches a QRY_X listener too.
+local function osiris_listener_name(name)
+  if name:find("^QRY_") and not name:find("__DEF__$")
+     and Ext._Internal.StoryFunction(name .. "__DEF__") ~= nil then
+    return name .. "__DEF__"
+  end
+  return name
+end
+
 function Ext.Osiris.RegisterListener(name, arity, event, handler)
   if type(name) ~= "string" or type(handler) ~= "function" then
     error("Ext.Osiris.RegisterListener(name, arity, event, handler)", 2)
@@ -6708,6 +6762,7 @@ function Ext.Osiris.RegisterListener(name, arity, event, handler)
     return
   end
 
+  name = osiris_listener_name(name)
   local key = name .. "/" .. tostring(arity) .. "/" .. tostring(event)
   osiris_listeners[key] = osiris_listeners[key] or {}
   table.insert(osiris_listeners[key], handler)
@@ -6715,6 +6770,7 @@ function Ext.Osiris.RegisterListener(name, arity, event, handler)
 end
 
 function Ext.Osiris.UnregisterListener(name, arity, event, handler)
+  name = osiris_listener_name(name)
   local key = name .. "/" .. tostring(arity) .. "/" .. tostring(event)
   local list = osiris_listeners[key]
   if list == nil then return false end
