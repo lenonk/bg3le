@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace bg3le {
 
@@ -74,6 +75,16 @@ enum class FieldKind : std::uint8_t {
     // or nil, and a path continues through it, as upstream follows one.
     // TypeName names the target type.
     Pointer,
+    // Text the field holds in some form other than the two string kinds
+    // above -- a C string, a string view, a byte buffer, a Noesis string --
+    // read through ReadText, as upstream pushes each: a string, or nil.
+    Text,
+    // bg3se's Version, a packed uint64, read as {major, minor, revision,
+    // build}.
+    Version,
+    // EntityOrVec3Variant: a position when its type byte is set, else an
+    // entity.
+    EntityOrVec3,
 };
 
 struct FieldDesc;
@@ -177,6 +188,9 @@ struct FieldDesc {
     // used in place of Data and KeyData. Last, as above.
     void* (*ElemAt)(void const* container, std::size_t index);
     void* (*KeyAt)(void const* container, std::size_t index);
+    // Text only: the text, and whether there is any (false for a null C
+    // string or an empty buffer, which read as nil). Last, as above.
+    bool (*ReadText)(void const* field, std::string* out);
 };
 
 }  // namespace bg3le

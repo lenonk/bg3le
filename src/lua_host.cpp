@@ -1395,7 +1395,7 @@ enum class FieldKind : std::uint8_t {
     Unsupported = 0, Bool, Float, Double, Int8, Uint8, Int16, Uint16,
     Int32, Uint32, Int64, Uint64, Guid, Entity, FixedString, LSString,
     ScalarArray, Struct, DynArray, Map, Optional, Variant, Inherit,
-    ComponentHandle, ConditionId, Pointer,
+    ComponentHandle, ConditionId, Pointer, Text, Version, EntityOrVec3,
 };
 
 extern "C" const char* bg3le_meta_kind_name(std::uint8_t kind);
@@ -1475,6 +1475,27 @@ extern "C" char const* bg3le_stats_attr_condition(int raw);
 
 // Pushes a field, read through safe_read so a stale handle yields nil rather
 // than a fault.
+extern "C" bool bg3le_meta_read_text(void const* handle, char const* path, void* base,
+                                     char const** data, std::size_t* size, bool* present);
+
+// A Text field: a string, or nil, as upstream pushes it.
+int push_text(lua_State* L, void const* meta, char const* path, void* base) {
+    char const* data = nullptr;
+    std::size_t size = 0;
+    bool present = false;
+    if (!bg3le_meta_read_text(meta, path, base, &data, &size, &present)) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s cannot be read", path);
+        return 2;
+    }
+    if (present) {
+        lua_pushlstring(L, data, size);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
 bool push_field(lua_State* L, const void* address, FieldKind kind,
                 FieldKind elemKind = FieldKind::Unsupported,
                 std::uint16_t elemCount = 0) {
@@ -1540,6 +1561,40 @@ bool push_field(lua_State* L, const void* address, FieldKind kind,
             if (raw == 0xFFC0000000000000ull) lua_pushnil(L);
             else lua_pushinteger(L, (lua_Integer)raw);
             return true;
+        case FieldKind::Version: {
+            // Upstream's push: {major, minor, revision, build}.
+            if (!safe_read(address, &raw, 8)) return false;
+            lua_createtable(L, 4, 0);
+            lua_pushinteger(L, (lua_Integer)(raw >> 55));
+            lua_rawseti(L, -2, 1);
+            lua_pushinteger(L, (lua_Integer)((raw >> 47) & 0xff));
+            lua_rawseti(L, -2, 2);
+            lua_pushinteger(L, (lua_Integer)((raw >> 31) & 0xffff));
+            lua_rawseti(L, -2, 3);
+            lua_pushinteger(L, (lua_Integer)(raw & 0x7fffffff));
+            lua_rawseti(L, -2, 4);
+            return true;
+        }
+        case FieldKind::EntityOrVec3: {
+            // Upstream's push: the position when the type byte is set, else
+            // the entity (its handle here; the prelude makes it one).
+            unsigned char bytes[13] = {};
+            if (!safe_read(address, bytes, sizeof(bytes))) return false;
+            if (bytes[12] != 0) {
+                float v[3];
+                std::memcpy(v, bytes, sizeof(v));
+                lua_createtable(L, 3, 0);
+                for (int i = 0; i < 3; ++i) {
+                    lua_pushnumber(L, v[i]);
+                    lua_rawseti(L, -2, i + 1);
+                }
+            } else {
+                std::memcpy(&raw, bytes, 8);
+                if (raw == 0xFFC0000000000000ull) lua_pushnil(L);
+                else lua_pushinteger(L, (lua_Integer)raw);
+            }
+            return true;
+        }
         case FieldKind::Pointer: {
             // The target's address, which the prelude follows; nil for null.
             // One that could not be an object, or cannot be read, is not
@@ -2002,6 +2057,7 @@ int l_get_field(lua_State* L) {
         && read_optional(L, meta, path, component)) {
         return 1;
     }
+    if ((FieldKind)kind == FieldKind::Text) return push_text(L, meta, path, component);
 
     if (!push_field(L, address, (FieldKind)kind, (FieldKind)elemKind,
                     elemCount)) {
@@ -2538,6 +2594,9 @@ int l_object_get_field(lua_State* L) {
     if ((FieldKind)kind == FieldKind::Optional
         && read_optional(L, subject.Meta, path, subject.Base)) {
         return 1;
+    }
+    if ((FieldKind)kind == FieldKind::Text) {
+        return push_text(L, subject.Meta, path, subject.Base);
     }
 
     if (!push_field(L, address, (FieldKind)kind, (FieldKind)elemKind,
@@ -9401,13 +9460,16 @@ read_path = function(handle, comp, path)
       if err ~= nil then error("bg3le: " .. err, 0) end
       return nil
     end
-    return Ext._Internal.PointedObject(target,
-      Ext._Internal.PointeeClass(comp, path, false))
+    local class = Ext._Internal.PointeeClass(comp, path, false)
+    if class == nil then return read_path(handle, comp, path .. "[0]") end
+    return Ext._Internal.PointedObject(target, class)
   end
 
   local value, err = Ext._Internal.GetField(handle, comp, path)
   if value == nil and err ~= nil then error("bg3le: " .. err, 0) end
-  if kind == "entity" then return Ext._Internal.EntityValue(value) end
+  if kind == "entity" or (kind == "entityorvec3" and math.type(value) == "integer") then
+    return Ext._Internal.EntityValue(value)
+  end
   return value
 end
 
@@ -10939,8 +11001,13 @@ local function read_object_path(addr, class, path, kind)
   if kind == "pointer" then
     local target, err = Ext._Internal.ObjectGetField(addr, class, path)
     if target == nil then return err ~= nil and "<unreadable>" or nil end
-    return Ext._Internal.PointedObject(target,
-      Ext._Internal.PointeeClass(class, path, true))
+    local pointee = Ext._Internal.PointeeClass(class, path, true)
+    if pointee == nil then
+      local element = path .. "[0]"
+      return read_object_path(addr, class, element,
+                              Ext._Internal.ObjectFieldInfo(class, element))
+    end
+    return Ext._Internal.PointedObject(target, pointee)
   end
 
   if kind == "array" and not Ext._Internal.IsVector(class, path) then
@@ -10983,7 +11050,9 @@ local function read_object_path(addr, class, path, kind)
 
   local value, err = Ext._Internal.ObjectGetField(addr, class, path)
   if value == nil and err ~= nil then return "<unreadable>" end
-  if kind == "entity" then return Ext._Internal.EntityValue(value) end
+  if kind == "entity" or (kind == "entityorvec3" and math.type(value) == "integer") then
+    return Ext._Internal.EntityValue(value)
+  end
   return value
 end
 

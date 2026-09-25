@@ -111,6 +111,14 @@ struct GlmTraits<glm::vec<N, T, Q>> {
     static constexpr std::size_t kCount = (std::size_t)N;
 };
 
+// A matrix, as upstream pushes one: its C*R floats in memory order.
+template <glm::length_t C, glm::length_t R, class T, glm::qualifier Q>
+struct GlmTraits<glm::mat<C, R, T, Q>> {
+    static constexpr bool kIsGlm = true;
+    using Elem = T;
+    static constexpr std::size_t kCount = (std::size_t)C * (std::size_t)R;
+};
+
 template <class T, glm::qualifier Q>
 struct GlmTraits<glm::qua<T, Q>> {
     static constexpr bool kIsGlm = true;
@@ -133,6 +141,104 @@ struct VectorTraits<Array<T>> {
     static constexpr bool kIsVector = true;
     using Elem = T;
 };
+
+// Arrays read through size() and data() but not rebuilt here: a LegacyArray
+// carries its own vtable, which a rebuilt one would take from this library,
+// and neither StaticArray nor std::vector has an engine-side grow.
+template <class T>
+struct ReadOnlyVectorTraits {
+    static constexpr bool kIs = false;
+    using Elem = void;
+};
+template <class T>
+struct ReadOnlyVectorTraits<LegacyArray<T>> {
+    static constexpr bool kIs = true;
+    using Elem = T;
+};
+template <class T>
+struct ReadOnlyVectorTraits<StaticArray<T>> {
+    static constexpr bool kIs = true;
+    using Elem = T;
+};
+template <class T, class A>
+struct ReadOnlyVectorTraits<std::vector<T, A>> {
+    static constexpr bool kIs = true;
+    using Elem = T;
+};
+
+// Copies n bytes of text that may not be readable.
+bool copy_text(char const* data, std::size_t n, std::string* out) {
+    if (n > (1u << 24)) return false;
+    out->resize(n);
+    return n == 0 || safe_read(data, out->data(), n);
+}
+
+// Text in its several forms, each read the way upstream pushes it.
+template <class T>
+struct TextTraits {
+    static constexpr bool kIsText = false;
+};
+template <>
+struct TextTraits<char const*> {
+    static constexpr bool kIsText = true;
+    static bool read(void const* field, std::string* out) {
+        char const* text = nullptr;
+        if (!safe_read(field, &text, sizeof(text)) || text == nullptr) return false;
+        out->clear();
+        char chunk[256];
+        for (std::size_t at = 0; at < (1u << 20); at += sizeof(chunk)) {
+            const std::size_t got = safe_read_some(text + at, chunk, sizeof(chunk));
+            if (got == 0) return !out->empty();
+            char const* end = (char const*)std::memchr(chunk, 0, got);
+            out->append(chunk, end != nullptr ? (std::size_t)(end - chunk) : got);
+            if (end != nullptr || got < sizeof(chunk)) return true;
+        }
+        return true;
+    }
+};
+template <>
+struct TextTraits<char*> : TextTraits<char const*> {};
+template <>
+struct TextTraits<std::string_view> {
+    static constexpr bool kIsText = true;
+    static bool read(void const* field, std::string* out) {
+        auto const* v = static_cast<std::string_view const*>(field);
+        return copy_text(v->data(), v->size(), out);
+    }
+};
+template <class C>
+struct TextTraits<LSBaseStringView<C>> {
+    static constexpr bool kIsText = sizeof(C) == 1;
+    static bool read(void const* field, std::string* out) {
+        auto const* v = static_cast<LSBaseStringView<C> const*>(field);
+        return copy_text((char const*)v->data(), v->size(), out);
+    }
+};
+template <>
+struct TextTraits<ScratchBuffer> {
+    static constexpr bool kIsText = true;
+    static bool read(void const* field, std::string* out) {
+        auto const* v = static_cast<ScratchBuffer const*>(field);
+        if (v->Buffer.Buffer == nullptr || v->Buffer.Meta.Origin == MemoryOrigin::None) {
+            return false;
+        }
+        return copy_text((char const*)v->Buffer.Buffer, v->Buffer.Size, out);
+    }
+};
+template <unsigned N>
+struct TextTraits<Noesis::FixedString<N>> {
+    static constexpr bool kIsText = true;
+    static bool read(void const* field, std::string* out) {
+        auto const* v = static_cast<Noesis::FixedString<N> const*>(field);
+        return copy_text(v->Str(), v->Size(), out);
+    }
+};
+
+// Whether a type is complete here, which a pointee need not be.
+template <class T, class = void>
+constexpr bool kComplete = false;
+template <class T>
+constexpr bool kComplete<T, std::void_t<decltype(sizeof(T))>> = true;
 
 // CompactSet (and TrackedCompactSet, MiniCompactSet) is laid out as an
 // Array is and reads the same way, through size() and data(). Its resize()
@@ -731,14 +837,17 @@ constexpr FieldKind scalar_kind_of() {
     else if constexpr (std::is_same_v<T, bool>) return FieldKind::Bool;
     else if constexpr (std::is_same_v<T, float>) return FieldKind::Float;
     else if constexpr (std::is_same_v<T, double>) return FieldKind::Double;
-    else if constexpr (std::is_same_v<T, std::int8_t>) return FieldKind::Int8;
-    else if constexpr (std::is_same_v<T, std::uint8_t>) return FieldKind::Uint8;
-    else if constexpr (std::is_same_v<T, std::int16_t>) return FieldKind::Int16;
-    else if constexpr (std::is_same_v<T, std::uint16_t>) return FieldKind::Uint16;
-    else if constexpr (std::is_same_v<T, std::int32_t>) return FieldKind::Int32;
-    else if constexpr (std::is_same_v<T, std::uint32_t>) return FieldKind::Uint32;
-    else if constexpr (std::is_same_v<T, std::int64_t>) return FieldKind::Int64;
-    else if constexpr (std::is_same_v<T, std::uint64_t>) return FieldKind::Uint64;
+    // Any integer, by size and signedness rather than by name: the vendored
+    // headers use MSVC's __int64 and __int8, which are long long and char
+    // here, neither of them the std:: type of that width.
+    else if constexpr (std::is_integral_v<T>) {
+        constexpr bool kSigned = std::is_signed_v<T>;
+        if constexpr (sizeof(T) == 1) return kSigned ? FieldKind::Int8 : FieldKind::Uint8;
+        else if constexpr (sizeof(T) == 2) return kSigned ? FieldKind::Int16 : FieldKind::Uint16;
+        else if constexpr (sizeof(T) == 4) return kSigned ? FieldKind::Int32 : FieldKind::Uint32;
+        else if constexpr (sizeof(T) == 8) return kSigned ? FieldKind::Int64 : FieldKind::Uint64;
+        else return FieldKind::Unsupported;
+    }
     else if constexpr (std::is_same_v<T, Guid>) return FieldKind::Guid;
     else if constexpr (std::is_same_v<T, EntityHandle>) return FieldKind::Entity;
     // A FixedString is a four-byte index, so it behaves as a scalar here even
@@ -782,7 +891,13 @@ constexpr FieldKind kind_of() {
     // std::array<SomeStruct, N> unreadable -- which is how DiceValues, an
     // optional std::array of structs, stayed out of reach after the optional
     // itself worked.
-    if constexpr (ArrayTraits<T>::kIsArray) {
+    if constexpr (TextTraits<T>::kIsText) {
+        return FieldKind::Text;
+    } else if constexpr (std::is_same_v<T, Version>) {
+        return FieldKind::Version;
+    } else if constexpr (std::is_same_v<T, EntityOrVec3Variant>) {
+        return FieldKind::EntityOrVec3;
+    } else if constexpr (ArrayTraits<T>::kIsArray) {
         return FieldKind::ScalarArray;
     } else if constexpr (GlmTraits<T>::kIsGlm) {
         if constexpr (scalar_kind_of<typename GlmTraits<T>::Elem>()
@@ -792,6 +907,7 @@ constexpr FieldKind kind_of() {
             return FieldKind::Unsupported;
         }
     } else if constexpr (VectorTraits<T>::kIsVector
+                         || ReadOnlyVectorTraits<T>::kIs
                          || SetTraits<T>::kIsSet
                          || CompactSetTraits<T>::kIsCompactSet) {
         return FieldKind::DynArray;
@@ -804,9 +920,16 @@ constexpr FieldKind kind_of() {
         return FieldKind::Variant;
     } else if constexpr (scalar_kind_of<T>() != FieldKind::Unsupported) {
         return scalar_kind_of<T>();
-    } else if constexpr (std::is_pointer_v<T>
-                         && std::is_class_v<std::remove_cv_t<std::remove_pointer_t<T>>>) {
-        return FieldKind::Pointer;
+    } else if constexpr (std::is_pointer_v<T>) {
+        // To a described class, or to anything else that converts: a set, a
+        // map, a string. A pointer to a pointer does not.
+        using P = std::remove_cv_t<std::remove_pointer_t<T>>;
+        if constexpr (std::is_class_v<P> || (kComplete<P> && !std::is_pointer_v<P>
+                                              && !std::is_void_v<P>)) {
+            return FieldKind::Pointer;
+        } else {
+            return FieldKind::Unsupported;
+        }
     } else if constexpr (std::is_class_v<T>) {
         return FieldKind::Struct;
     } else {
@@ -1008,11 +1131,29 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
             f.KeyTypeName = type_name<K>().data();
             f.KeyTypeNameLength = (std::uint16_t)type_name<K>().size();
         }
-    } else if constexpr (std::is_pointer_v<T>
-                         && std::is_class_v<std::remove_cv_t<std::remove_pointer_t<T>>>) {
+    } else if constexpr (TextTraits<T>::kIsText) {
+        f.ReadText = &TextTraits<T>::read;
+        f.ReadOnly = true;
+    } else if constexpr (std::is_same_v<T, Version>
+                         || std::is_same_v<T, EntityOrVec3Variant>) {
+        f.ReadOnly = true;
+    } else if constexpr (ReadOnlyVectorTraits<T>::kIs) {
+        using E = typename ReadOnlyVectorTraits<T>::Elem;
+        describe_elements.template operator()<E>();
+        f.Count = &array_count_thunk<T>;
+        f.Data = &array_data_thunk<T>;
+        f.ReadOnly = true;
+    } else if constexpr (std::is_pointer_v<T>) {
+        // A described class is read as an object of its own (TypeName); the
+        // rest through [0], with the pointee's own descriptor.
         using P = std::remove_cv_t<std::remove_pointer_t<T>>;
-        f.TypeName = type_name<P>().data();
-        f.TypeNameLength = (std::uint16_t)type_name<P>().size();
+        if constexpr (kind_of<P>() == FieldKind::Struct) {
+            f.TypeName = type_name<P>().data();
+            f.TypeNameLength = (std::uint16_t)type_name<P>().size();
+        }
+        if constexpr (kComplete<P> && !std::is_abstract_v<P>) {
+            describe_elements.template operator()<P>();
+        }
     } else if constexpr (LegacyMapTraits<T>::kIsLegacyMap) {
         using K = typename LegacyMapTraits<T>::Key;
         using V = typename LegacyMapTraits<T>::Value;
@@ -1636,6 +1777,26 @@ Resolved resolve_path(ClassFields const* cls, char const* path, void* base) {
             if (current.ElemSize == 0 || current.ElemDesc == nullptr) return out;
 
             switch (current.Kind) {
+            // What a pointer points at, when that is not an object read as one
+            // of its own: index 0 only.
+            case FieldKind::Pointer: {
+                if (index != 0) return out;
+                if (address != nullptr) {
+                    void* target = nullptr;
+                    if (!safe_read(address, &target, sizeof(target)) || target == nullptr) {
+                        return out;
+                    }
+                    const auto at = (std::uintptr_t)target;
+                    std::uint64_t probe = 0;
+                    if (at < 0x10000 || at >= 0x800000000000ull || (at & 7) != 0
+                        || !safe_read(target, &probe, sizeof(probe))) {
+                        return out;
+                    }
+                    address = target;
+                }
+                break;
+            }
+
             case FieldKind::ScalarArray:
                 if (index >= current.ElemCount) return out;
                 if (address != nullptr) {
@@ -1803,8 +1964,18 @@ namespace {
 std::uint8_t reportable_kind(FieldDesc const& field, unsigned depth = 0) {
     if (depth > 4) return (std::uint8_t)FieldKind::Unsupported;
 
-    if ((field.Kind == FieldKind::Struct || field.Kind == FieldKind::Pointer)
-        && struct_type_of(&field) == nullptr) {
+    if (field.Kind == FieldKind::Struct && struct_type_of(&field) == nullptr) {
+        return (std::uint8_t)FieldKind::Unsupported;
+    }
+    // A pointer is usable if what it points at is: a described class, or
+    // anything its element descriptor can read.
+    if (field.Kind == FieldKind::Pointer) {
+        if (struct_type_of(&field) != nullptr) return (std::uint8_t)FieldKind::Pointer;
+        if (field.ElemDesc != nullptr
+            && reportable_kind(*field.ElemDesc, depth + 1)
+                   != (std::uint8_t)FieldKind::Unsupported) {
+            return (std::uint8_t)FieldKind::Pointer;
+        }
         return (std::uint8_t)FieldKind::Unsupported;
     }
 
@@ -2262,6 +2433,25 @@ extern "C" bool bg3le_meta_map_key_label(void const* handle, char const* path,
         }
     }
     return false;
+}
+
+// A Text field's text. *present is false for one that reads as nil -- a null
+// C string, a buffer with nothing behind it.
+extern "C" bool bg3le_meta_read_text(void const* handle, char const* path, void* base,
+                                     char const** data, std::size_t* size, bool* present) {
+    thread_local std::string held;
+    *present = false;
+    if (handle == nullptr || path == nullptr || base == nullptr) return false;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path, base);
+    if (!r.Ok || r.Address == nullptr || r.Field.Kind != FieldKind::Text
+        || r.Field.ReadText == nullptr) {
+        return false;
+    }
+    held.clear();
+    *present = r.Field.ReadText(r.Address, &held);
+    *data = held.data();
+    *size = held.size();
+    return true;
 }
 
 // The class a pointer field points at, by the name bg3le_meta_class takes,
@@ -2921,6 +3111,9 @@ extern "C" char const* bg3le_meta_kind_name(std::uint8_t kind) {
         case FieldKind::ComponentHandle: return "handle";
         case FieldKind::ConditionId: return "condition";
         case FieldKind::Pointer: return "pointer";
+        case FieldKind::Text: return "string";
+        case FieldKind::Version: return "version";
+        case FieldKind::EntityOrVec3: return "entityorvec3";
         default: return "unsupported";
     }
 }

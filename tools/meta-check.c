@@ -30,6 +30,32 @@ static int (*install_game_allocator)(void*, void*);
 static void const* (*meta_class_at)(size_t);
 static char const* (*meta_engine_class)(void const*);
 static char const* (*meta_kind_name)(uint8_t);
+static char const* (*meta_class_name)(void const*);
+static int (*meta_type_name_at)(void const*, char const*, char const**, uint16_t*);
+
+// --unsupported: every field that does not convert, with its declared type,
+// components first. The list to work down when adding a field kind.
+static int list_unsupported(void) {
+    char const* names[512];
+    uint8_t kinds[512];
+    for (int pass = 0; pass < 2; pass++) {
+        printf(pass == 0 ? "components:\n" : "\nother classes:\n");
+        for (size_t i = 0; i < meta_class_count(); i++) {
+            void const* cls = meta_class_at(i);
+            if (cls == NULL || (meta_engine_class(cls) != NULL) != (pass == 0)) continue;
+            size_t n = meta_fields(cls, names, kinds, 512);
+            for (size_t j = 0; j < n; j++) {
+                if (kinds[j] != 0) continue;
+                char const* type = NULL;
+                uint16_t len = 0;
+                meta_type_name_at(cls, names[j], &type, &len);
+                printf("  %s.%s\t%.*s\n", meta_class_name(cls), names[j],
+                       type != NULL ? (int)len : 1, type != NULL ? type : "?");
+            }
+        }
+    }
+    return 0;
+}
 
 static int failures = 0;
 
@@ -252,7 +278,11 @@ int main(int argc, char** argv) {
     BIND(meta_class_at, "bg3le_meta_class_at")
     BIND(meta_engine_class, "bg3le_meta_engine_class")
     BIND(meta_kind_name, "bg3le_meta_kind_name")
+    BIND(meta_class_name, "bg3le_meta_class_name")
+    BIND(meta_type_name_at, "bg3le_meta_type_name_at")
 #undef BIND
+
+    if (argc > 2 && strcmp(argv[2], "--unsupported") == 0) return list_unsupported();
 
     // The self-test builds a real dynamic array, which allocates through
     // bg3se. In the game that goes to the engine's heap; here malloc will do,

@@ -560,32 +560,37 @@ component's declared size with the size the engine recorded, and
   fields are writable.
   [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
   the three theories that were tested and eliminated
-- **The last 0.3% of the field kinds.** 3,556 of 3,566 component fields
-  convert (99.7%, from `tools/meta-check.c`; it was 94.0% before `STDString`
-  was given this build's sixteen-byte layout): scalars, enums and bitmasks,
-  nested structs, pointers to them (followed as upstream follows them: the
-  object pointed at, or nil, read when first touched so a cycle is only
-  walked as far as it is asked about; one that could not be an object or
-  cannot be read is refused rather than followed), fixed and dynamic arrays,
+- **The last few field kinds.** Every component field converts — 3,566 of
+  3,566, from `tools/meta-check.c` (94.0% before `STDString` was given this
+  build's sixteen-byte layout): scalars of any integer type (the vendored
+  headers' MSVC `__int64` and `__int8` are `long long` and `char` here, which
+  hid 178 fields), enums and bitmasks, nested structs, pointers (to a
+  described class, read as that object when first touched, so a cycle is only
+  walked as far as it is asked about; to anything else — a set, a map, a
+  string — read as what it points at; one that could not be an object or
+  cannot be read is refused rather than followed), fixed and dynamic arrays
+  including `LegacyArray`, `StaticArray` and `std::vector` (read-only),
   `CompactSet` (read-only), hash sets, hash maps and the node-chained
-  `LegacyMap`/`LegacyRefMap`, glm vectors,
-  `std::optional`, `std::variant`, `FixedString`, `OverrideableProperty`,
-  `ecs::EntityRef`, and the wrappers upstream pushes as what they hold —
-  `Path` as its string, `NetId` and `UserId` as integers, a component handle
-  as an integer or nil, and a `stats::ConditionId` as its condition's text,
-  refusing a write with upstream's message. An `std::optional` is written as
-  well as read, through the container's own `emplace()` and `reset()`, and a
-  `std::variant` is read by the engine's layout rather than this compiler's
-  — the game is libc++ ABI 2, see
-  [reference/LIBCXX-ABI.md](reference/LIBCXX-ABI.md). Counting every class
-  the metadata describes rather than only components, 770 of 21,514 fields
-  do not convert yet (meta-check prints both): pointers to types bg3se does
-  not describe, the Lua registry entries (44) and `StatsExpressionRef` (11)
-  among them; and the
-  ImGui widgets' 391 delegate fields are handled by `Ext.IMGUI`'s own
-  callbacks rather than the field tables.
-  Naming an unsupported
-  field raises rather than returning nil, so a mod cannot mistake a missing
+  `LegacyMap`/`LegacyRefMap`, glm vectors and matrices (a matrix as its
+  floats, as upstream pushes one), `std::optional`, `std::variant`,
+  `FixedString`, `OverrideableProperty`, `ecs::EntityRef`, and the types
+  upstream pushes as what they hold — `Path` as its string, C strings, string
+  views, byte buffers and Noesis strings as strings, `Version` as its four
+  numbers, `EntityOrVec3Variant` as a position or an entity, `NetId` and
+  `UserId` as integers, a component handle as an integer or nil, and a
+  `stats::ConditionId` as its condition's text, refusing a write with
+  upstream's message. An `std::optional` is written as well as read, through
+  the container's own `emplace()` and `reset()`, and a `std::variant` is read
+  by the engine's layout rather than this compiler's — the game is libc++ ABI
+  2, see [reference/LIBCXX-ABI.md](reference/LIBCXX-ABI.md). Across every
+  class the metadata describes, 481 of 21,514 fields do not convert; 447 of
+  them are the ImGui widgets' Lua delegates and registry entries, which
+  `Ext.IMGUI`'s own callbacks handle. The other 34 are `StatsExpressionRef`
+  (11, which the stats functor reader decodes itself), `TypeInformationRef`
+  (6), Noesis's observable collections (7), four pointer-to-pointer ranges,
+  three `ObjectSet`s, a `Queue` and a `BitArray`;
+  `meta-check <lib> --unsupported` lists them. Naming an unsupported field
+  raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
 - **Launching.** See [Running](#running)
 
