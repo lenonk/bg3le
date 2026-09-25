@@ -11,6 +11,10 @@ extender core and the code generators in this directory represent an enormous
 amount of reverse engineering. bg3le reuses them rather than rediscovering
 them, and would not be a realistic project otherwise.
 
+Upstream commit: `dc2530ab` (2026-09-23). Newer upstream commits are brought in
+by applying upstream's own diff over this tree, which keeps the changes listed
+below; regenerate the generated files afterwards.
+
 Copied subsystems: `CoreLib/`, `BG3Extender/GameDefinitions/`,
 `BG3Extender/Lua/`, `BG3Extender/Extender/`, `BG3Extender/GameHooks/`,
 `BG3Extender/Osiris/`, `BG3Extender/LuaScripts/` (the builtin:// bundle,
@@ -291,13 +295,6 @@ not on Linux:
 those, all 46 members whose offset the engine's settings registration reveals
 (`tools/relocs-xref.py`; see `reference/GLOBAL-SWITCHES.md`) sit where bg3se
 declares them. Checked by `tools/check-vendor-patches.py`.
-
-### One .inl is a translation unit
-
-`BG3Extender.vcxproj` lists `GameDefinitions/Stats/StatsObject.inl` under
-`ClCompile`, so MSVC compiles it despite the extension, and nothing includes
-it. It defines the `stats::Object` members — 21 symbols. CMake will not
-generate a rule for an `.inl`, so `src/vendor/stats_object_tu.cpp` wraps it.
 
 ### Generated files
 

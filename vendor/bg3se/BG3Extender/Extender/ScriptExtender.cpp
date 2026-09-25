@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include <Extender/ScriptExtender.h>
 #include <Extender/Shared/Console.h>
+#include <GameDefinitions/Stats/Cache.h>
 #include "Version.h"
 #include "resource.h"
 #include <iomanip>
@@ -268,6 +269,7 @@ void ScriptExtender::OnStatsLoadGuarded(stats::RPGStats__LoadProc* wrapped, stat
         wrapped(mgr, paths);
     }
 
+    stats::gStatStructureCache.OnStatsLoaded();
     client_.LoadExtensionState(ExtensionStateContext::Game);
 
     if (client_.HasExtensionState()) {

@@ -165,12 +165,6 @@ endif()
 
 file(GLOB_RECURSE VENDOR_SOURCES ${VENDOR_ROOT}/*.cpp ${VENDOR_ROOT}/*.cc)
 
-# Upstream compiles one .inl as a translation unit -- BG3Extender.vcxproj lists
-# it under ClCompile and nothing includes it. CMake will not generate a rule
-# for an .inl, so src/vendor/ wraps it.
-list(APPEND VENDOR_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stats_object_tu.cpp)
-
 # Linux stand-ins for the components whose upstream implementations are
 # Windows-only. These are bg3le's own code, so they are not silenced by the
 # -w below; they are listed here because they have to see the vendored headers.
