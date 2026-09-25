@@ -427,6 +427,14 @@ instead of dereferencing the missing manager. The bridge,
 `src/vendor/bg3le_noesis_lua.inl`, is included at the end so it can use
 upstream's class cache and custom-type builder.
 
+**`Lua/Libs/ClientUI/CustomProperties.inl` — a custom property's
+`WriteCallback` goes through bg3le's UI queue.** Upstream queues it on its
+client Lua state's `DeferredUIEvents`, which bg3le does not have. Under
+`BG3LE_NOESIS_FORWARD` the setter asks bg3le whether the class's property has
+a callback and, when the value changes, hands the object and property name to
+`src/vendor/bg3le_noesis_lua.inl`, which delivers them on the client tick as
+upstream's `PostUpdate` does. Checked by `tools/check-vendor-patches.py`.
+
 **`Extender/Client/IMGUI/Vulkan.inl` — the overlay is composited onto an
 HDR swapchain.** Upstream draws ImGui straight into the swapchain; when the
 compositor offers HDR the game presents HDR10, and both ImGui's sRGB colours

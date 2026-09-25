@@ -95,6 +95,12 @@ private:
     }
 };
 
+#if defined(BG3LE_NOESIS_FORWARD)
+// bg3le: write callbacks go through bg3le's own UI queue, not upstream's Lua state.
+bool bg3le_ui_property_watched(void const* object, char const* name);
+void bg3le_ui_property_written(void* object, char const* name);
+#endif
+
 // TypeProperty with INotifyPropertyChanged and Lua write callback support
 template <class T>
 class TypePropertyOffsetSE : public TypePropertyOffset<T>
@@ -107,7 +113,12 @@ public:
     void SetComponent(void* ptr, BaseComponent* value) const override
     {
         // Fast-path when no special features are enabled
-        if (!notify_ && !writeCallback_) {
+#if defined(BG3LE_NOESIS_FORWARD)
+        const bool watched = bg3le_ui_property_watched(ptr, this->GetName().Str());
+#else
+        const bool watched = (bool)writeCallback_;
+#endif
+        if (!notify_ && !watched) {
             TypePropertyOffset<T>::SetComponent(ptr, value);
         } else if (this->GetComponent(ptr).GetPtr() != value) {
             TypePropertyOffset<T>::SetComponent(ptr, value);
@@ -117,6 +128,9 @@ public:
                 ctx->PropertyChanged().Invoke(ctx, PropertyChangedEventArgs(this->GetName()));
             }
 
+#if defined(BG3LE_NOESIS_FORWARD)
+            if (watched) bg3le_ui_property_written(ptr, this->GetName().Str());
+#else
             if (writeCallback_) {
                 ContextGuardAnyThread ctx(ContextType::Client);
                 ecl::LuaClientPin pin(ecl::ExtensionState::Get());
@@ -124,13 +138,19 @@ public:
                     pin->GetDeferredUIEvents().OnPropertyChanged(writeCallback_, static_cast<BaseComponent*>(ptr), this->GetName());
                 }
             }
+#endif
         }
     }
 
     void Set(void* ptr, const void* value) const override
     {
         // Fast-path when no special features are enabled
-        if (!notify_ && !writeCallback_) {
+#if defined(BG3LE_NOESIS_FORWARD)
+        const bool watched = bg3le_ui_property_watched(ptr, this->GetName().Str());
+#else
+        const bool watched = (bool)writeCallback_;
+#endif
+        if (!notify_ && !watched) {
             TypePropertyOffset<T>::Set(ptr, value);
         } else if (*static_cast<T const*>(this->Get(ptr)) != *static_cast<T const*>(value)) {
             TypePropertyOffset<T>::Set(ptr, value);
@@ -140,6 +160,9 @@ public:
                 ctx->PropertyChanged().Invoke(ctx, PropertyChangedEventArgs(this->GetName()));
             }
 
+#if defined(BG3LE_NOESIS_FORWARD)
+            if (watched) bg3le_ui_property_written(ptr, this->GetName().Str());
+#else
             if (writeCallback_) {
                 ContextGuardAnyThread ctx(ContextType::Client);
                 ecl::LuaClientPin pin(ecl::ExtensionState::Get());
@@ -147,6 +170,7 @@ public:
                     pin->GetDeferredUIEvents().OnPropertyChanged(writeCallback_, static_cast<BaseComponent*>(ptr), this->GetName());
                 }
             }
+#endif
         }
     }
 

@@ -10535,8 +10535,18 @@ if Ext._Internal.IsClientState() then
 
   function Ext.UI.GetRoot() return wrap(I.UiRoot()) end
 
+  -- A property's WriteCallback crosses as a handler id, as a command's does.
   function Ext.UI.RegisterType(name, properties, wrappedContext)
-    return I.UiRegisterType(name, properties or {}, wrappedContext)
+    local props = {}
+    for key, defn in pairs(properties or {}) do
+      local copy = {}
+      if type(defn) == "table" then
+        for k, v in pairs(defn) do copy[k] = v end
+        if type(defn.WriteCallback) == "function" then copy.WriteCallback = add_handler(defn.WriteCallback) end
+      end
+      props[key] = copy
+    end
+    return I.UiRegisterType(name, props, wrappedContext)
   end
 
   function Ext.UI.Instantiate(name, wrappedContext)
@@ -10575,6 +10585,13 @@ if Ext._Internal.IsClientState() then
       if id == nil then break end
       local fn = handlers[id]
       if fn ~= nil then call(fn, wrap(command), wrap(parameter)) end
+    end
+    -- Upstream's DeferredUIEvents::PostUpdate: handler(object, property).
+    while true do
+      local id, object, property = I.UiTakeWrite()
+      if id == nil then break end
+      local fn = handlers[id]
+      if fn ~= nil then call(fn, wrap(object), property) end
     end
     while true do
       local id, sender, event, source = I.UiTakeEvent()

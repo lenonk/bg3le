@@ -448,6 +448,9 @@ struct Fired
 
 std::deque<Fired> g_commands;
 std::deque<Fired> g_events;
+std::deque<Fired> g_writes;
+// "class.property" -> the prelude's handler id, for WriteCallback.
+std::unordered_map<std::string, uint32_t> g_write_handlers;
 // Keeps the last delivered one alive until Lua has had it.
 Fired g_delivered;
 
@@ -704,9 +707,12 @@ int l_register_type(lua_State* L)
         lua_getfield(L, -1, "Notify");
         if (!lua_isnil(L, -1)) defn->Notify = lua_toboolean(L, -1) != 0;
         lua_pop(L, 1);
+        // The prelude hands the callback over as a handler id.
         lua_getfield(L, -1, "WriteCallback");
-        if (!lua_isnil(L, -1)) {
-            bg3le::logf("Ext.UI.RegisterType(%s): WriteCallback is not supported yet", name.c_str());
+        if (lua_isinteger(L, -1)) {
+            auto cls = nsui::ClassDefinitionBuilder::MakeFullName(name);
+            std::lock_guard<std::mutex> held(g_lock);
+            g_write_handlers[std::string(cls.Str()) + "." + key] = (uint32_t)lua_tointeger(L, -1);
         }
         lua_pop(L, 2);
     }
@@ -841,6 +847,16 @@ int l_unsubscribe(lua_State* L)
     return 1;
 }
 
+// UiTakeWrite() -> id, object, property name
+int l_take_write(lua_State* L)
+{
+    if (!take(L, g_writes)) return 0;
+    lua_pushinteger(L, g_delivered.Id);
+    push_object(L, g_delivered.First.GetPtr());
+    lua_pushstring(L, g_delivered.Event.c_str());
+    return 3;
+}
+
 // UiTakeEvent() -> id, sender, event name, source
 int l_take_event(lua_State* L)
 {
@@ -853,6 +869,31 @@ int l_take_event(lua_State* L)
 }
 
 }  // namespace Noesis::bg3le_ui
+
+namespace {
+std::string write_key(void const* object, char const* name)
+{
+    auto cls = static_cast<Noesis::BaseComponent const*>(object)->GetClassType();
+    return std::string(cls != nullptr ? cls->GetName() : "") + "." + (name != nullptr ? name : "");
+}
+}  // namespace
+
+bool Noesis::bg3le_ui_property_watched(void const* object, char const* name)
+{
+    std::lock_guard<std::mutex> held(Noesis::bg3le_ui::g_lock);
+    return !Noesis::bg3le_ui::g_write_handlers.empty()
+           && Noesis::bg3le_ui::g_write_handlers.count(write_key(object, name)) != 0;
+}
+
+void Noesis::bg3le_ui_property_written(void* object, char const* name)
+{
+    std::lock_guard<std::mutex> held(Noesis::bg3le_ui::g_lock);
+    auto it = Noesis::bg3le_ui::g_write_handlers.find(write_key(object, name));
+    if (it == Noesis::bg3le_ui::g_write_handlers.end()) return;
+    Noesis::bg3le_ui::g_writes.push_back(Noesis::bg3le_ui::Fired{
+        it->second, Noesis::Ptr<Noesis::BaseComponent>(static_cast<Noesis::BaseComponent*>(object)),
+        {}, name });
+}
 
 bool bg3le_ui_command_bound(void const* command)
 {
@@ -911,6 +952,7 @@ extern "C" void bg3le_ui_register(lua_State* L)
         {"UiSubscribe", Noesis::bg3le_ui::l_subscribe},
         {"UiUnsubscribe", Noesis::bg3le_ui::l_unsubscribe},
         {"UiTakeEvent", Noesis::bg3le_ui::l_take_event},
+        {"UiTakeWrite", Noesis::bg3le_ui::l_take_write},
         {nullptr, nullptr}};
     luaL_setfuncs(L, functions, 0);
 }
