@@ -5020,8 +5020,7 @@ int l_stats_roll_set(lua_State* L) {
         return 1;
     }
     static const char* const why[] = {
-        "", "this stat has no roll conditions for it, and adding an entry "
-            "is a hash map insert bg3le does not do",
+        "", "the roll condition entry could not be added to the stat",
         "the condition could not be added to the condition pool",
         "the roll condition array could not be written"};
     lua_pushnil(L);

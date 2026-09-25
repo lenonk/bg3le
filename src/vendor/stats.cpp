@@ -2532,10 +2532,10 @@ extern "C" int bg3le_stats_guid_intern(char const* text) {
 // Replaces a RollConditions attribute, as upstream's SetRollConditions:
 // each (name, expression) pair becomes { Name, Conditions = <pooled> }.
 // SetString's form is one pair named "Default", and "" is none. The array
-// is rewritten in place, or moved to a fresh buffer if it is too small.
-// 0 on success; 1 if the stat has no entry for the attribute (adding one is
-// a HashMap insert bg3le does not do), 2 if a condition could not be pooled,
-// 3 otherwise.
+// is rewritten in place, or moved to a fresh buffer if it is too small; a
+// stat with no entry for the attribute gets one, as upstream's map insert.
+// 0 on success; 1 if the entry could not be added, 2 if a condition could
+// not be pooled, 3 otherwise.
 extern "C" int bg3le_stats_roll_set(void const* object, char const* attribute,
                                     char const* const* names,
                                     char const* const* texts,
@@ -2547,10 +2547,6 @@ extern "C" int bg3le_stats_roll_set(void const* object, char const* attribute,
     }
     auto const* map = (char const*)object + kObjectRollConditions;
     const int slot = hash_map_slot(map, attribute);
-    if (slot < 0) return 1;
-    HashMapRef m{};
-    if (!read_hash_map(map, &m)) return 3;
-    auto* array = (char*)m.Values + (std::size_t)slot * 16;
 
     std::vector<std::int32_t> entries;
     for (std::size_t i = 0; i < count; ++i) {
@@ -2564,6 +2560,25 @@ extern "C" int bg3le_stats_roll_set(void const* object, char const* attribute,
         entries.push_back((std::int32_t)name);
         entries.push_back(condition);
     }
+
+    if (slot < 0) {
+        if (count == 0) return 0;
+        std::uint32_t key = 0;
+        if (!bg3le_game_allocator_ready()
+            || (!bg3le_fixed_string_index_of(attribute, &key)
+                && !bg3le_fixed_string_intern(attribute, &key))) {
+            return 1;
+        }
+        void* fresh = bg3se::GameAllocRaw(count * 8);
+        if (fresh == nullptr) return 1;
+        std::memcpy(fresh, entries.data(), entries.size() * sizeof(std::int32_t));
+        struct { void* Buffer; std::uint32_t Capacity; std::uint32_t Size; } header{
+            fresh, (std::uint32_t)count, (std::uint32_t)count};
+        return fs_map_insert(const_cast<char*>(map), key, header) ? 0 : 1;
+    }
+    HashMapRef m{};
+    if (!read_hash_map(map, &m)) return 3;
+    auto* array = (char*)m.Values + (std::size_t)slot * 16;
 
     std::uint64_t buffer = 0;
     std::uint32_t capacity = 0;
@@ -2604,12 +2619,8 @@ extern "C" bool bg3le_stats_attr_set(void const* object, std::size_t index,
 // handle into the engine's compiled table -- so copying the array carries the
 // same reference upstream's property loop carries.
 //
-// What is not carried is Object::Functors and Object::RollConditions, the two
-// hash maps of compiled objects upstream copies entry by entry after the
-// property loop, with a "TODO - is reusing property list objects allowed?"
-// against both. Writing those needs a HashMap writer bg3le does not have, so
-// the caller says once that they were left, rather than this claiming a
-// complete copy.
+// Object::Functors and Object::RollConditions, the two maps upstream copies
+// after the property loop, are carried by bg3le_stats_copy_rest.
 extern "C" bool bg3le_stats_copy_from(void const* dest, void const* source,
                                       std::size_t* carried,
                                       std::size_t* total) {
