@@ -70,6 +70,10 @@ enum class FieldKind : std::uint8_t {
     ComponentHandle,
     // A stats condition's id, read as the condition's text.
     ConditionId,
+    // A pointer to a class bg3se describes: reads as the target's address,
+    // or nil, and a path continues through it, as upstream follows one.
+    // TypeName names the target type.
+    Pointer,
 };
 
 struct FieldDesc;

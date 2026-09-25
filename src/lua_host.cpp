@@ -1395,7 +1395,7 @@ enum class FieldKind : std::uint8_t {
     Unsupported = 0, Bool, Float, Double, Int8, Uint8, Int16, Uint16,
     Int32, Uint32, Int64, Uint64, Guid, Entity, FixedString, LSString,
     ScalarArray, Struct, DynArray, Map, Optional, Variant, Inherit,
-    ComponentHandle, ConditionId,
+    ComponentHandle, ConditionId, Pointer,
 };
 
 extern "C" const char* bg3le_meta_kind_name(std::uint8_t kind);
@@ -1418,6 +1418,7 @@ std::size_t field_kind_size(FieldKind kind) {
             return 4;
         case FieldKind::Double: case FieldKind::Int64: case FieldKind::Uint64:
         case FieldKind::Entity: case FieldKind::ComponentHandle:
+        case FieldKind::Pointer:
             return 8;
         case FieldKind::FixedString: case FieldKind::ConditionId:
             return 4;
@@ -1537,6 +1538,12 @@ bool push_field(lua_State* L, const void* address, FieldKind kind,
             // Upstream's push: the handle's bits, or nil for NullHandle.
             if (!safe_read(address, &raw, 8)) return false;
             if (raw == 0xFFC0000000000000ull) lua_pushnil(L);
+            else lua_pushinteger(L, (lua_Integer)raw);
+            return true;
+        case FieldKind::Pointer:
+            // The target's address, which the prelude follows; nil for null.
+            if (!safe_read(address, &raw, 8)) return false;
+            if (raw == 0) lua_pushnil(L);
             else lua_pushinteger(L, (lua_Integer)raw);
             return true;
         case FieldKind::ConditionId: {
@@ -6300,9 +6307,9 @@ local function json_number(v)
   -- even when whole, as the real extender's writer does: Weight is
   -- 1.350000023841858 and ValueScale 1.0.
   if math.type(v) == "integer" then return tostring(v) end
-  if v ~= v or v == math.huge or v == -math.huge then
-    error("Attempted to stringify a non-finite number", 0)
-  end
+  -- Upstream's writer has kWriteNanAndInfNullFlag, so NaN and the
+  -- infinities come out as null.
+  if v ~= v or v == math.huge or v == -math.huge then return "null" end
   local text = string.format("%.17g", v)
   for _, fmt in ipairs({"%.15g", "%.16g"}) do
     local short = string.format(fmt, v)
@@ -9287,6 +9294,19 @@ read_path = function(handle, comp, path)
     return make_fields(handle, comp, path, inner)
   end
 
+  -- A pointer reads as what it points at, or nil; the view is lazy, so a
+  -- cycle of pointers is only followed as far as it is asked about.
+  if kind == "pointer" then
+    local target, err = Ext._Internal.GetField(handle, comp, path)
+    if target == nil then
+      if err ~= nil then error("bg3le: " .. err, 0) end
+      return nil
+    end
+    local inner, err2 = Ext._Internal.ComponentFields(comp, path)
+    if inner == nil then error("bg3le: " .. tostring(err2), 0) end
+    return make_fields(handle, comp, path, inner)
+  end
+
   local value, err = Ext._Internal.GetField(handle, comp, path)
   if value == nil and err ~= nil then error("bg3le: " .. err, 0) end
   if kind == "entity" then return Ext._Internal.EntityValue(value) end
@@ -10806,6 +10826,25 @@ local function read_object_path(addr, class, path, kind)
 
   if kind == "struct" then
     return read_object(addr, class, path, {})
+  end
+
+  -- A pointer reads as what it points at, or nil. Read when first touched:
+  -- a snapshot is eager, and pointers form cycles.
+  if kind == "pointer" then
+    local target = Ext._Internal.ObjectGetField(addr, class, path)
+    if target == nil then return nil end
+    local loaded
+    local function get()
+      if loaded == nil then loaded = read_object(addr, class, path, {}) end
+      return loaded
+    end
+    return Ext._Internal.NewObjectProxy({
+      __index = function(_, k) return get()[k] end,
+      __newindex = function(_, k, v) get()[k] = v end,
+      __pairs = function() return pairs(get()) end,
+      __len = function() return #get() end,
+      __bg3leIdentity = "p:" .. string.format("%x", target) .. ":" .. class .. ":" .. path,
+    })
   end
 
   if kind == "array" and not Ext._Internal.IsVector(class, path) then

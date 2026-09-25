@@ -48,6 +48,7 @@
 
 #include "../component_meta_abi.h"
 #include "../log.h"
+#include "../mem.h"
 
 // From platform_linux.cpp; the self-test below needs an allocator to build an
 // array with.
@@ -769,6 +770,9 @@ constexpr FieldKind kind_of() {
         return FieldKind::Variant;
     } else if constexpr (scalar_kind_of<T>() != FieldKind::Unsupported) {
         return scalar_kind_of<T>();
+    } else if constexpr (std::is_pointer_v<T>
+                         && std::is_class_v<std::remove_cv_t<std::remove_pointer_t<T>>>) {
+        return FieldKind::Pointer;
     } else if constexpr (std::is_class_v<T>) {
         return FieldKind::Struct;
     } else {
@@ -970,6 +974,11 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
             f.KeyTypeName = type_name<K>().data();
             f.KeyTypeNameLength = (std::uint16_t)type_name<K>().size();
         }
+    } else if constexpr (std::is_pointer_v<T>
+                         && std::is_class_v<std::remove_cv_t<std::remove_pointer_t<T>>>) {
+        using P = std::remove_cv_t<std::remove_pointer_t<T>>;
+        f.TypeName = type_name<P>().data();
+        f.TypeNameLength = (std::uint16_t)type_name<P>().size();
     } else if constexpr (LegacyMapTraits<T>::kIsLegacyMap) {
         using K = typename LegacyMapTraits<T>::Key;
         using V = typename LegacyMapTraits<T>::Value;
@@ -1438,7 +1447,8 @@ std::unordered_map<std::string_view, ClassFields const*>& by_type_name() {
 // The table describing a Struct field's type, or null if bg3se does not
 // describe it.
 ClassFields const* struct_type_of(FieldDesc const* field) {
-    if (field == nullptr || field->Kind != FieldKind::Struct
+    if (field == nullptr
+        || (field->Kind != FieldKind::Struct && field->Kind != FieldKind::Pointer)
         || field->TypeName == nullptr) {
         return nullptr;
     }
@@ -1625,6 +1635,13 @@ Resolved resolve_path(ClassFields const* cls, char const* path, void* base) {
 
         cls = struct_type_of(&current);
         if (cls == nullptr) return out;  // cannot descend through this
+        if (current.Kind == FieldKind::Pointer && address != nullptr) {
+            void* target = nullptr;
+            if (!safe_read(address, &target, sizeof(target)) || target == nullptr) {
+                return out;
+            }
+            address = target;
+        }
         rest = rest.substr(dot + 1);
     }
     return out;
@@ -1716,7 +1733,8 @@ namespace {
 std::uint8_t reportable_kind(FieldDesc const& field, unsigned depth = 0) {
     if (depth > 4) return (std::uint8_t)FieldKind::Unsupported;
 
-    if (field.Kind == FieldKind::Struct && struct_type_of(&field) == nullptr) {
+    if ((field.Kind == FieldKind::Struct || field.Kind == FieldKind::Pointer)
+        && struct_type_of(&field) == nullptr) {
         return (std::uint8_t)FieldKind::Unsupported;
     }
 
@@ -1744,7 +1762,10 @@ std::uint8_t reportable_kind(FieldDesc const& field, unsigned depth = 0) {
         // HashMap<Guid, Array<Entry>> has no scalar element kind and no
         // element struct, but indexing it twice reaches an Entry, so reporting
         // it unsupported would hide a field that works.
-        if (field.ElemKind != FieldKind::Unsupported) {
+        // A pointer element is usable only if what it points at is described,
+        // which the element descriptor answers.
+        if (field.ElemKind != FieldKind::Unsupported
+            && field.ElemKind != FieldKind::Pointer) {
             return (std::uint8_t)field.Kind;
         }
         if (elem_type_of(&field) != nullptr) {
@@ -2810,6 +2831,7 @@ extern "C" char const* bg3le_meta_kind_name(std::uint8_t kind) {
         case FieldKind::Inherit: return "inherit";
         case FieldKind::ComponentHandle: return "handle";
         case FieldKind::ConditionId: return "condition";
+        case FieldKind::Pointer: return "pointer";
         default: return "unsupported";
     }
 }
