@@ -41,8 +41,10 @@ component's declared size with the size the engine recorded, and
   `StringifyInternalTypes`, `AvoidRecursion`, `LimitDepth`,
   `LimitArrayElements`, or the older positional form), sorts object keys
   the way it does, and writes `"*RECURSION*"` and `"*DEPTH LIMIT
-  EXCEEDED*"` where it would; `Parse` keeps `1.0` a float and a `null` in
-  an array a hole. So `_D` output matches upstream's line for line, stat
+  EXCEEDED*"` where it would; `Parse` is upstream's own, through rapidjson
+  with its flags — comments, trailing commas, `NaN` — keeping `1.0` a float
+  and a `null` in an array a hole. It was a Lua parser, and Mod
+  Configuration Menu's settings made it most of the menu's load. So `_D` output matches upstream's line for line, stat
   dumps included (members, then attributes in the modifier list's order).
   A slow event handler is reported as upstream's profiler reports it: a
   warning over `Ext.Config`'s thresholds. `Ext.OnNextTick` is a one-shot

@@ -2300,6 +2300,7 @@ extern "C" int bg3le_ext_command_line(lua_State* L);
 extern "C" int bg3le_ext_load_file(lua_State* L);
 extern "C" int bg3le_ext_pak_modules(lua_State* L);
 extern "C" int bg3le_ext_mod_settings_order(lua_State* L);
+extern "C" int bg3le_json_parse(lua_State* L);
 extern "C" int bg3le_ext_pak_read(lua_State* L);
 extern "C" int bg3le_ext_save_file(lua_State* L);
 extern "C" int bg3le_ext_write_data_file(lua_State* L);
@@ -5887,6 +5888,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "JsonBinaryEncode");
     lua_pushcfunction(g_lua, bg3le_json_binary_decode);
     lua_setfield(g_lua, -2, "JsonBinaryDecode");
+    lua_pushcfunction(g_lua, bg3le_json_parse);
+    lua_setfield(g_lua, -2, "JsonParse");
     lua_pushcfunction(g_lua, l_imgui_input_state);
     lua_setfield(g_lua, -2, "ImguiInputState");
     lua_pushcfunction(g_lua, l_imgui_window_geometry);
@@ -6543,153 +6546,10 @@ table.find = Ext.Table.Find
 
 -- ---- Ext.Json.Parse ----
 --
--- Stringify was already here; this is its inverse. Written out rather than
--- wrapped around a library because the output has to be the shape bg3se
--- produces: objects become tables keyed by string, arrays tables keyed by
--- integer from one, and null becomes nil, which means a null in an array
--- leaves a hole exactly as it does upstream.
-function Ext.Json.Parse(text, binary)
-  if type(text) ~= "string" then
-    error("Ext.Json.Parse expects a string", 2)
-  end
-  if binary == true then return Ext._Internal.JsonBinaryDecode(text) end
-
-  local pos = 1
-
-  -- Upstream's message, whatever the fault.
-  local function fail()
-    error("Unable to parse JSON", 3)
-  end
-
-  local depth = 0
-  local function enter()
-    depth = depth + 1
-    if depth > 64 then error("Maximum JSON depth exceeded", 3) end
-  end
-
-  local function skip()
-    while true do
-      local c = text:sub(pos, pos)
-      if c == " " or c == "\t" or c == "\n" or c == "\r" then
-        pos = pos + 1
-      else
-        return c
-      end
-    end
-  end
-
-  local ESCAPES = {
-    ['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b", f = "\f",
-    n = "\n", r = "\r", t = "\t",
-  }
-
-  local function parse_string()
-    pos = pos + 1                      -- the opening quote
-    local parts = {}
-    while true do
-      local c = text:sub(pos, pos)
-      if c == "" then fail("unterminated string") end
-      if c == '"' then pos = pos + 1 return table.concat(parts) end
-
-      if c == "\\" then
-        local esc = text:sub(pos + 1, pos + 1)
-        local simple = ESCAPES[esc]
-        if simple ~= nil then
-          parts[#parts + 1] = simple
-          pos = pos + 2
-        elseif esc == "u" then
-          local hex = text:sub(pos + 2, pos + 5)
-          local code = tonumber(hex, 16)
-          if code == nil then fail("bad \\u escape") end
-          -- utf8.char is 5.3; the fork is 5.3.6.
-          parts[#parts + 1] = utf8.char(code)
-          pos = pos + 6
-        else
-          fail("bad escape")
-        end
-      else
-        parts[#parts + 1] = c
-        pos = pos + 1
-      end
-    end
-  end
-
-  local parse_value
-
-  local function parse_array()
-    enter()
-    pos = pos + 1
-    local out = {}
-    if skip() == "]" then pos = pos + 1 depth = depth - 1 return out end
-    -- Counted rather than appended, so a null leaves a hole at its index
-    -- as upstream's parser does instead of shifting what follows.
-    local n = 0
-    while true do
-      n = n + 1
-      out[n] = parse_value()
-      local c = skip()
-      if c == "," then
-        pos = pos + 1
-      elseif c == "]" then
-        pos = pos + 1
-        depth = depth - 1
-        return out
-      else
-        fail("expected , or ]")
-      end
-    end
-  end
-
-  local function parse_object()
-    enter()
-    pos = pos + 1
-    local out = {}
-    if skip() == "}" then pos = pos + 1 depth = depth - 1 return out end
-    while true do
-      if skip() ~= '"' then fail("expected a key") end
-      local key = parse_string()
-      if skip() ~= ":" then fail("expected :") end
-      pos = pos + 1
-      out[key] = parse_value()
-      local c = skip()
-      if c == "," then
-        pos = pos + 1
-      elseif c == "}" then
-        pos = pos + 1
-        depth = depth - 1
-        return out
-      else
-        fail("expected , or }")
-      end
-    end
-  end
-
-  parse_value = function()
-    local c = skip()
-    if c == "" then fail("unexpected end of input") end
-    if c == "{" then return parse_object() end
-    if c == "[" then return parse_array() end
-    if c == '"' then return parse_string() end
-
-    if text:sub(pos, pos + 3) == "true" then pos = pos + 4 return true end
-    if text:sub(pos, pos + 4) == "false" then pos = pos + 5 return false end
-    if text:sub(pos, pos + 3) == "null" then pos = pos + 4 return nil end
-
-    local literal = text:match("^-?%d+%.?%d*[eE]?[-+]?%d*", pos)
-    if literal == nil or literal == "" then fail("unexpected character") end
-    pos = pos + #literal
-    -- As rapidjson reads them: a fraction or exponent makes a float, even a
-    -- whole one, and anything else an integer.
-    local number = tonumber(literal)
-    if number == nil then fail() end
-    if literal:find("[.eE]") then return number + 0.0 end
-    return math.tointeger(number) or number
-  end
-
-  local value = parse_value()
-  if skip() ~= "" then fail("trailing content") end
-  return value
-end
+-- Upstream's LuaParse, through rapidjson (src/vendor/json_binary.cpp):
+-- objects become tables keyed by string, arrays tables keyed from one, and a
+-- null leaves a hole, as upstream's does.
+Ext.Json.Parse = Ext._Internal.JsonParse
 
 -- ---- Ext.IO ----
 --
@@ -9980,15 +9840,24 @@ end
 -- reference/mod-loadorder.txt shows.
 Ext.Mod = {}
 
+-- One object per Module for the session, as upstream hands out the same
+-- engine object each time: Mod Configuration Menu asks for each mod's
+-- dependencies hundreds of times as the menu comes up.
+local mods_by_addr = {}
+
 local function make_mod(addr)
+  local known = mods_by_addr[addr]
+  if known ~= nil then return known end
   local info = Ext._Internal.ModInfo(addr)
   if info == nil then return nil end
-  return {
+  local mod = {
     Info = info,
     Dependencies = Ext._Internal.ModList(addr, 0),
     ModConflicts = Ext._Internal.ModList(addr, 1),
     Addons = Ext._Internal.ModList(addr, 2),
   }
+  mods_by_addr[addr] = mod
+  return mod
 end
 
 -- The mods the player has enabled, in order.
@@ -10012,19 +9881,40 @@ end
 -- depends on it, so its own load-order check complained, and bootstraps ran
 -- in that order. Modules modsettings does not name (the base game's) keep
 -- the engine's order, ahead of the player's mods.
+-- Recomputed only when the engine's list or the file changes: IsModLoaded
+-- asks for it on every call.
+local load_order_key, load_order = nil, nil
+
+-- The engine's list only grows while mods load, so its length and ends
+-- are enough to notice a change.
+local function current_load_order()
+  local settings = Ext._Internal.ModSettingsOrder() or {}
+  local n = Ext._Internal.ModCount()
+  local key = table.concat({n, tostring(Ext._Internal.ModUuidAt(0)),
+                            tostring(Ext._Internal.ModUuidAt(n - 1)),
+                            table.concat(settings, ",")}, ";")
+  if key ~= load_order_key then
+    local engine = {}
+    for i = 0, n - 1 do
+      local uuid = Ext._Internal.ModUuidAt(i)
+      if uuid ~= nil then engine[#engine + 1] = uuid end
+    end
+    load_order_key = key
+    load_order = Ext._Internal.BuildLoadOrder(engine, settings)
+  end
+  return load_order
+end
+
 function Ext.Mod.GetLoadOrder()
+  local order = current_load_order()
+  return table.move(order, 1, #order, 1, {})
+end
+
+function Ext._Internal.BuildLoadOrder(engine, settings)
   local out = {}
   local seen = {}
-  local settings = Ext._Internal.ModSettingsOrder() or {}
   local listed = {}
   for _, uuid in ipairs(settings) do listed[uuid] = true end
-
-  local engine = {}
-  local n = Ext._Internal.ModCount()
-  for i = 0, n - 1 do
-    local uuid = Ext._Internal.ModUuidAt(i)
-    if uuid ~= nil then engine[#engine + 1] = uuid end
-  end
 
   for _, uuid in ipairs(engine) do
     if not listed[uuid] and not seen[uuid] then
@@ -10060,7 +9950,7 @@ local mod_loaded_for = -1
 function Ext.Mod.IsModLoaded(uuid)
   if type(uuid) ~= "string" then return false end
 
-  local order = Ext.Mod.GetLoadOrder()
+  local order = current_load_order()
   if #order ~= mod_loaded_for then
     mod_loaded = {}
     mod_loaded_for = #order

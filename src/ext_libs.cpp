@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <dirent.h>
 #include <map>
+#include <mutex>
 #include <vector>
 
 #include "lauxlib.h"
@@ -567,46 +568,65 @@ std::vector<PakModule> const& pak_modules() {
 // what bg3le uses when it has one. It is the fallback for the case where
 // the engine has loaded no add-on at all: the mods are installed, the
 // player has enabled them, and their scripts would otherwise never run.
+// Parsed once per version of the file: mods ask through IsModLoaded, and
+// Mod Configuration Menu asks a few hundred times as the menu comes up.
 extern "C" int bg3le_ext_mod_settings_order(lua_State* L) {
     const std::string root = profile_root();
     if (root.empty()) return 0;
 
     const std::string path =
         root + "/PlayerProfiles/Public/modsettings.lsx";
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (f == nullptr) return 0;
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) return 0;
 
-    std::string text;
-    char block[65536];
-    std::size_t got = 0;
-    while ((got = std::fread(block, 1, sizeof(block), f)) > 0) {
-        text.append(block, got);
-    }
-    std::fclose(f);
+    static std::mutex lock;
+    static std::vector<std::string> uuids;
+    static struct timespec seenTime{};
+    static off_t seenSize = -1;
+    std::lock_guard<std::mutex> held(lock);
 
-    lua_newtable(L);
-    int index = 1;
-    std::size_t at = 0;
-    for (;;) {
-        // Each entry is a ModuleShortDesc; its UUID is the only field the
-        // caller needs, and the attribute name is unambiguous within one.
-        const std::size_t entry = text.find("<node id=\"ModuleShortDesc\"", at);
-        if (entry == std::string::npos) break;
-        const std::size_t end = text.find("</node>", entry);
-        const std::size_t uuid = text.find("id=\"UUID\"", entry);
-        if (uuid == std::string::npos || (end != std::string::npos && uuid > end)) {
-            at = entry + 1;
-            continue;
+    if (st.st_size != seenSize || st.st_mtim.tv_sec != seenTime.tv_sec
+        || st.st_mtim.tv_nsec != seenTime.tv_nsec) {
+        std::FILE* f = std::fopen(path.c_str(), "rb");
+        if (f == nullptr) return 0;
+        std::string text;
+        char block[65536];
+        std::size_t got = 0;
+        while ((got = std::fread(block, 1, sizeof(block), f)) > 0) {
+            text.append(block, got);
         }
-        const std::size_t value = text.find("value=\"", uuid);
-        if (value == std::string::npos) break;
-        const std::size_t from = value + 7;
-        const std::size_t to = text.find('"', from);
-        if (to == std::string::npos) break;
+        std::fclose(f);
 
-        lua_pushlstring(L, text.data() + from, to - from);
+        uuids.clear();
+        std::size_t at = 0;
+        for (;;) {
+            // Each entry is a ModuleShortDesc; its UUID is the only field the
+            // caller needs, and the attribute name is unambiguous within one.
+            const std::size_t entry = text.find("<node id=\"ModuleShortDesc\"", at);
+            if (entry == std::string::npos) break;
+            const std::size_t end = text.find("</node>", entry);
+            const std::size_t uuid = text.find("id=\"UUID\"", entry);
+            if (uuid == std::string::npos || (end != std::string::npos && uuid > end)) {
+                at = entry + 1;
+                continue;
+            }
+            const std::size_t value = text.find("value=\"", uuid);
+            if (value == std::string::npos) break;
+            const std::size_t from = value + 7;
+            const std::size_t to = text.find('"', from);
+            if (to == std::string::npos) break;
+            uuids.emplace_back(text.data() + from, to - from);
+            at = end == std::string::npos ? to : end;
+        }
+        seenSize = st.st_size;
+        seenTime = st.st_mtim;
+    }
+
+    lua_createtable(L, (int)uuids.size(), 0);
+    int index = 1;
+    for (std::string const& uuid : uuids) {
+        lua_pushlstring(L, uuid.data(), uuid.size());
         lua_rawseti(L, -2, index++);
-        at = end == std::string::npos ? to : end;
     }
     return 1;
 }
