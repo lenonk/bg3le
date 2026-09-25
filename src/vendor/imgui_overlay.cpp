@@ -66,6 +66,14 @@ bg3se::extui::IMGUIManager* manager() {
     return &bg3se::gExtender->IMGUI();
 }
 
+// Held while a frame is built and while a font is added: upstream does both
+// on the client thread, here Lua and the frame run on different threads,
+// and a font added mid-frame left the window on the default font.
+std::mutex& frame_lock() {
+    static std::mutex m;
+    return m;
+}
+
 }  // namespace
 
 bool imgui_overlay_wanted();
@@ -387,6 +395,7 @@ void imgui_overlay_tick() {
     } leave{&inside};
 
     try {
+        const std::lock_guard<std::mutex> held(frame_lock());
         ui->Update();
         imgui_flush_events();
         record_frame();
@@ -419,8 +428,21 @@ extern "C" bool bg3le_imgui_load_font(char const* name, char const* path,
     auto* ui = bg3le::manager();
     if (ui == nullptr || name == nullptr) return false;
     if (!ui->WasUIInitialized()) return false;
+    const std::lock_guard<std::mutex> held(bg3le::frame_lock());
     return ui->LoadFont(bg3se::FixedString(name),
                         path != nullptr ? path : "", size);
+}
+
+// Whether a font name resolves, and to a loaded ImGui font: 0 missing,
+// 1 known but not loaded, 2 loaded.
+extern "C" int bg3le_imgui_font_info(char const* name, float* size) {
+    auto* ui = bg3le::manager();
+    if (ui == nullptr || name == nullptr) return 0;
+    const std::lock_guard<std::mutex> held(bg3le::frame_lock());
+    auto* font = ui->GetFont(bg3se::FixedString(name));
+    if (font == nullptr) return 0;
+    *size = font->SizePixels;
+    return font->Font != nullptr ? 2 : 1;
 }
 
 extern "C" void bg3le_imgui_set_ui_scale(float scale) {

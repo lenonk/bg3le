@@ -140,7 +140,9 @@ fi
 if [ "${HEADLESS:-0}" = "1" ]; then
     hdr=()
     [ "${HDR:-0}" = "1" ] && hdr=(--hdr-enabled --hdr-debug-force-support)
-    launch=(gamescope --backend headless -W 1280 -H 720 "${hdr[@]}" -- "${launch[@]}")
+    # RES=1920x1080 picks the headless resolution; 1280x720 by default.
+    res="${RES:-1280x720}"
+    launch=(gamescope --backend headless -W "${res%x*}" -H "${res#*x}" "${hdr[@]}" -- "${launch[@]}")
 fi
 
 # GameMode is off unless asked for, because it does not work here and says so

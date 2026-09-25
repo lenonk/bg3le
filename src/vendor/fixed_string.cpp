@@ -752,10 +752,17 @@ constexpr std::uint32_t kInternRefCount = 0x100000;
 extern "C" bool bg3le_fixed_string_index_of(char const* wanted,
                                             std::uint32_t* out);
 
+extern "C" bool bg3le_fixed_string_create(char const* text, std::uint32_t* out);
+
 extern "C" bool bg3le_fixed_string_intern(char const* text,
                                           std::uint32_t* out) {
-    const CacheLock lock(string_cache_lock());
     if (text == nullptr || out == nullptr) return false;
+    // The engine's own CreateFromString, when it was found, gives the one id
+    // every other path gets: the text index below is built once, so text
+    // first created after it was otherwise interned twice under two ids.
+    if (bg3le_fixed_string_create(text, out)) return true;
+
+    const CacheLock lock(string_cache_lock());
 
     // What has already been interned here, so the same text asked for
     // twice costs nothing.

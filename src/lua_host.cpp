@@ -1622,11 +1622,10 @@ bool write_field(lua_State* L, int index, void* address, FieldKind kind,
             const char* text = lua_tolstring(L, index, &length);
             if (text == nullptr) return false;
 
+            // Interned through the engine first (see bg3le_fixed_string_intern),
+            // so a string created after startup gets the id its readers use.
             std::uint32_t id = 0;
-            if (!bg3le_fixed_string_index_of(text, &id)
-                && !bg3le_fixed_string_intern(text, &id)) {
-                return false;
-            }
+            if (!bg3le_fixed_string_intern(text, &id)) return false;
             std::memcpy(address, &id, sizeof(id));
             return true;
         }
@@ -3389,6 +3388,16 @@ int l_imgui_load_font(lua_State* L) {
                            ? 1
                            : 0);
     return 1;
+}
+
+// Ext._Internal.ImguiFontInfo(name) -> "missing" | "unloaded" | "loaded", size
+extern "C" int bg3le_imgui_font_info(char const* name, float* size);
+int l_imgui_font_info(lua_State* L) {
+    float size = 0;
+    const int state = bg3le_imgui_font_info(luaL_checkstring(L, 1), &size);
+    lua_pushstring(L, state == 2 ? "loaded" : state == 1 ? "unloaded" : "missing");
+    lua_pushnumber(L, size);
+    return 2;
 }
 
 int l_imgui_set_ui_scale(lua_State* L) {
@@ -5639,6 +5648,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ImguiWatch");
     lua_pushcfunction(g_lua, l_imgui_load_font);
     lua_setfield(g_lua, -2, "ImguiLoadFont");
+    lua_pushcfunction(g_lua, l_imgui_font_info);
+    lua_setfield(g_lua, -2, "ImguiFontInfo");
     lua_pushcfunction(g_lua, l_imgui_set_ui_scale);
     lua_setfield(g_lua, -2, "ImguiSetUIScale");
     lua_pushcfunction(g_lua, l_imgui_set_font_scale);
