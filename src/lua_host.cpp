@@ -8127,6 +8127,60 @@ function Ext._Internal.FireEvent(name, params)
   if moduleLoad then Ext._Internal.StatsModuleLoad = false end
 end
 
+-- Upstream's ClientState::OnInputEvent: the SDL event as upstream's event
+-- object, enums as their labels. Returns whether a handler prevented it.
+local function input_label(enum, value)
+  local labels = Ext.Enums[enum]
+  return labels ~= nil and labels[value] or value
+end
+
+local function input_flags(enum, value)
+  local out = {}
+  local labels = Ext.Enums[enum]
+  if labels == nil then return out end
+  for k, label in pairs(labels) do
+    if type(k) == "number" and k ~= 0 and value & k == k then
+      out[#out + 1] = label
+    end
+  end
+  table.sort(out)
+  return out
+end
+
+function Ext._Internal.InputEvent(kind, a, b, c, d, e, x, y)
+  local name, params
+  if kind == 1 then
+    name = "KeyInput"
+    params = {Event = a ~= 0 and "KeyDown" or "KeyUp",
+              Key = input_label("SDLScanCode", b),
+              Modifiers = input_flags("SDLKeyModifier", c),
+              Pressed = d ~= 0, Repeat = e ~= 0, CanPreventAction = true}
+  elseif kind == 2 then
+    name = "MouseButtonInput"
+    params = {Button = a, Pressed = b ~= 0, Clicks = c, X = d, Y = e,
+              CanPreventAction = true}
+  elseif kind == 3 then
+    name = "MouseWheelInput"
+    params = {ScrollX = x, ScrollY = y, X = a, Y = b, CanPreventAction = true}
+  elseif kind == 4 then
+    name = "ControllerAxisInput"
+    params = {DeviceId = a, Axis = input_label("SDLControllerAxis", b),
+              Value = x}
+  elseif kind == 5 then
+    name = "ControllerButtonInput"
+    params = {DeviceId = a, Event = b ~= 0 and "KeyDown" or "KeyUp",
+              Button = input_label("SDLControllerButton", c),
+              Pressed = d ~= 0, CanPreventAction = true}
+  elseif kind == 6 then
+    name = "ViewportResized"
+    params = {Width = a, Height = b}
+  else
+    return false
+  end
+  Ext._Internal.FireEvent(name, params)
+  return params.ActionPrevented == true
+end
+
 -- Ext.ModEvents[mod][event]: created on first index, as upstream's
 -- ModEventManager does. Mod Configuration Menu subscribes to events it
 -- never registers, including the one its own logger hangs off.
@@ -12094,6 +12148,31 @@ void lua_client_tick(char const* from, char const* to) {
     }
     call_internal("RunTimers");
     debug_server_pump_client();
+}
+
+bool lua_client_input(InputKind kind, long long a, long long b, long long c,
+                      long long d, long long e, double x, double y) {
+    if (g_client_lua == nullptr || !g_client_ticks_itself.load()) return false;
+    InContext client(g_client_lua);
+    lua_getglobal(g_lua, "Ext");
+    lua_getfield(g_lua, -1, "_Internal");
+    lua_getfield(g_lua, -1, "InputEvent");
+    if (!lua_isfunction(g_lua, -1)) {
+        lua_pop(g_lua, 3);
+        return false;
+    }
+    lua_pushinteger(g_lua, (lua_Integer)kind);
+    for (long long v : {a, b, c, d, e}) lua_pushinteger(g_lua, (lua_Integer)v);
+    lua_pushnumber(g_lua, x);
+    lua_pushnumber(g_lua, y);
+    bool prevented = false;
+    if (lua_pcall(g_lua, 8, 1, 0) != LUA_OK) {
+        logf("lua: input event failed: %s", lua_tostring(g_lua, -1));
+    } else {
+        prevented = lua_toboolean(g_lua, -1) != 0;
+    }
+    lua_pop(g_lua, 3);
+    return prevented;
 }
 
 // Both contexts load mods, each running the bootstrap that belongs to it.

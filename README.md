@@ -291,6 +291,12 @@ component's declared size with the size the engine recorded, and
   are delivered on the client tick, so a handler cannot set `Handled` on its
   event; `WriteCallback`, `GetStateMachine` and the picking, cursor and
   drag-and-drop managers are not there yet
+- **Input events**: `KeyInput`, `MouseButtonInput`, `MouseWheelInput`, the
+  controller events and `ViewportResized`, thrown from the game's own
+  `SDL_PollEvent` after the overlay has seen the event, as upstream does,
+  with keys and buttons as their enum labels. `PreventAction` swallows the
+  input. Mod Configuration Menu finds its in-game menu button this way, when
+  Escape is pressed
 - **`Ext.Loca` on the engine's own `TranslatedStringRepository`**, read and
   written as upstream does, so a string a mod sets is what the game's
   interface shows — Mod Configuration Menu's main-menu button is labelled
@@ -487,9 +493,6 @@ component's declared size with the size the engine recorded, and
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
-- **Input events.** `KeyInput`, `MouseButtonInput` and the controller events
-  are declared but never fired, so Mod Configuration Menu's button in the
-  in-game menu, which it looks for when Escape is pressed, is not wired up
 - **Saving `Ext.Vars` and persistent timers.** They go in the same save
   region as `PersistentVars`, which is in place; their nodes are not written
   yet.

@@ -8,13 +8,15 @@
 // on Windows -- see src/vendor/sdl_linux.cpp.
 //
 // With the overlay off (BG3LE_IMGUI=0) every one of these is a straight call
-// through; SDL_PollEvent runs thousands of times a second.
+// through; SDL_PollEvent runs thousands of times a second. Its input events
+// also become the client's KeyInput and friends, overlay or not.
 
 #include <dlfcn.h>
 
 #include <SDL.h>
 
 #include "log.h"
+#include "lua_host.h"
 
 namespace bg3le {
 
@@ -54,6 +56,54 @@ Fn real(char const* name) {
 
 }  // namespace
 
+namespace {
+
+using bg3le::InputKind;
+
+// KeyInput and friends; true if a handler prevented a cancelable event.
+bool dispatch_input(SDL_Event const* e) {
+    switch (e->type) {
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        return bg3le::lua_client_input(
+            InputKind::Key, e->type == SDL_KEYDOWN, e->key.keysym.scancode,
+            e->key.keysym.mod, e->key.state == SDL_PRESSED, e->key.repeat != 0,
+            0, 0);
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP:
+        return bg3le::lua_client_input(
+            InputKind::MouseButton, e->button.button,
+            e->button.state == SDL_PRESSED, e->button.clicks, e->button.x,
+            e->button.y, 0, 0);
+    case SDL_MOUSEWHEEL:
+        return bg3le::lua_client_input(InputKind::MouseWheel, e->wheel.x,
+                                       e->wheel.y, 0, 0, 0,
+                                       e->wheel.preciseX, e->wheel.preciseY);
+    case SDL_CONTROLLERAXISMOTION:
+        bg3le::lua_client_input(InputKind::ControllerAxis, e->caxis.which,
+                                e->caxis.axis, 0, 0, 0,
+                                e->caxis.value / 32768.0, 0);
+        return false;
+    case SDL_CONTROLLERBUTTONDOWN:
+    case SDL_CONTROLLERBUTTONUP:
+        return bg3le::lua_client_input(
+            InputKind::ControllerButton, e->cbutton.which,
+            e->type == SDL_CONTROLLERBUTTONDOWN, e->cbutton.button,
+            e->cbutton.state == SDL_PRESSED, 0, 0, 0);
+    case SDL_WINDOWEVENT:
+        if (e->window.event == SDL_WINDOWEVENT_RESIZED) {
+            bg3le::lua_client_input(InputKind::ViewportResized,
+                                    e->window.data1, e->window.data2, 0, 0,
+                                    0, 0, 0);
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
+}  // namespace
+
 extern "C" SDL_Window* SDL_CreateWindow(char const* title, int x, int y,
                                         int w, int h, Uint32 flags) {
     using Fn = SDL_Window* (*)(char const*, int, int, int, int, Uint32);
@@ -74,8 +124,11 @@ extern "C" int SDL_PollEvent(SDL_Event* event) {
     static const Fn next = real<Fn>("SDL_PollEvent");
     if (next == nullptr) return 0;
 
-    if (!bg3le::imgui_overlay_wanted()) return next(event);
-    return bg3le::sdl_on_poll_event(next, event);
+    int result = bg3le::imgui_overlay_wanted()
+        ? bg3le::sdl_on_poll_event(next, event) : next(event);
+    // After the overlay has had it, as upstream orders them.
+    if (result == 1 && dispatch_input(event)) result = 0;
+    return result;
 }
 
 extern "C" SDL_bool SDL_IsTextInputActive(void) {

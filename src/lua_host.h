@@ -51,6 +51,14 @@ void lua_load_client_scripts();
 // moved (from/to non-null), then timers and Tick.
 void lua_client_tick(char const* from, char const* to);
 
+// Upstream's ClientState::OnInputEvent, from the thread that polls SDL.
+// `kind` and the arguments are laid out by src/sdl_forward.cpp; returns
+// true if a handler prevented the action.
+enum class InputKind { Key = 1, MouseButton, MouseWheel, ControllerAxis,
+                       ControllerButton, ViewportResized };
+bool lua_client_input(InputKind kind, long long a, long long b, long long c,
+                      long long d, long long e, double x, double y);
+
 // Hands the PersistentVars of a save just read to the mods, if they are up;
 // otherwise LoadMods does it after the bootstraps.
 void lua_restore_persistent_vars();
