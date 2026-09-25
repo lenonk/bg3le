@@ -1,6 +1,7 @@
 // Ext.Level's functions that go through a level manager, as upstream's
 // Lua/Libs/Level.inl writes them: the level data, persistent level templates,
-// the physics scene's queries, and the AI grid's tiles and paths.
+// the physics scene's queries, the AI grid's tiles and paths, and surface
+// actions.
 //
 // The level, physics and hit types are bg3se's (by Norbyte and the bg3se
 // contributors); the server's manager is found in templates.cpp.
@@ -14,6 +15,7 @@
 #include <GameDefinitions/RootTemplates.h>
 #include <GameDefinitions/Physics.h>
 #include <GameDefinitions/Ai.h>
+#include <GameDefinitions/Surface.h>
 
 #include <cmath>
 
@@ -598,4 +600,103 @@ extern "C" int bg3le_ai_path_search(bool client, void* at, char const** why) {
     }
     reinterpret_cast<PathSearchProc>(bg3le::load_bias() + kPathSearch)(grid, path);
     return path->GoalFound ? 1 : 0;
+}
+
+// ---- surface actions ----
+//
+// Upstream's SurfaceManager::CreateAction and AddAction (Surface.inl), through
+// the engine's own: the factory's create, found where the CreateSurface
+// Osiris calls use it, and the manager's AddAction, which sets the level,
+// enters the action and appends it. Each is checked by its opening.
+
+namespace {
+
+constexpr std::uintptr_t kSurfaceActionFactory = 0x7ca5eb0;
+constexpr std::uintptr_t kCreateAction = 0x38a5fd0;
+constexpr std::uintptr_t kAddAction = 0x2cc5b20;
+constexpr std::uintptr_t kTransformInit = 0x2682850;
+
+// The create takes a story action id and the ClassDescription bank, which
+// it stores at +0x10 and +0x50 (upstream sets the latter afterwards), then
+// upstream's action handle, null for a new action.
+constexpr unsigned char kCreateActionHead[] = {0x48, 0x89, 0xcb, 0x89, 0xd5, 0x49, 0x89, 0xfe};
+constexpr unsigned char kAddActionHead[] = {0x48, 0x8b, 0x87, 0x70, 0x01, 0x00, 0x00, 0x48, 0x89,
+                                            0xfb, 0x48, 0x89, 0xf7, 0x49, 0x89, 0xf6, 0x48, 0x89,
+                                            0x46, 0x08, 0x48, 0x8b, 0x06, 0xff, 0x50, 0x60};
+constexpr unsigned char kTransformInitHead[] = {0x41, 0x89, 0xf6, 0x48, 0x89, 0xfb, 0x44, 0x88, 0xb7,
+                                                0x80, 0x00, 0x00, 0x00, 0x88, 0x8f, 0x81, 0x00, 0x00,
+                                                0x00, 0x88, 0x97, 0x82, 0x00, 0x00, 0x00};
+
+using CreateActionProc = bg3se::esv::SurfaceAction* (*)(void* factory, int type, int storyActionId,
+                                                       void* classDescriptions,
+                                                       std::uint64_t actionHandle);
+constexpr std::uint64_t kNullHandle = 0xffc0000000000000ull;
+using AddActionProc = void (*)(bg3se::esv::SurfaceManager*, bg3se::esv::SurfaceAction*);
+using TransformInitProc = void (*)(bg3se::esv::TransformSurfaceAction*, int transform, int layer,
+                                   int origin);
+
+template <std::size_t N>
+bool code_is(std::uintptr_t at, unsigned char const (&head)[N]) {
+    unsigned char held[N] = {};
+    return bg3le::safe_read((void const*)(bg3le::load_bias() + at), held, N)
+           && std::memcmp(held, head, N) == 0;
+}
+
+bool surface_code_checks_out() {
+    static int usable = -1;
+    if (usable < 0) {
+        usable = code_is(kCreateAction + 0xb, kCreateActionHead)
+                 && code_is(kAddAction + 4, kAddActionHead)
+                 && code_is(kTransformInit + 5, kTransformInitHead);
+        if (!usable) bg3le::logf("surfaces: the engine's surface action code is not where this build has it");
+    }
+    return usable != 0;
+}
+
+bg3se::esv::Level* server_level() {
+    auto* mgr = static_cast<bg3se::LevelManager*>(bg3le_server_level_manager());
+    bg3se::EoCLevel* level = nullptr;
+    if (mgr == nullptr || !bg3le::safe_read(&mgr->CurrentLevel, &level, sizeof(level))) return nullptr;
+    return static_cast<bg3se::esv::Level*>(level);
+}
+
+}  // namespace
+
+// Upstream's CreateSurfaceAction: a new action of the type, or null.
+extern "C" void* bg3le_surface_action_create(int type, void* classDescriptions, char const** why) {
+    if (!surface_code_checks_out()) {
+        *why = "the engine's surface action code is not where this build has it";
+        return nullptr;
+    }
+    if (server_level() == nullptr) return nullptr;
+    void* factory = nullptr;
+    auto const* slot = (void const*)(bg3le::load_bias() + kSurfaceActionFactory);
+    if (!bg3le::safe_read(slot, &factory, sizeof(factory)) || !has_vtable(factory)) {
+        *why = "the surface action factory is not up";
+        return nullptr;
+    }
+    auto create = reinterpret_cast<CreateActionProc>(bg3le::load_bias() + kCreateAction);
+    return create(factory, type, 0, classDescriptions, kNullHandle);
+}
+
+// Upstream's ExecuteSurfaceAction, through the manager's own AddAction.
+extern "C" bool bg3le_surface_action_execute(void* at, char const** why) {
+    auto* action = static_cast<bg3se::esv::SurfaceAction*>(at);
+    auto* level = server_level();
+    if (!surface_code_checks_out()) {
+        *why = "the engine's surface action code is not where this build has it";
+        return false;
+    }
+    if (level == nullptr || action == nullptr || !has_vtable(action)) return true;
+    if (action->Level != nullptr) {
+        *why = "Surface action is already activated!";
+        return false;
+    }
+    if (action->GetTypeId() == bg3se::SurfaceActionType::TransformSurface) {
+        auto* t = static_cast<bg3se::esv::TransformSurfaceAction*>(action);
+        reinterpret_cast<TransformInitProc>(bg3le::load_bias() + kTransformInit)(
+            t, (int)t->SurfaceTransformAction, (int)t->SurfaceLayer, (int)t->OriginSurface);
+    }
+    reinterpret_cast<AddActionProc>(bg3le::load_bias() + kAddAction)(level->SurfaceManager, action);
+    return true;
 }

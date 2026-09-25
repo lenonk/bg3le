@@ -4153,6 +4153,44 @@ int l_ai_path_search(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.SurfaceActionCreate(type) -> address, or nil and why
+extern "C" void* bg3le_surface_action_create(int type, void* classDescriptions, char const** why);
+extern "C" void* bg3le_resource_bank(std::int32_t typeIndex);
+int l_surface_action_create(lua_State* L) {
+    // The ClassDescription bank, as upstream hands the action.
+    void* classes = nullptr;
+    if (void const* meta = bg3le_meta_class("ClassDescription")) {
+        if (const char* engineClass = bg3le_meta_engine_class(meta)) {
+            if (auto index = ecs::index_of(ecs::Context::ImmutableData, engineClass)) {
+                classes = bg3le_resource_bank((std::int32_t)*index);
+            }
+        }
+    }
+    char const* why = nullptr;
+    void* at = bg3le_surface_action_create((int)luaL_checkinteger(L, 1), classes, &why);
+    if (at == nullptr) {
+        lua_pushnil(L);
+        if (why == nullptr) return 1;
+        lua_pushstring(L, why);
+        return 2;
+    }
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.SurfaceActionExecute(address) -> true, or nil and why
+extern "C" bool bg3le_surface_action_execute(void* at, char const** why);
+int l_surface_action_execute(lua_State* L) {
+    char const* why = nullptr;
+    if (!bg3le_surface_action_execute((void*)(std::uintptr_t)luaL_checkinteger(L, 1), &why)) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 // Ext._Internal.AiPathsActive(client) -> {address...}
 extern "C" std::size_t bg3le_ai_paths_active(bool client, void** out, std::size_t cap);
 int l_ai_paths_active(lua_State* L) {
@@ -6663,6 +6701,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "AiPathsActive");
     lua_pushcfunction(g_lua, l_ai_path_search);
     lua_setfield(g_lua, -2, "AiPathSearch");
+    lua_pushcfunction(g_lua, l_surface_action_create);
+    lua_setfield(g_lua, -2, "SurfaceActionCreate");
+    lua_pushcfunction(g_lua, l_surface_action_execute);
+    lua_setfield(g_lua, -2, "SurfaceActionExecute");
     lua_pushcfunction(g_lua, l_level_add_persistent_template);
     lua_setfield(g_lua, -2, "LevelAddPersistentTemplate");
     lua_pushcfunction(g_lua, l_loca_get);
@@ -13660,11 +13702,56 @@ function Ext.Level.GetActivePathfindingRequests()
 end
 end
 
--- Upstream's server-only four; the last two through the level manager.
+-- Upstream's server-only four, through the level manager.
 if not Ext._Internal.IsClientState() then
-  for _, name in ipairs({"CreateSurfaceAction", "ExecuteSurfaceAction"}) do
-    Ext.Level[name] = needs(
-      "Ext.Level." .. name .. " needs the engine's surface action factory")
+  -- Each type's class, as upstream's MakePolymorphicRef.
+  local SURFACE_ACTION_CLASS = {
+    [1] = "esv::CreateSurfaceAction", [2] = "esv::CreatePuddleAction",
+    [3] = "esv::RemoveSurfaceAction", [4] = "esv::ZoneAction",
+    [5] = "esv::TransformSurfaceAction", [6] = "esv::ChangeSurfaceOnPathAction",
+    [7] = "esv::RectangleSurfaceAction", [8] = "esv::PolygonSurfaceAction",
+    [9] = "esv::ForceCreateSurfaceAction", [10] = "esv::CapsuleSurfaceAction",
+  }
+
+  -- A live view: every access reads the action again.
+  local function action_view(at, class)
+    return Ext._Internal.NewObjectProxy({
+      __index = function(_, k) return Ext._Internal.PointedObject(at, class)[k] end,
+      __newindex = function(_, k, v) Ext._Internal.PointedObject(at, class)[k] = v end,
+      __pairs = function() return pairs(Ext._Internal.PointedObject(at, class)) end,
+      __bg3leIdentity = string.format("p:%x", at),
+      __name = Ext._Internal.ViewTypeName(class, ""),
+    })
+  end
+
+  function Ext.Level.CreateSurfaceAction(actionType)
+    local value = actionType
+    if type(actionType) == "string" then
+      value = nil
+      for k, label in pairs(Ext.Enums.SurfaceActionType) do
+        if type(k) == "number" and label == actionType then value = k end
+      end
+    end
+    value = math.tointeger(value)
+    if value == nil or SURFACE_ACTION_CLASS[value] == nil then
+      error("bg3le: " .. tostring(actionType) .. " is not a SurfaceActionType", 2)
+    end
+    local at, why = Ext._Internal.SurfaceActionCreate(value)
+    if at == nil then
+      if why ~= nil then error("bg3le: Ext.Level.CreateSurfaceAction: " .. why, 2) end
+      return nil
+    end
+    return action_view(at, SURFACE_ACTION_CLASS[value])
+  end
+
+  function Ext.Level.ExecuteSurfaceAction(action)
+    local meta = getmetatable(action)
+    local id = type(meta) == "table" and meta.__bg3leIdentity or nil
+    if type(id) ~= "string" or id:sub(1, 2) ~= "p:" then
+      error("bg3le: Ext.Level.ExecuteSurfaceAction expects a surface action", 2)
+    end
+    local ok, why = Ext._Internal.SurfaceActionExecute(tonumber(id:sub(3), 16))
+    if not ok then Ext.Utils.PrintError(why) end
   end
 
   function Ext.Level.GetLevelInfo(levelName)

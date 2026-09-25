@@ -324,6 +324,16 @@ component's declared size with the size the engine recorded, and
   Larian `Function` members are set is not taken, since resetting it would
   mean destroying them, and `FindPath` refuses a path with `IgnoreEntities`
   or `MovedEntities`, which the engine marks on the grid around the search
+- **`Ext.Level.CreateSurfaceAction` and `ExecuteSurfaceAction`**, through the
+  engine's own surface action factory and `SurfaceManager::AddAction`, found
+  where the `CreateSurface` Osiris calls use them (each checked by its
+  opening); the factory is handed the ClassDescription bank, as upstream sets
+  it. A `CreateSurface` action of water, radius 2, turns the tile it is aimed
+  at to `Water`, and executing it twice gets upstream's "already activated".
+  A `TransformSurface` action gets its `Init` call as upstream's does, but the
+  engine's own callers also seed its cell searcher with an area, which neither
+  upstream's `ExecuteSurfaceAction` nor bg3le's does: in a test, freezing
+  that water changed nothing
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -609,14 +619,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **10 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **8 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
   the source, because this one was stale at 86 for a while: 3 are
   `Ext.Entity`'s `Create`, `Destroy` and `SetupTracing`, 3 `Ext.StaticData`'s
-  bank writes, 2 `Ext.Level`'s surface actions and 2 `Ext.Stats`' functor
-  execution.
+  bank writes and 2 `Ext.Stats`' functor execution.
   `reference/ext-api-surface.txt` lists them with their shapes
 - **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
