@@ -2998,6 +2998,66 @@ int l_object_map_key(lua_State* L) {
 // static data type, the symbol table gives that type's index, the manager
 // gives the bank for the index, and the bank maps the GUID to the resource.
 // Every link but the manager was already in place.
+// A resource class name's engine class and static data type index.
+bool resource_type(lua_State* L, char const* className, char const** engineClass,
+                   std::int32_t* typeIndex) {
+    void const* meta = bg3le_meta_class(className);
+    *engineClass = meta != nullptr ? bg3le_meta_engine_class(meta) : nullptr;
+    if (*engineClass == nullptr) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s is not a resource type", className);
+        return false;
+    }
+    const auto index = ecs::index_of(ecs::Context::ImmutableData, *engineClass);
+    if (!index.has_value()) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s is not a registered static data type", *engineClass);
+        return false;
+    }
+    *typeIndex = (std::int32_t)*index;
+    return true;
+}
+
+// Ext._Internal.StaticDataCreate(class, guid) -> address, or nil and why
+extern "C" void* bg3le_static_data_create(char const* engineClass, std::int32_t typeIndex,
+                                          void const* guid16, char const** why);
+int l_static_data_create(lua_State* L) {
+    char const* engineClass = nullptr;
+    std::int32_t typeIndex = -1;
+    if (!resource_type(L, luaL_checkstring(L, 1), &engineClass, &typeIndex)) return 2;
+    std::uint8_t guid[16];
+    if (!bg3le_meta_parse_guid(luaL_checkstring(L, 2), guid)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "not a GUID");
+        return 2;
+    }
+    char const* why = nullptr;
+    void* at = bg3le_static_data_create(engineClass, typeIndex, guid, &why);
+    if (at == nullptr) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.StaticDataBankCall(class, clear) -> true, or nil and why
+extern "C" bool bg3le_static_data_bank_call(std::int32_t typeIndex, bool clear, char const** why);
+int l_static_data_bank_call(lua_State* L) {
+    char const* engineClass = nullptr;
+    std::int32_t typeIndex = -1;
+    if (!resource_type(L, luaL_checkstring(L, 1), &engineClass, &typeIndex)) return 2;
+    char const* why = nullptr;
+    if (!bg3le_static_data_bank_call(typeIndex, lua_toboolean(L, 2) != 0, &why)) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 int l_resource_get(lua_State* L) {
     const char* className = luaL_checkstring(L, 1);
     const char* guidText = luaL_checkstring(L, 2);
@@ -6757,6 +6817,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "FunctorParams");
     lua_pushcfunction(g_lua, l_functors_list);
     lua_setfield(g_lua, -2, "FunctorsList");
+    lua_pushcfunction(g_lua, l_static_data_create);
+    lua_setfield(g_lua, -2, "StaticDataCreate");
+    lua_pushcfunction(g_lua, l_static_data_bank_call);
+    lua_setfield(g_lua, -2, "StaticDataBankCall");
     lua_pushcfunction(g_lua, l_functors_execute);
     lua_setfield(g_lua, -2, "FunctorsExecute");
     lua_pushcfunction(g_lua, l_level_add_persistent_template);
@@ -13317,10 +13381,25 @@ Ext.Entity.ClearTrace = Ext.Entity.SetupTracing
 
 -- ---- the rest of Ext.StaticData, and Ext.Definition ----
 
-for _, name in ipairs({"ClearResourceBank", "SyncResourceBank", "Create"}) do
-  Ext.StaticData[name] = needs(
-    "Ext.StaticData." .. name .. " writes to a GUID resource bank, which "
-    .. "bg3le reads but does not modify")
+-- Upstream's bank writes; src/vendor/static_data_write.cpp.
+function Ext.StaticData.Create(resourceType, guid)
+  if guid == nil then guid = Ext.Utils.GenerateGuid() end
+  local addr, err = Ext._Internal.StaticDataCreate(tostring(resourceType), tostring(guid))
+  if addr == nil then
+    Ext.Log.PrintError(err)
+    return nil
+  end
+  return Ext._Internal.ReadObject(addr, tostring(resourceType), "", {})
+end
+
+function Ext.StaticData.ClearResourceBank(resourceType)
+  local ok, err = Ext._Internal.StaticDataBankCall(tostring(resourceType), true)
+  if not ok then Ext.Log.PrintError(err) end
+end
+
+function Ext.StaticData.SyncResourceBank(resourceType)
+  local ok, err = Ext._Internal.StaticDataBankCall(tostring(resourceType), false)
+  if not ok then Ext.Log.PrintError(err) end
 end
 
 -- Upstream's reads of ls::gTextureAtlasMap; nil where upstream's would be.

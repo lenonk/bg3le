@@ -348,6 +348,16 @@ component's declared size with the size the engine recorded, and
   Bolt's `DealDamage`, run on a spawned rat, took it from 5 HP to 1.
   `Functors` views now have upstream's `FunctorList`, each functor as its own
   class
+- **`Ext.StaticData.Create`, `ClearResourceBank` and `SyncResourceBank`.**
+  `Create` adds the GUID to the bank's map under bg3se's Guid hash (checked
+  against a sample of the bank's own keys first), default-constructs the
+  resource and gives it the VMT of the bank's first, as upstream does. A
+  full bank grows as upstream's does, the old values copied into a fresh
+  buffer, but into fresh key and link buffers too, where upstream's frees the
+  engine's. The other two are the bank's `ClearInternal` and `PostLoad`,
+  called after checking the vtable is the one bg3se declares. In a test, 120
+  new ClassDescriptions grew the bank from 104 to 224 and the old entries
+  still read
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -633,13 +643,12 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **6 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **3 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 3 are
-  `Ext.Entity`'s `Create`, `Destroy` and `SetupTracing`, and 3
-  `Ext.StaticData`'s bank writes.
+  the source, because this one was stale at 86 for a while: they are
+  `Ext.Entity`'s `Create`, `Destroy` and `SetupTracing`.
   `reference/ext-api-surface.txt` lists them with their shapes
 - **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
