@@ -471,7 +471,12 @@ component's declared size with the size the engine recorded, and
   stale. `AddEnumerationValue` appends a label to an enumeration at the
   next value, into the bucket the engine's own nodes say it belongs in, and
   `AddAttribute` extends a modifier list -- refusing, as upstream does, once
-  stats objects exist
+  stats objects exist. `LoadStatsFile` is upstream's own Lua
+  (`builtin://Libs/Stats.lua`) over those; a functor-list attribute in the
+  file still stops it, because `SetRawAttribute` on one needs the engine's
+  `Object::SetPropertyString`, which is not located yet. `Ext.IO.LoadFile`
+  in the `data` context reads the game's own archives now, after loose files
+  and mod archives, as the engine's file system layers them
 - `Ext.Stats`: 15,754 stats, enumerable and readable by name, through a
   proxy that reads an attribute when it is asked for, as upstream's does.
   Snapshotting all two hundred of them per fetch made a mod's stats pass
@@ -562,13 +567,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **40 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **39 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 40 are
+  the source, because this one was stale at 86 for a while: 24 of the 39 are
   `Ext.Level`'s physics and pathfinding, 3 `Ext.StaticData`'s bank writes,
-  3 `Ext.Stats`' stats files and functor execution, 6
+  2 `Ext.Stats`' functor execution, 6
   `Ext.Template`'s local and cache managers, and 4 `Ext.Entity`'s
   `Create`, `Destroy`, `GetEntitiesOnTile` and `SetupTracing`.
   `reference/ext-api-surface.txt` lists them with their shapes. For the

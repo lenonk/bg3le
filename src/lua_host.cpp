@@ -12563,8 +12563,6 @@ function Ext.Stats.AddEnumerationValue(typeName, enumLabel)
   end
   return value
 end
-Ext.Stats.LoadStatsFile = needs(
-  "Ext.Stats.LoadStatsFile needs the engine's stat parser")
 Ext.Stats.ExecuteFunctor = needs(
   "Ext.Stats.ExecuteFunctor needs the engine's functor execution context")
 Ext.Stats.ExecuteFunctors = Ext.Stats.ExecuteFunctor
@@ -13301,6 +13299,10 @@ for _, entry in ipairs(CONTEXT_MODULES) do
   local name, from, omit = entry[1], entry[2], entry[3]
   if Ext[from] ~= nil then Ext[name] = context_view(Ext[from], omit) end
 end
+
+-- Upstream's own Lua for these, from the builtin bundle: LoadStatsFile reads
+-- a stats .txt through Create, SetRawAttribute, CopyFrom and Sync.
+Ext.Utils.Include(nil, "builtin://Libs/Stats.lua")
 
 -- Upstream's BuiltinLibraryServer/Client.lua: in developer mode the test
 -- library and the development helpers load with the state.

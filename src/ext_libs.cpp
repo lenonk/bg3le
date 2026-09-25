@@ -33,6 +33,7 @@
 #include "pak.h"
 
 namespace bg3le {
+bool game_file_read(char const* relative, std::string* out);
 
 namespace {
 
@@ -291,7 +292,12 @@ extern "C" int bg3le_ext_load_file(lua_State* L) {
         // reads every other mod's blueprint that way.
         if (std::strcmp(context, "data") != 0) return 0;
         std::string contents;
-        if (!mod_file_read(relative, &contents)) return 0;
+        // A mod's archive first, then the game's own, as the engine's file
+        // system layers them.
+        if (!bg3le::mod_file_read(relative, &contents)
+            && !bg3le::game_file_read(relative, &contents)) {
+            return 0;
+        }
         lua_pushlstring(L, contents.data(), contents.size());
         return 1;
     }
