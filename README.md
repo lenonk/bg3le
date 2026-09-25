@@ -235,6 +235,17 @@ component's declared size with the size the engine recorded, and
   changes once — with the changed field flags and upstream's optional flag
   filter; a component with no replication index raises upstream's error.
   Damaging the host reaches an `OnChange("Health")` handler with field 1
+- **`Ext.Entity.OnSystemUpdate`/`OnSystemPostUpdate` fire**, as upstream's
+  `SetSystemUpdateHook` does it: the system's entry in its world's registry
+  gets a trampoline in place of its `UpdateProc`, and the handler runs before
+  or after the original, on whichever worker thread the scheduler ran it on,
+  inside the context's own lock — upstream's `ContextGuardAnyThread`. A
+  system is named by bg3se's label (`ServerBoost`, `ClientCharacterManager`)
+  or the engine's class, and the context's own world is the one hooked, so a
+  server system asked for on the client is "not registered", as upstream
+  says. Checked: `ServerBoost` updates 30 times a second and the client's
+  `ClientCharacterManager` 60, pre before post, `once` fires once, and
+  handlers can read entities
 - **Map keys arrive as upstream pushes them**: an entity key as the entity
   and an enum key as its label. `StatusContainer.Statuses` is keyed by the
   status entities, and each one can be looked up by the entity or followed
@@ -519,9 +530,6 @@ component's declared size with the size the engine recorded, and
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
-- **`Ext.Entity.OnSystemUpdate`/`OnSystemPostUpdate`.** Upstream swaps a
-  system's update function; systems update on worker threads here, where a
-  Lua state cannot be entered.
 - **`Ext.Resource` and `GetCachedBoost`**, each waiting on an engine
   structure that has no anchor yet.
 - **Launching.** See [Running](#running)

@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
 #include <pthread.h>
 #include <vector>
 
@@ -858,3 +859,88 @@ extern "C" bool bg3le_entity_replication_flags(void* container,
 }
 
 }  // namespace bg3le
+
+// ---------------------------------------------------------------------------
+// System update hooks: upstream's SetSystemUpdateHook. A system's entry in
+// its world's SystemRegistry has its UpdateProc swapped for a trampoline
+// that tells bg3le before and after the original runs, on whatever thread
+// the scheduler ran it on.
+// ---------------------------------------------------------------------------
+
+extern "C" void bg3le_system_update_event(bool client, std::int32_t index, bool post);
+
+namespace {
+
+using SystemUpdateProc = bg3se::ecs::SystemTypeEntry::UpdateProcType*;
+
+struct HookedSystem {
+    SystemUpdateProc Original;
+    std::int32_t Index;
+    bool Client;
+};
+
+std::mutex& system_hooks_lock() {
+    static std::mutex m;
+    return m;
+}
+
+std::unordered_map<void*, HookedSystem>& hooked_systems() {
+    static std::unordered_map<void*, HookedSystem> m;
+    return m;
+}
+
+void system_update_trampoline(bg3se::BaseSystem* system, bg3se::ecs::EntityWorld& world,
+                              bg3se::GameTime const& time) {
+    HookedSystem hook{};
+    {
+        const std::lock_guard<std::mutex> held(system_hooks_lock());
+        auto found = hooked_systems().find(system);
+        if (found == hooked_systems().end()) return;
+        hook = found->second;
+    }
+    bg3le_system_update_event(hook.Client, hook.Index, false);
+    hook.Original(system, world, time);
+    bg3le_system_update_event(hook.Client, hook.Index, true);
+}
+
+// The entry for a system index, if the registry agrees about it.
+bg3se::ecs::SystemTypeEntry* system_entry(void* container, std::int32_t index) {
+    auto* world = container ? bg3le::world_from_container(container) : nullptr;
+    if (world == nullptr || index < 0) return nullptr;
+    auto& systems = world->Systems.Systems;
+    if ((std::uint32_t)index >= systems.size()) return nullptr;
+    auto& entry = systems[(std::uint32_t)index];
+    if (entry.System == nullptr || (std::int32_t)entry.SystemIndex0 != index) return nullptr;
+    return &entry;
+}
+
+}  // namespace
+
+// Starts reporting a system's updates for the world a container belongs to.
+extern "C" bool bg3le_system_hook(void* container, std::int32_t index, bool client) {
+    auto* entry = system_entry(container, index);
+    if (entry == nullptr || entry->UpdateProc == nullptr) return false;
+
+    const std::lock_guard<std::mutex> held(system_hooks_lock());
+    if (entry->UpdateProc == &system_update_trampoline) return true;
+    hooked_systems()[entry->System] = HookedSystem{entry->UpdateProc, index, client};
+    __atomic_store_n(&entry->UpdateProc, &system_update_trampoline, __ATOMIC_RELEASE);
+    bg3le::logf("systems: hooked system %d in %s world", index, client ? "the client" : "the server");
+    return true;
+}
+
+// For checking the registry's layout: the entry's own index and system.
+extern "C" bool bg3le_system_probe(void* container, std::int32_t index, void** system,
+                                   std::int32_t* ownIndex, void** update, std::uint32_t* count) {
+    auto* world = container ? bg3le::world_from_container(container) : nullptr;
+    if (world == nullptr) return false;
+    auto& systems = world->Systems.Systems;
+    *count = systems.size();
+    if (index < 0 || (std::uint32_t)index >= systems.size()) return false;
+    auto& entry = systems[(std::uint32_t)index];
+    *system = entry.System;
+    *ownIndex = (std::int32_t)entry.SystemIndex0;
+    *update = (void*)entry.UpdateProc;
+    return true;
+}
+

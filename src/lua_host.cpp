@@ -5221,6 +5221,73 @@ int l_watch_component_events(lua_State* L) {
     return 1;
 }
 
+extern "C" bool bg3le_system_hook(void* container, std::int32_t index, bool client);
+extern "C" bool bg3le_system_probe(void* container, std::int32_t index, void** system,
+                                   std::int32_t* ownIndex, void** update,
+                                   std::uint32_t* count);
+
+// bg3se's ExtSystemType labels and the engine class each names.
+struct SystemName {
+    char const* Label;
+    char const* Engine;
+};
+constexpr SystemName kSystemNames[] = {
+#include "vendor/system_names.inc"
+};
+
+// A system's index, by bg3se's label or the engine's own name.
+std::optional<std::int32_t> system_index(char const* name) {
+    char const* engine = name;
+    for (auto const& known : kSystemNames) {
+        if (std::strcmp(known.Label, name) == 0) {
+            engine = known.Engine;
+            break;
+        }
+    }
+    const auto index = ecs::index_of(ecs::Context::System, engine);
+    if (!index.has_value()) return std::nullopt;
+    return (std::int32_t)*index;
+}
+
+// Ext._Internal.HookSystem(name) -> index, or nil and why
+int l_hook_system(lua_State* L) {
+    char const* name = luaL_checkstring(L, 1);
+    const auto index = system_index(name);
+    if (!index.has_value()
+        || !bg3le_system_hook(world_container(), *index, in_client_state())) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "System %s not registered", name);
+        return 2;
+    }
+    lua_pushinteger(L, *index);
+    return 1;
+}
+
+// Ext._Internal.SystemProbe(name) -> { Index, System, OwnIndex, Update, Count }
+int l_system_probe(lua_State* L) {
+    const auto index = system_index(luaL_checkstring(L, 1));
+    if (!index.has_value()) return 0;
+    void* system = nullptr;
+    void* update = nullptr;
+    std::int32_t own = -1;
+    std::uint32_t count = 0;
+    const bool ok = bg3le_system_probe(world_container(), *index, &system, &own, &update, &count);
+    lua_createtable(L, 0, 5);
+    lua_pushinteger(L, *index);
+    lua_setfield(L, -2, "Index");
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)system);
+    lua_setfield(L, -2, "System");
+    lua_pushinteger(L, own);
+    lua_setfield(L, -2, "OwnIndex");
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)update);
+    lua_setfield(L, -2, "Update");
+    lua_pushinteger(L, count);
+    lua_setfield(L, -2, "Count");
+    lua_pushboolean(L, ok);
+    lua_setfield(L, -2, "Ok");
+    return 1;
+}
+
 // Ext._Internal.TakeComponentEvents()
 //   -> { { handle, component short name, "create" | "destroy" }, ... }
 int l_take_component_events(lua_State* L) {
@@ -5632,6 +5699,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ComponentCallbacksProbe");
     lua_pushcfunction(g_lua, l_watch_component_events);
     lua_setfield(g_lua, -2, "WatchComponentEvents");
+    lua_pushcfunction(g_lua, l_hook_system);
+    lua_setfield(g_lua, -2, "HookSystem");
+    lua_pushcfunction(g_lua, l_system_probe);
+    lua_setfield(g_lua, -2, "SystemProbe");
     lua_pushcfunction(g_lua, l_take_component_events);
     lua_setfield(g_lua, -2, "TakeComponentEvents");
     lua_pushcfunction(g_lua, l_component_short_name);
@@ -11803,12 +11874,55 @@ function Ext.Entity.OnChange(component, handler, entity, flags)
   return subscribe("change", component, handler, entity, false, flags)
 end
 
+-- Upstream's system hooks: the handler runs before or after the system's
+-- own update, on the thread the engine updates it on.
+local system_subs = { [false] = {}, [true] = {} }
+
+local function subscribe_system(system, handler, post, once)
+  if type(handler) ~= "function" then
+    error("Ext.Entity subscriptions expect a handler function", 3)
+  end
+  local index, err = Ext._Internal.HookSystem(tostring(system))
+  if index == nil then error(err, 3) end
+  local id = next_sub
+  next_sub = next_sub + 1
+  local list = system_subs[post][index] or {}
+  system_subs[post][index] = list
+  list[#list + 1] = { Id = id, Handler = handler, Once = once == true }
+  entity_subs[id] = { Kind = post and "system-post-update" or "system-update",
+                      System = index, Post = post }
+  return id
+end
+
+function Ext._Internal.FireSystemUpdate(index, post)
+  local list = system_subs[post][index]
+  if list == nil or #list == 0 then return end
+  local i = 1
+  while i <= #list do
+    local sub = list[i]
+    if entity_subs[sub.Id] == nil then
+      table.remove(list, i)
+    else
+      local ok, err = xpcall(sub.Handler, debug.traceback)
+      if not ok then
+        Ext.Log.PrintError("System update event handler failed: " .. tostring(err))
+      end
+      if sub.Once then
+        entity_subs[sub.Id] = nil
+        table.remove(list, i)
+      else
+        i = i + 1
+      end
+    end
+  end
+end
+
 function Ext.Entity.OnSystemUpdate(system, handler, once)
-  return subscribe("system-update", system, handler, nil, once)
+  return subscribe_system(system, handler, false, once)
 end
 
 function Ext.Entity.OnSystemPostUpdate(system, handler, once)
-  return subscribe("system-post-update", system, handler, nil, once)
+  return subscribe_system(system, handler, true, once)
 end
 
 function Ext.Entity.Unsubscribe(id)
@@ -12706,6 +12820,33 @@ setmetatable(_G, {
             bound, overloaded, events);
 }
 
+// A hooked system is about to update, or has: called on the thread the
+// scheduler ran it on, which enters the context under its lock, as
+// upstream's ContextGuardAnyThread does.
+void system_update_event(bool client, std::int32_t index, bool post) {
+    lua_State* want = client ? g_client_lua : g_server_lua;
+    if (want == nullptr) return;
+    InContext context(want);
+    if ((client ? g_client_lua : g_server_lua) != want) return;  // reset meanwhile
+    lua_State* L = want;
+    const int top = lua_gettop(L);
+    lua_getglobal(L, "Ext");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "_Internal");
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "FireSystemUpdate");
+            if (lua_isfunction(L, -1)) {
+                lua_pushinteger(L, index);
+                lua_pushboolean(L, post ? 1 : 0);
+                if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                    logf("lua: system update event: %s", lua_tostring(L, -1));
+                }
+            }
+        }
+    }
+    lua_settop(L, top);
+}
+
 void lua_eval_in(bool client, const char* code, std::string* result,
                  std::string* error) {
     lua_State* want = client ? g_client_lua : g_server_lua;
@@ -12769,3 +12910,7 @@ void lua_run(const char* code) {
 
 }  // namespace bg3le
 
+
+extern "C" void bg3le_system_update_event(bool client, std::int32_t index, bool post) {
+    bg3le::system_update_event(client, index, post);
+}
