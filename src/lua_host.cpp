@@ -5972,8 +5972,32 @@ int l_is_vector(lua_State* L) {
 
 // Ext._Internal.NewObjectProxy(metatable) -> a userdata behind that
 // metatable, which is what upstream's object, array and map proxies are.
+// Upstream's LightObjectProxyMetatable::ToString: "Type (pointer)", with
+// MSVC's %p. The pointer is the engine object's, from a "p:<hex>" identity.
+int object_proxy_tostring(lua_State* L) {
+    char const* name = "userdata";
+    unsigned long long at = (unsigned long long)(std::uintptr_t)lua_topointer(L, 1);
+    if (lua_getmetatable(L, 1)) {
+        if (lua_getfield(L, -1, "__name") == LUA_TSTRING) name = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        if (lua_getfield(L, -1, "__bg3leIdentity") == LUA_TSTRING) {
+            std::sscanf(lua_tostring(L, -1), "p:%llx", &at);
+        }
+        lua_pop(L, 1);
+    }
+    char text[256];
+    std::snprintf(text, sizeof(text), "%s (%016llX)", name, at);
+    lua_pushstring(L, text);
+    return 1;
+}
+
 int l_new_object_proxy(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
+    if (lua_getfield(L, 1, "__tostring") == LUA_TNIL) {
+        lua_pushcfunction(L, object_proxy_tostring);
+        lua_setfield(L, 1, "__tostring");
+    }
+    lua_pop(L, 1);
     lua_newuserdata(L, 1);
     lua_pushvalue(L, 1);
     lua_setmetatable(L, -2);
@@ -6613,6 +6637,32 @@ void register_log(lua_State* L, const char* name, int severity) {
 }  // namespace
 
 void build_state(bool client);
+
+// Upstream's SandboxStartup.lua, then what upstream never opens: io, os,
+// package and utf8 (LuaBinding.cpp), with its BuiltinLibrary.lua require.
+void run_sandbox() {
+    std::size_t size = 0;
+    char const* text = bg3le_builtin_lua("SandboxStartup.lua", &size);
+    if (text == nullptr) {
+        logf("lua: the builtin SandboxStartup.lua is missing");
+    } else if ((luaL_loadbuffer(g_lua, text, size, "=builtin://SandboxStartup.lua")
+                || lua_pcall(g_lua, 0, 0, 0)) != LUA_OK) {
+        logf("lua: SandboxStartup.lua failed: %s", lua_tostring(g_lua, -1));
+        lua_pop(g_lua, 1);
+    }
+    static const char kAfter[] = R"LUA(
+io, os, package, utf8 = nil, nil, nil, nil
+require = function(name)
+  if string.sub(name, -4) == ".lua" then return Ext.Require(name) end
+  return Ext.Require((string.gsub(name, "%.", "/")) .. ".lua")
+end
+)LUA";
+    if ((luaL_loadbuffer(g_lua, kAfter, std::strlen(kAfter), "=bg3le sandbox")
+         || lua_pcall(g_lua, 0, 0, 0)) != LUA_OK) {
+        logf("lua: sandbox failed: %s", lua_tostring(g_lua, -1));
+        lua_pop(g_lua, 1);
+    }
+}
 
 void lua_init() {
     if (g_server_lua != nullptr) return;
@@ -7290,6 +7340,12 @@ void build_state(bool client) {
     lua_setglobal(g_lua, "Ext");
 
     static const char kPrelude[] = R"LUA(
+-- Upstream's sandbox takes these from mods; bg3le's own code keeps them.
+Ext._Internal.RawLoad = load
+Ext._Internal.SetHook = debug.sethook
+Ext._Internal.OpenFile = io.open
+Ext._Internal.Getenv = os.getenv
+
 -- _D is Ext.Json.Stringify, which is why strings come back quoted:
 -- _D(GetHostCharacter()) yields "<uuid>" while _P yields <uuid>.
 Ext.Json = Ext.Json or {}
@@ -9229,7 +9285,7 @@ local function profiled_call(handler, event, label)
     end
     return at.short_src .. ":" .. tostring(at.linedefined)
   end
-  debug.sethook(function(ev)
+  Ext._Internal.SetHook(function(ev)
     local now = clock()
     if ev == "call" or ev == "tail call" then
       local at = debug.getinfo(2, "S")
@@ -9259,7 +9315,7 @@ local function profiled_call(handler, event, label)
   end, "cr")
   local started = clock()
   local ok, result = xpcall(handler, debug.traceback, event)
-  debug.sethook()
+  Ext._Internal.SetHook()
   local took = clock() - started
   if took > 100000 then
     local function top(t, title)
@@ -9557,7 +9613,7 @@ function Ext.Require(a, b)
   if contents == nil then
     error("Ext.Require: cannot read " .. tostring(path), 2)
   end
-  local chunk, err = load(contents, path, "t")
+  local chunk, err = Ext._Internal.RawLoad(contents, path, "t")
   if chunk == nil then error(err, 2) end
 
   local result = chunk()
@@ -9599,34 +9655,46 @@ function Ext.Utils.ShowErrorAndExitGame(message)
   Ext._Internal.ShowErrorAndExit(tostring(message))
 end
 
+-- Upstream's is GetDebugName, as Ext.Types.GetValueType.
 function Ext.Utils.GetValueType(value)
-  local t = type(value)
-  if t == "table" then
-    -- bg3se distinguishes its own object types here; a plain table is
-    -- still "table" to it, which is all bg3le hands out.
-    return "table"
-  end
-  return t
+  return Ext.Types.GetValueType(value)
 end
 
+-- Upstream's: true for an entity whose handle is not the null handle.
 function Ext.Utils.IsValidHandle(handle)
-  return type(handle) == "number" and handle ~= 0
+  local bits = Ext._Internal.EntityProxyHandle(handle)
+  return bits ~= nil and bits ~= 0xFFC0000000000000
 end
 
+-- Upstream's take an entity (nil is the null handle) and give one back.
 function Ext.Utils.HandleToInteger(handle)
-  if type(handle) ~= "number" then return nil end
-  return math.tointeger(handle)
+  if handle == nil then return 0xFFC0000000000000 end
+  if type(handle) == "number" then return math.tointeger(handle) end
+  local bits = Ext._Internal.EntityProxyHandle(handle)
+  if bits == nil then
+    error("bad argument #1 to 'HandleToInteger' (entity expected, got "
+          .. type(handle) .. ")", 2)
+  end
+  return bits
 end
 
 function Ext.Utils.IntegerToHandle(i)
-  if type(i) ~= "number" then return nil end
-  return math.tointeger(i)
+  i = math.tointeger(i)
+  if i == nil or i == 0xFFC0000000000000 then return nil end
+  return Ext.Entity.Get(i)
 end
 
+-- Upstream's: compiles text (never binary) and returns the chunk, or nil
+-- and the error; globals, if given, is the chunk's environment.
 function Ext.Utils.LoadString(text, globals)
-  local chunk, err = load(text, text, "t", globals)
-  if chunk == nil then error(err, 2) end
-  return chunk()
+  if globals ~= nil and type(globals) ~= "table" then
+    error("bad argument #2 to 'LoadString' (table expected, got "
+          .. type(globals) .. ")", 2)
+  end
+  if globals ~= nil then
+    return Ext._Internal.RawLoad(text, "?", "t", globals)
+  end
+  return Ext._Internal.RawLoad(text, "?", "t")
 end
 
 -- Upstream's Include: a mod's script (by its UUID or name), a builtin://
@@ -9672,9 +9740,9 @@ function Ext.Utils.Include(modGuid, fileName, globals)
   local env = globals or include_globals
   local chunk, err
   if env ~= nil then
-    chunk, err = load(text, name, "t", env)
+    chunk, err = Ext._Internal.RawLoad(text, name, "t", env)
   else
-    chunk, err = load(text, name, "t")
+    chunk, err = Ext._Internal.RawLoad(text, name, "t")
   end
   if chunk == nil then
     Ext.Log.PrintError("Failed to parse script: " .. tostring(err))
@@ -11980,7 +12048,10 @@ stat_proxy.__pairs = function(self)
   end
 end
 
-stat_proxy.__name = "Stat"
+stat_proxy.__name = "stats::Object"
+stat_proxy.__tostring = function(self)
+  return string.format("stats::Object (%016X)", rawget(self, "__addr") or 0)
+end
 -- Its __pairs order is upstream's, so a dump keeps it.
 stat_proxy.__bg3leOrdered = true
 
@@ -12483,7 +12554,7 @@ local mod_configs = {}
 local mods_loaded = false
 
 local function read_file(path)
-  local f = io.open(path, "rb")
+  local f = Ext._Internal.OpenFile(path, "rb")
   if not f then return nil end
   local text = f:read("a")
   f:close()
@@ -12492,7 +12563,7 @@ end
 
 local function mod_roots()
   local roots = {}
-  local env = os.getenv("BG3LE_MOD_PATH")
+  local env = Ext._Internal.Getenv("BG3LE_MOD_PATH")
   if env then
     for dir in string.gmatch(env, "[^:]+") do table.insert(roots, dir) end
   end
@@ -12552,10 +12623,7 @@ local function report_configs(configs)
   end
 end
 
--- Mods also use plain require(), with a path relative to their own Lua
--- directory: require("Shared/Foo/Bar") is Lua/Shared/Foo/Bar.lua inside
--- the mod. A searcher gives them that, over the same reader the mod was
--- loaded with, so it works for a packed mod as well as a loose one.
+-- The readers of loaded mods, and the one loading now.
 local mod_readers = {}
 local loading_mod = nil
 
@@ -12568,30 +12636,6 @@ function Ext._Internal.ModReader(nameOrGuid)
   return nil
 end
 
-local function mod_searcher(name)
-  local path = string.gsub(name, "%.", "/") .. ".lua"
-
-  -- The mod being loaded first, then any other loaded mod: a mod that
-  -- requires another mod's file is rare but legal, and upstream resolves
-  -- it the same way.
-  local order = {}
-  if loading_mod ~= nil then order[#order + 1] = loading_mod end
-  for _, reader in ipairs(mod_readers) do
-    if reader ~= loading_mod then order[#order + 1] = reader end
-  end
-
-  for _, reader in ipairs(order) do
-    local text = reader.Read("Lua/" .. path)
-    if text ~= nil then
-      local chunk, err = load(text, "@" .. path, "bt", reader.Env)
-      if chunk == nil then error(err, 0) end
-      return chunk, path
-    end
-  end
-  return "\n\tno mod file '" .. path .. "'"
-end
-
-table.insert(package.searchers, mod_searcher)
 
 -- `read` takes a path under the mod's ScriptExtender directory and returns
 -- its contents, so a loose mod and a packed one differ only in that.
@@ -12770,7 +12814,7 @@ local function load_mod_from(name, uuid, read, report)
     if not text then
       error("bg3le: Ext.Require could not read " .. path, 0)
     end
-    local chunk, err = load(text, "@" .. path, "bt", env)
+    local chunk, err = Ext._Internal.RawLoad(text, "@" .. path, "t", env)
     if not chunk then error(err, 0) end
     local results = table.pack(chunk())
     required[path] = results
@@ -12819,8 +12863,8 @@ local function load_mod_from(name, uuid, read, report)
   local global_require = Ext.Require
   Ext.Require = mod_require
 
-  local chunk, err = load(source, "@" .. name .. "/" .. boot,
-                          "bt", env)
+  local chunk, err = Ext._Internal.RawLoad(source, "@" .. name .. "/" .. boot,
+                                           "t", env)
   if not chunk then
     ModuleUUID = previous
     loading_mod = outer
@@ -14384,6 +14428,7 @@ end
         logf("lua: prelude failed: %s", lua_tostring(g_lua, -1));
         lua_pop(g_lua, 1);
     }
+    run_sandbox();
     statusf("LUA VM initialised (%s)", LUA_RELEASE);
 }
 

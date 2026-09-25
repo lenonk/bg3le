@@ -82,6 +82,17 @@ component's declared size with the size the engine recorded, and
   and `"DeveloperMode": true` in `ScriptExtenderSettings.json` (off by
   default, as upstream's release builds are) loads it with each state along
   with upstream's development helpers
+- **Upstream's Lua sandbox.** After the prelude, bg3le runs upstream's own
+  `SandboxStartup.lua` from the bundle -- `dofile` and `loadfile` disabled,
+  `load` and `loadstring` as `Ext.Utils.LoadString` (text only), `debug`
+  cut to `traceback` and `getinfo`, `math.random` as `Ext.Math.Random` --
+  and removes the libraries upstream never opens: `io`, `os`, `package`
+  and `utf8`. `require` is upstream's `BuiltinLibrary.lua` one, over
+  `Ext.Require`, and mod scripts load as text only, as upstream loads them.
+  `LoadString` returns the chunk (or nil and the error) rather than running
+  it; `GetValueType` is `Ext.Types.GetValueType`; `IsValidHandle`,
+  `HandleToInteger` and `IntegerToHandle` take and return entities. Objects
+  print as upstream's do, `stats::Object (000003AB555C6800)`
 - **Achievements with mods active**, the way bg3se's `EnableAchievements`
   does on Windows. bg3se patches `ls::ModuleSettings::IsModded`; nothing here
   exports that name, so bg3le byte-patches the engine's per-module "is this
