@@ -353,6 +353,11 @@ unconditionally; bg3le has not located the texture atlas map, so an
 `AddImageButton` with an icon crashed the game. It now fails the way an
 unknown icon does, and the button is drawn without its image.
 
+**`Extender/Client/IMGUI/IMGUI.cpp` — `IMGUIManager::Update` draws
+`ShowErrorAndExitGame`'s dialog.** One call, `bg3le_imgui_draw_error()`, after
+the mods' windows and before `ImGui::Render`, so the message is drawn in the
+game's own frame on every machine rather than by a desktop dialog.
+
 **`Extender/Client/IMGUI/IMGUI.cpp` — `IMGUITextureLoader::IncTextureRef`
 checks the resource bank.** `GetCurrentResourceBank()` returns null when the
 resource manager is not located, as it is not yet in bg3le, and upstream

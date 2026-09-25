@@ -33,6 +33,7 @@
 #include <Extender/ScriptExtender.h>
 
 #include <atomic>
+#include <pthread.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -554,3 +555,80 @@ extern "C" void bg3le_imgui_status(bool* wanted, bool* started,
 }
 
 }  // namespace bg3le
+
+// ShowErrorAndExitGame's message, drawn by the overlay itself so it looks
+// the same on every machine -- no desktop dialog, no window of its own.
+namespace {
+struct ErrorDialog {
+    std::mutex Lock;
+    std::string Title;
+    std::string Message;
+    bool Showing = false;
+};
+
+ErrorDialog& error_dialog() {
+    static ErrorDialog d;
+    return d;
+}
+
+std::atomic<pthread_t> g_overlay_thread{};
+std::atomic<bool> g_overlay_thread_known{false};
+}  // namespace
+
+// Called from inside IMGUIManager::Update's frame, after the mods' windows,
+// so it is drawn over them.
+extern "C" void bg3le_imgui_draw_error() {
+    g_overlay_thread.store(pthread_self());
+    g_overlay_thread_known.store(true);
+
+    auto& d = error_dialog();
+    std::unique_lock<std::mutex> held(d.Lock);
+    if (!d.Showing) return;
+
+    const std::string id = d.Title + "##bg3le_error";
+    if (!ImGui::IsPopupOpen(id.c_str())) ImGui::OpenPopup(id.c_str());
+
+    auto const& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(io.DisplaySize.x * 0.25f, 0),
+                                        ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.8f));
+    if (!ImGui::BeginPopupModal(id.c_str(), nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove
+                                    | ImGuiWindowFlags_NoScrollbar
+                                    | ImGuiWindowFlags_NoSavedSettings)) {
+        return;
+    }
+    ImGui::PushTextWrapPos(io.DisplaySize.x * 0.45f);
+    ImGui::TextUnformatted(d.Message.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextDisabled("The game will close.");
+    ImGui::Spacing();
+
+    const float width = ImGui::GetFontSize() * 6.0f;
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - width) * 0.5f);
+    ImGui::SetItemDefaultFocus();
+    if (ImGui::Button("OK", ImVec2(width, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter)
+        || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        std::_Exit(1);
+    }
+    ImGui::EndPopup();
+}
+
+// Shows the message, and ends the game when it is dismissed. Never waits
+// for it: the frame waits on the game thread, so a caller blocked there
+// would stop the very frame that draws the dialog. False if the overlay is
+// not drawing.
+extern "C" bool bg3le_imgui_show_error(char const* title, char const* message) {
+    if (!bg3le::g_started || !g_overlay_thread_known.load()) return false;
+    auto& d = error_dialog();
+    const std::lock_guard<std::mutex> held(d.Lock);
+    d.Title = title;
+    d.Message = message;
+    d.Showing = true;
+    return true;
+}
+

@@ -397,17 +397,31 @@ extern "C" int bg3le_ext_show_error(lua_State* L) {
     return 0;
 }
 
+extern "C" bool bg3le_imgui_show_error(char const* title, char const* message);
+
 // Ext.Utils.ShowErrorAndExitGame: upstream's ShowStartupError with exit set --
-// the message in a box, then the game ends. The box is SDL's, from the game's
-// own libSDL2, and blocks until it is dismissed.
+// the message in a dialog, then the game ends when it is dismissed. The
+// dialog is the overlay's (src/vendor/imgui_overlay.cpp).
 extern "C" int bg3le_ext_show_error_and_exit(lua_State* L) {
     char const* message = luaL_checkstring(L, 1);
     logf("Ext.Utils.ShowErrorAndExitGame: %s", message);
     std::fprintf(stderr, "bg3le: %s\n", message);
-    using ShowProc = int (*)(std::uint32_t, char const*, char const*, void*);
-    auto show = reinterpret_cast<ShowProc>(::dlsym(RTLD_DEFAULT, "SDL_ShowSimpleMessageBox"));
-    constexpr std::uint32_t kSdlMessageBoxError = 0x10;
-    if (show != nullptr) show(kSdlMessageBoxError, "Script Extender", message, nullptr);
+    if (bg3le_imgui_show_error("Script Extender", message)) {
+        // It shows next frame and ends the game when dismissed. Nothing after
+        // this call runs, as nothing would after upstream's.
+        return luaL_error(L, "%s (the game closes when this is dismissed)", message);
+    }
+    // run-native.sh's headless runs have no screen of their own, and SDL
+    // would put the box on the desktop's instead.
+    char const* headless = std::getenv("HEADLESS");
+    if (!(headless != nullptr && std::strcmp(headless, "1") == 0)) {
+        // Only without the overlay: SDL's own box, which looks its age.
+        using ShowProc = int (*)(std::uint32_t, char const*, char const*, void*);
+        auto show = reinterpret_cast<ShowProc>(
+            ::dlsym(RTLD_DEFAULT, "SDL_ShowSimpleMessageBox"));
+        constexpr std::uint32_t kSdlMessageBoxError = 0x10;
+        if (show != nullptr) show(kSdlMessageBoxError, "Script Extender", message, nullptr);
+    }
     std::_Exit(1);
 }
 

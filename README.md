@@ -391,6 +391,15 @@ component's declared size with the size the engine recorded, and
   object. Where Windows has an `SRWLOCK` the Linux engine has a glibc
   `pthread_rwlock_t`, 48 bytes wider, which is what put every field after
   one in the wrong place; bg3le's `SRWLOCK` is that type now
+- `Ext.Utils.ShowErrorAndExitGame` shows its message in a dialog the overlay
+  draws, in the game's frame, and closes the game when it is dismissed. The
+  call does not wait for it, since the frame waits on the game thread; it
+  stops the calling script instead, so nothing after it runs, as upstream's
+  exit guarantees. Without the overlay it falls back to SDL's message box
+- The console refuses a server-context command at the main menu with the
+  reason -- the server context runs once a save is loaded -- rather than
+  timing out, and a command that does time out is withdrawn rather than run
+  whenever the thread next comes round
 - `Ext.StaticData.GetSources` and `GetByModId`, from each bank's
   `ResourceGuidsByMod`: which mod defines which resources
 - `Ext.StaticData.GetIconUVs`, `GetIconAtlas` and `GetTextureAtlasManager`,

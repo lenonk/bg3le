@@ -27,6 +27,9 @@
 #include "pb.h"
 
 namespace bg3le {
+
+bool story_ready();  // src/preload.cpp
+
 namespace {
 
 // LuaDebug.proto field numbers.
@@ -202,6 +205,17 @@ void handle_client(int fd) {
         }
 
         // Hand the chunk to the story thread; never touch Lua from here.
+        // The server context runs on the story thread, which only exists
+        // once a save is loaded; at the main menu nothing would ever run it.
+        if (context != 1 && !story_ready()) {
+            if (!send_packet(fd, make_evaluate_response(seq, "",
+                    "the server context runs once a save is loaded; at the main "
+                    "menu, use the client context (:client, or bg3lua --client)"))) {
+                break;
+            }
+            continue;
+        }
+
         auto job = std::make_shared<Job>();
         job->code = expression;
         job->client = context == 1;
@@ -221,6 +235,14 @@ void handle_client(int fd) {
         if (!finished) {
             error = "timed out waiting for the story thread; is the game paused "
                     "or still loading?";
+            // Not left queued: it would run whenever the thread next came
+            // round, long after the caller stopped waiting for it.
+            std::lock_guard<std::mutex> held(g_queue_mutex);
+            auto it = std::find(g_queue.begin(), g_queue.end(), job);
+            if (it != g_queue.end()) {
+                g_queue.erase(it);
+                g_pending.fetch_sub(1, std::memory_order_release);
+            }
         }
         if (!send_packet(fd, make_evaluate_response(seq, result, error))) break;
     }

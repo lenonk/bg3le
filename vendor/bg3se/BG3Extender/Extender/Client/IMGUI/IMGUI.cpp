@@ -18,6 +18,9 @@
 #endif
 #include <Lua/Shared/LuaMethodCallHelpers.h>
 
+// bg3le: ShowErrorAndExitGame's dialog, drawn over the mods' windows.
+extern "C" void bg3le_imgui_draw_error();
+
 BEGIN_NS(extui)
 
 void DrawingContext::PushScaling(GuiMeasureScaling scaling)
@@ -2196,6 +2199,7 @@ void IMGUIManager::Update()
     };
     objects_->Render(dc);
     se_assert(dc.ScalingStack.empty());
+    bg3le_imgui_draw_error();
 
     {
         OPTICK_EVENT("IMGUI Render", Optick::Category::Rendering);
