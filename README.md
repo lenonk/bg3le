@@ -271,7 +271,9 @@ component's declared size with the size the engine recorded, and
   be called by name here. On by default, as upstream's is; `BG3LE_IMGUI=0`
   turns it off. Enum properties take their labels, `P_BITMASK` flags such
   as `Window.AlwaysAutoResize` are properties, whole arrays can be assigned,
-  and `UserData` and `Children` behave as upstream's. Icons draw: the
+  `UserData` and `Children` behave as upstream's, struct and container
+  properties such as `Table.ColumnDefs` read and write as a component's do,
+  and assigning nil to an event clears it. Icons draw: the
   texture atlas map is located, and an atlas's resident texture is handed
   to the renderer as it is. See
   [reference/IMGUI-ASSESSMENT.md](reference/IMGUI-ASSESSMENT.md)

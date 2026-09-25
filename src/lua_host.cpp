@@ -6820,6 +6820,12 @@ imgui_widget.__index = function(self, key)
   if addr ~= nil then
     local value, err = Ext._Internal.ObjectGetField(addr, class, key)
     if err == nil then return value end
+    -- A struct or container, such as Table.ColumnDefs: read as a component's
+    -- is, with its elements writable through to the widget.
+    local kind = Ext._Internal.ObjectFieldInfo(class, key)
+    if kind == "struct" or kind == "array" or kind == "map" then
+      return Ext._Internal.ReadObjectPath(addr, class, key, kind)
+    end
   end
 
   if IMGUI_METHOD[key] then
@@ -6878,6 +6884,13 @@ imgui_widget.__newindex = function(self, key, value)
     end
     imgui_callbacks[id] = value
     registered[key] = id
+    return
+  end
+
+  -- nil to an event with no handler clears it, as upstream's delegate does;
+  -- the C side is what knows whether the name is an event.
+  if value == nil and Ext._Internal.ImguiSetCallback(handle, key) ~= nil then
+    Ext._Internal.ImguiClearCallback(handle, key)
     return
   end
 
@@ -10579,6 +10592,7 @@ end
 -- Published so the stats code can reach it. The prelude is compiled in more
 -- than one chunk, so a local here is not in scope there.
 Ext._Internal.ReadObject = read_object
+Ext._Internal.ReadObjectPath = read_object_path
 Ext._Internal.AmendObject = amend_object
 
 Ext.StaticData = {}
