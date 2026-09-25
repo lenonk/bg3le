@@ -1540,12 +1540,24 @@ bool push_field(lua_State* L, const void* address, FieldKind kind,
             if (raw == 0xFFC0000000000000ull) lua_pushnil(L);
             else lua_pushinteger(L, (lua_Integer)raw);
             return true;
-        case FieldKind::Pointer:
+        case FieldKind::Pointer: {
             // The target's address, which the prelude follows; nil for null.
+            // One that could not be an object, or cannot be read, is not
+            // handed out -- it is a stale pointer or a layout that is not the
+            // engine's, and following it would read garbage.
             if (!safe_read(address, &raw, 8)) return false;
-            if (raw == 0) lua_pushnil(L);
-            else lua_pushinteger(L, (lua_Integer)raw);
+            if (raw == 0) {
+                lua_pushnil(L);
+                return true;
+            }
+            std::uint64_t probe = 0;
+            if (raw < 0x10000 || raw >= 0x800000000000ull || (raw & 7) != 0
+                || !safe_read((void const*)raw, &probe, sizeof(probe))) {
+                return false;
+            }
+            lua_pushinteger(L, (lua_Integer)raw);
             return true;
+        }
         case FieldKind::ConditionId: {
             // Upstream's push: ConditionId::Get's text, or "" for none.
             std::int32_t id = -1;
@@ -2421,6 +2433,8 @@ bool subject_from_object(lua_State* L, int addressIdx, int classIdx,
 }
 
 // Ext._Internal.ObjectFields(class [, path]) -> { field = kind, ... }
+extern "C" bool bg3le_meta_path_is_struct(void const* handle, char const* path);
+
 int l_object_fields(lua_State* L) {
     const char* className = luaL_checkstring(L, 1);
     const char* path = luaL_optstring(L, 2, nullptr);
@@ -2437,7 +2451,8 @@ int l_object_fields(lua_State* L) {
     std::uint8_t kinds[kMax];
     const std::size_t count =
         bg3le_meta_fields_at(meta, path, names, kinds, kMax);
-    if (count == 0 && path != nullptr && path[0] != '\0') {
+    if (count == 0 && path != nullptr && path[0] != '\0'
+        && !bg3le_meta_path_is_struct(meta, path)) {
         lua_pushnil(L);
         lua_pushfstring(L, "%s.%s cannot be traversed", className, path);
         return 2;
@@ -4938,7 +4953,8 @@ int l_component_fields(lua_State* L) {
     const char* names[kMax];
     std::uint8_t kinds[kMax];
     const std::size_t n = bg3le_meta_fields_at(meta, path, names, kinds, kMax);
-    if (n == 0 && path != nullptr && path[0] != '\0') {
+    if (n == 0 && path != nullptr && path[0] != '\0'
+        && !bg3le_meta_path_is_struct(meta, path)) {
         lua_pushnil(L);
         lua_pushfstring(L, "%s.%s cannot be traversed", engineName, path);
         return 2;
@@ -5408,6 +5424,20 @@ int l_resource_sources(lua_State* L) {
     return 1;
 }
 
+extern "C" char const* bg3le_meta_path_class(void const* handle, char const* path);
+
+// Ext._Internal.PointeeClass(component or class, path, isClass) -> class name
+int l_pointee_class(lua_State* L) {
+    char const* owner = luaL_checkstring(L, 1);
+    char const* path = luaL_checkstring(L, 2);
+    void const* meta = lua_toboolean(L, 3) ? bg3le_meta_class(owner)
+                                           : bg3le_meta_component(owner);
+    char const* name = bg3le_meta_path_class(meta, path);
+    if (name == nullptr) return 0;
+    lua_pushstring(L, name);
+    return 1;
+}
+
 // Ext._Internal.TakeComponentEvents()
 //   -> { { handle, component short name, "create" | "destroy" }, ... }
 int l_take_component_events(lua_State* L) {
@@ -5819,6 +5849,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ComponentCallbacksProbe");
     lua_pushcfunction(g_lua, l_watch_component_events);
     lua_setfield(g_lua, -2, "WatchComponentEvents");
+    lua_pushcfunction(g_lua, l_pointee_class);
+    lua_setfield(g_lua, -2, "PointeeClass");
     lua_pushcfunction(g_lua, l_resource_sources);
     lua_setfield(g_lua, -2, "ResourceSources");
     lua_pushcfunction(g_lua, l_texture_atlas_map);
@@ -9367,9 +9399,8 @@ read_path = function(handle, comp, path)
       if err ~= nil then error("bg3le: " .. err, 0) end
       return nil
     end
-    local inner, err2 = Ext._Internal.ComponentFields(comp, path)
-    if inner == nil then error("bg3le: " .. tostring(err2), 0) end
-    return make_fields(handle, comp, path, inner)
+    return Ext._Internal.PointedObject(target,
+      Ext._Internal.PointeeClass(comp, path, false))
   end
 
   local value, err = Ext._Internal.GetField(handle, comp, path)
@@ -9562,7 +9593,7 @@ local function type_of_view(comp, prefix)
   return name
 end
 
-make_fields = function(handle, comp, prefix, fields)
+make_fields = function(handle, comp, prefix, fields, identity)
   local function path_to(key)
     if prefix == "" then return key end
     return prefix .. "." .. key
@@ -9572,7 +9603,9 @@ make_fields = function(handle, comp, prefix, fields)
     -- What Ext.Types.GetObjectType reports, and what a custom member is
     -- registered against.
     __name = type_of_view(comp, prefix),
-    __bg3leIdentity = function()
+    -- A pointed-at object is one object however it was reached, which is
+    -- what lets AvoidRecursion stop a walk through a pointer graph.
+    __bg3leIdentity = identity or function()
       return "c:" .. handle .. ":" .. comp .. ":" .. prefix
     end,
     __index = function(self, key)
@@ -9636,6 +9669,12 @@ make_fields = function(handle, comp, prefix, fields)
             if kind == "unsupported" then return key, "<unsupported>" end
             local ok, value = pcall(function() return self[key] end)
             if not ok then return key, "<unreadable>" end
+            -- A container view sizes itself lazily; one that cannot be sized
+            -- would stop the walk later, so it is reported here instead.
+            if (kind == "array" or kind == "map") and type(value) == "userdata"
+               and not pcall(function() return #value end) then
+              return key, "<unreadable>"
+            end
             return key, value
           end
           extras = Ext._Internal.CustomMemberNames(type_of_view(comp, prefix))
@@ -10896,20 +10935,10 @@ local function read_object_path(addr, class, path, kind)
   -- A pointer reads as what it points at, or nil. Read when first touched:
   -- a snapshot is eager, and pointers form cycles.
   if kind == "pointer" then
-    local target = Ext._Internal.ObjectGetField(addr, class, path)
-    if target == nil then return nil end
-    local loaded
-    local function get()
-      if loaded == nil then loaded = read_object(addr, class, path, {}) end
-      return loaded
-    end
-    return Ext._Internal.NewObjectProxy({
-      __index = function(_, k) return get()[k] end,
-      __newindex = function(_, k, v) get()[k] = v end,
-      __pairs = function() return pairs(get()) end,
-      __len = function() return #get() end,
-      __bg3leIdentity = "p:" .. string.format("%x", target) .. ":" .. class .. ":" .. path,
-    })
+    local target, err = Ext._Internal.ObjectGetField(addr, class, path)
+    if target == nil then return err ~= nil and "<unreadable>" or nil end
+    return Ext._Internal.PointedObject(target,
+      Ext._Internal.PointeeClass(class, path, true))
   end
 
   if kind == "array" and not Ext._Internal.IsVector(class, path) then
@@ -10972,10 +11001,22 @@ function read_object(addr, class, prefix, out)
   local fields, err = Ext._Internal.ObjectFields(class, prefix)
   if fields == nil then error("bg3le: " .. tostring(err), 0) end
 
+  -- Read when first asked for, as upstream's proxy reads: an object with a
+  -- few hundred nested entries used to be read whole to answer one field --
+  -- Mod Configuration Menu asks for the input manager four times as the menu
+  -- comes up. A value bg3le's own decoding amended is kept (amend_object).
   local values = {}
-  for name, kind in pairs(fields) do
+  local read = {}
+  local function value_of(name)
+    local held = values[name]
+    if held ~= nil or read[name] then return held end
+    local kind = fields[name]
+    if kind == nil then return nil end
     local path = (prefix == "") and name or (prefix .. "." .. name)
-    values[name] = read_object_path(addr, class, path, kind)
+    held = read_object_path(addr, class, path, kind)
+    values[name] = held
+    read[name] = true
+    return held
   end
 
   local function where()
@@ -10991,7 +11032,7 @@ function read_object(addr, class, prefix, out)
     __bg3leIdentity = function() return "o:" .. addr .. ":" .. prefix end,
     __name = viewType,
     __index = function(self, key)
-      local held = values[key]
+      local held = value_of(key)
       if held ~= nil then return held end
 
       local extra = Ext._Internal.CustomMember(viewType, key)
@@ -11025,18 +11066,35 @@ function read_object(addr, class, prefix, out)
       end
       if not ok then error("bg3le: " .. tostring(err2), 0) end
 
-      -- Read back rather than storing what was asked for, so the snapshot
+      -- Read back rather than storing what was asked for, so the view
       -- shows what the engine now holds.
       values[key] = read_object_path(addr, class, path, kind)
+      read[key] = true
     end,
     __pairs = function(self)
       local key
+      local amended = nil
       local extras, extra = nil, 0
       return function()
-        if extras == nil then
-          local value
-          key, value = next(values, key)
-          if key ~= nil then return key, value end
+        if amended == nil then
+          -- Every field, read as it is reached; one that reads as nil is
+          -- skipped, as it was when the object was read up front.
+          while true do
+            key = next(fields, key)
+            if key == nil then break end
+            local value = value_of(key)
+            if value ~= nil then return key, value end
+          end
+          amended = true
+        end
+        if amended == true then
+          -- Then what bg3le's own decoding added that is not a field.
+          while true do
+            key = next(values, key)
+            if key == nil then break end
+            if fields[key] == nil then return key, values[key] end
+          end
+          amended = false
           extras = Ext._Internal.CustomMemberNames(viewType)
         end
         extra = extra + 1
@@ -11054,6 +11112,26 @@ function read_object(addr, class, prefix, out)
     -- for the code that fills in what a raw read could not decode: a
     -- StatsExpressionRef's Code and RefCount are not fields of anything.
     __bg3leValues = values,
+  })
+end
+
+-- What a pointer field reads as: the object it points at, read as an object
+-- of its own class -- a fresh root, so the paths below it stay short however
+-- deep the chain -- and read when first touched, since pointers form cycles.
+-- Its identity is its address, which is what AvoidRecursion keys on.
+function Ext._Internal.PointedObject(target, class)
+  if class == nil then return "<unsupported>" end
+  local loaded
+  local function get()
+    if loaded == nil then loaded = read_object(target, class, "", {}) end
+    return loaded
+  end
+  return Ext._Internal.NewObjectProxy({
+    __index = function(_, k) return get()[k] end,
+    __newindex = function(_, k, v) get()[k] = v end,
+    __pairs = function() return pairs(get()) end,
+    __len = function() return #get() end,
+    __bg3leIdentity = string.format("p:%x", target),
   })
 end
 

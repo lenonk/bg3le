@@ -556,7 +556,8 @@ component's declared size with the size the engine recorded, and
   was given this build's sixteen-byte layout): scalars, enums and bitmasks,
   nested structs, pointers to them (followed as upstream follows them: the
   object pointed at, or nil, read when first touched so a cycle is only
-  walked as far as it is asked about), fixed and dynamic arrays,
+  walked as far as it is asked about; one that could not be an object or
+  cannot be read is refused rather than followed), fixed and dynamic arrays,
   `CompactSet` (read-only), hash sets, hash maps and the node-chained
   `LegacyMap`/`LegacyRefMap`, glm vectors,
   `std::optional`, `std::variant`, `FixedString`, `OverrideableProperty`,

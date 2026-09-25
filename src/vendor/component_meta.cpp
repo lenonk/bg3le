@@ -632,43 +632,77 @@ struct LegacyMapTraits<LegacyMapBase<I>> {
 };
 
 template <class M>
+struct LegacyInternalsOf;
+template <class I>
+struct LegacyInternalsOf<LegacyMapBase<I>> {
+    using type = I;
+};
+
+// The node of entry index. The table and the chains are read fault-
+// tolerantly, since a map reached through a pointer may not be where the
+// pointer says; the walk is kept per thread for the last map, so reading its
+// entries in turn walks it once.
+template <class M>
 typename M::Node* legacy_map_node(void const* container, std::size_t index) {
-    auto& map = *const_cast<M*>(static_cast<M const*>(container));
-    if (index >= map.size()) return nullptr;
-    struct Cursor {
-        void const* Map;
-        std::uint32_t Size;
-        std::size_t Index;
-        typename M::Iterator It;
+    using I = typename LegacyInternalsOf<M>::type;
+    using Node = typename M::Node;
+    std::uint32_t hashSize = 0, count = 0;
+    Node** table = nullptr;
+    auto const* base = static_cast<char const*>(container);
+    if (!safe_read(base + offsetof(I, HashSize), &hashSize, sizeof(hashSize))
+        || !safe_read(base + offsetof(I, ItemCount), &count, sizeof(count))
+        || !safe_read(base + offsetof(I, HashTable), &table, sizeof(table))
+        || index >= count || count > (1u << 22) || hashSize > (1u << 22)) {
+        return nullptr;
+    }
+
+    struct Walk {
+        void const* Map = nullptr;
+        std::uint32_t Count = 0;
+        std::vector<Node*> Nodes;
     };
-    thread_local std::optional<Cursor> cursor;
-    if (!cursor || cursor->Map != container || cursor->Size != map.size()
-        || index < cursor->Index) {
-        cursor.emplace(Cursor{container, map.size(), 0, map.begin()});
+    thread_local Walk walk;
+    if (walk.Map != container || walk.Count != count) {
+        walk = Walk{container, count, {}};
+        std::vector<Node*> buckets(hashSize);
+        if (hashSize != 0
+            && safe_read_some(table, buckets.data(), hashSize * sizeof(Node*))
+                   != hashSize * sizeof(Node*)) {
+            return nullptr;
+        }
+        for (Node* node : buckets) {
+            for (std::uint32_t guard = 0; node != nullptr && guard <= count
+                 && walk.Nodes.size() < count; ++guard) {
+                walk.Nodes.push_back(node);
+                Node* next = nullptr;
+                if (!safe_read((char const*)node + offsetof(Node, Next), &next, sizeof(next))) {
+                    break;
+                }
+                node = next;
+            }
+        }
     }
-    while (cursor->Index < index && cursor->It != map.end()) {
-        ++cursor->It;
-        ++cursor->Index;
-    }
-    if (cursor->Index != index || cursor->It == map.end()) return nullptr;
-    return &*cursor->It;
+    return index < walk.Nodes.size() ? walk.Nodes[index] : nullptr;
 }
 
 template <class M>
 std::size_t legacy_map_count_thunk(void const* container) {
-    return (std::size_t)static_cast<M const*>(container)->size();
+    using I = typename LegacyInternalsOf<M>::type;
+    std::uint32_t count = 0;
+    safe_read((char const*)container + offsetof(I, ItemCount), &count, sizeof(count));
+    return count;
 }
 
 template <class M>
 void* legacy_map_value_thunk(void const* container, std::size_t index) {
     auto* node = legacy_map_node<M>(container, index);
-    return node != nullptr ? (void*)&node->Value : nullptr;
+    return node != nullptr ? (char*)node + offsetof(typename M::Node, Value) : nullptr;
 }
 
 template <class M>
 void* legacy_map_key_thunk(void const* container, std::size_t index) {
     auto* node = legacy_map_node<M>(container, index);
-    return node != nullptr ? (void*)&node->Key : nullptr;
+    return node != nullptr ? (char*)node + offsetof(typename M::Node, Key) : nullptr;
 }
 
 template <class M>
@@ -1477,6 +1511,23 @@ struct Resolved {
     bool Ok{false};
 };
 
+// Whether a container header can be read. Its accessors read the header
+// directly, and a container reached through a pointer taken from a struct
+// whose layout is not the engine's can be anywhere.
+bool header_readable(void const* at, std::size_t size) {
+    unsigned char probe[64];
+    const std::size_t n = size == 0 ? 8 : (size < sizeof(probe) ? size : sizeof(probe));
+    return at != nullptr && safe_read(at, probe, n);
+}
+
+bool is_container_kind(FieldKind kind) {
+    return kind == FieldKind::DynArray || kind == FieldKind::Map
+           || kind == FieldKind::Optional || kind == FieldKind::Variant;
+}
+
+// A count no real container has, which means the header was not one.
+constexpr std::size_t kMaxContainerCount = std::size_t(1) << 24;
+
 // Resolves a path, which may name nested fields and index arrays:
 //
 //   "Hp"                     a field
@@ -1531,6 +1582,11 @@ Resolved resolve_path(ClassFields const* cls, char const* path, void* base) {
             if (subscripts.front() != '[') return out;
             const auto close = subscripts.find(']');
             if (close == std::string_view::npos) return out;
+
+            if (address != nullptr && is_container_kind(current.Kind)
+                && !header_readable(address, current.Size)) {
+                return out;
+            }
 
             const auto digits = subscripts.substr(1, close - 1);
             if (digits.empty()) return out;
@@ -1598,7 +1654,8 @@ Resolved resolve_path(ClassFields const* cls, char const* path, void* base) {
                     return out;
                 }
                 if (address != nullptr) {
-                    if (index >= current.Count(address)) return out;
+                    const std::size_t count = current.Count(address);
+                    if (index >= count || count > kMaxContainerCount) return out;
                     if (current.ElemAt != nullptr) {
                         address = current.ElemAt(address, index);
                         if (address == nullptr) return out;
@@ -1627,6 +1684,12 @@ Resolved resolve_path(ClassFields const* cls, char const* path, void* base) {
         }
 
         if (dot == std::string_view::npos) {
+            if (address != nullptr && is_container_kind(current.Kind)
+                && (!header_readable(address, current.Size)
+                    || (current.Count != nullptr
+                        && current.Count(address) > kMaxContainerCount))) {
+                return out;
+            }
             out.Field = current;
             out.Address = address;
             out.Ok = true;
@@ -1638,6 +1701,13 @@ Resolved resolve_path(ClassFields const* cls, char const* path, void* base) {
         if (current.Kind == FieldKind::Pointer && address != nullptr) {
             void* target = nullptr;
             if (!safe_read(address, &target, sizeof(target)) || target == nullptr) {
+                return out;
+            }
+            // Where an object could be, and readable there.
+            const auto at = (std::uintptr_t)target;
+            std::uint64_t probe = 0;
+            if (at < 0x10000 || at >= 0x800000000000ull || (at & 7) != 0
+                || !safe_read(target, &probe, sizeof(probe))) {
                 return out;
             }
             address = target;
@@ -2192,6 +2262,25 @@ extern "C" bool bg3le_meta_map_key_label(void const* handle, char const* path,
         }
     }
     return false;
+}
+
+// The class a pointer field points at, by the name bg3le_meta_class takes,
+// so what it points at can be read as an object of its own.
+extern "C" char const* bg3le_meta_path_class(void const* handle, char const* path) {
+    if (handle == nullptr || path == nullptr) return nullptr;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path, nullptr);
+    if (!r.Ok) return nullptr;
+    auto const* cls = struct_type_of(&r.Field);
+    return cls != nullptr ? cls->Name : nullptr;
+}
+
+// Whether a path names a struct bg3se describes -- which may have no fields
+// of its own, so an empty listing is not by itself a failure.
+extern "C" bool bg3le_meta_path_is_struct(void const* handle, char const* path) {
+    if (handle == nullptr) return false;
+    if (path == nullptr || path[0] == '\0') return true;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path, nullptr);
+    return r.Ok && struct_type_of(&r.Field) != nullptr;
 }
 
 // Enumerates a component's own fields, base classes included, for listing a
