@@ -303,6 +303,7 @@ add_library(bg3le SHARED
     src/lua_host.cpp
     src/savegame.cpp
     src/game_state.cpp
+    src/noesis_ui.cpp
     src/osi.cpp
     src/debug_server.cpp
     src/hook.cpp

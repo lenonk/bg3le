@@ -271,9 +271,9 @@ component's declared size with the size the engine recorded, and
   be called by name here. On by default, as upstream's is; `BG3LE_IMGUI=0`
   turns it off. Enum properties take their labels, `P_BITMASK` flags such
   as `Window.AlwaysAutoResize` are properties, whole arrays can be assigned,
-  and `UserData` and `Children` behave as upstream's. Icons do not draw yet:
-  the texture atlas and resource manager are not located, so an image
-  button is drawn without its image. See
+  and `UserData` and `Children` behave as upstream's. Icons draw: the
+  texture atlas map is located, and an atlas's resident texture is handed
+  to the renderer as it is. See
   [reference/IMGUI-ASSESSMENT.md](reference/IMGUI-ASSESSMENT.md)
 - **`Ext.Loca` on the engine's own `TranslatedStringRepository`**, read and
   written as upstream does, so a string a mod sets is what the game's
@@ -480,12 +480,14 @@ component's declared size with the size the engine recorded, and
   region as `PersistentVars`, which is in place; their nodes are not written
   yet.
 - **`Ext.UI` (Noesis), and so Mod Configuration Menu's main-menu button.**
-  MCM builds its whole window, but hands its button a Noesis data context
-  through `Ext.UI.GetRoot`, `RegisterType` and `Instantiate`, and bg3le has
-  no Noesis bindings: upstream links Noesis as a DLL, and here it is inside
-  the executable, reachable only through its symbols. Until then the button
-  runs the vanilla command it is bound to, which opens the Larian account
-  prompt. `Ext.Input.GetInputManager` is not there either.
+  MCM builds its whole window (it opens from the console), but hands its
+  button a Noesis data context through `Ext.UI.GetRoot`, `RegisterType` and
+  `Instantiate`. Upstream links Noesis as a DLL; here it is inside the
+  executable, reachable through its symbols. The root is found (the one
+  `Noesis::View`'s content, via a recorded static) and the game's Noesis
+  functions are callable by name; the element proxies, properties and
+  custom types are the rest. Until then the button runs the vanilla command
+  it is bound to, which opens the Larian account prompt.
 - **Osiris user queries (`QRY_*`).** Not callable yet: upstream evaluates
   them through the Rete node's `IsValid` with an identity adapter, and
   neither is located in this build.

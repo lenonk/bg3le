@@ -22,6 +22,7 @@
 #include "ecs_world.h"
 #include "mem.h"
 #include "game_state.h"
+#include "noesis_ui.h"
 #include "hook.h"
 #include "savegame.h"
 #include "log.h"
@@ -11726,7 +11727,10 @@ void call_internal(const char* name) {
     }
 }
 
-void lua_set_symbols(const SymbolTable* symbols) { g_symbols = symbols; }
+void lua_set_symbols(const SymbolTable* symbols) {
+    g_symbols = symbols;
+    noesis_set_symbols(symbols);
+}
 
 
 void lua_load_mods();
