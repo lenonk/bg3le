@@ -455,6 +455,20 @@ component's declared size with the size the engine recorded, and
   name — `ColorDefinition` is `resource::Color` — and the five
   character-creation default-value managers, whose names bg3se writes the
   MSVC way, resolve too
+- **`Ext.Stats.Create`**, as upstream's `RPGStats::CreateObject`: a new
+  entry in the modifier list, copied from a template if one is named, built
+  the way the engine's own parser builds one (0xf0 bytes from the engine
+  heap, its maps and defaults as the engine sets them) and inserted into
+  `RPGStats::Objects` by name. `Sync` then gives it a prototype, as
+  upstream's `SyncStat` does for a stat it has not seen: a spell, status or
+  interrupt created from a template syncs, and `Osi.AddSpell` puts a created
+  spell in a character's spellbook. Engine maps and arrays are grown through
+  `src/vendor/engine_containers.h`: in place while the engine's capacity
+  allows, as bg3se's own `insert` does, and never by freeing what the
+  engine allocated. The stats list itself is now re-read from its header
+  rather than kept from the moment it was found -- found mid-load, it had
+  27,821 entries where the finished array holds 23,964, and the tail was
+  stale
 - `Ext.Stats`: 15,754 stats, enumerable and readable by name, through a
   proxy that reads an attribute when it is asked for, as upstream's does.
   Snapshotting all two hundred of them per fetch made a mod's stats pass
@@ -545,13 +559,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **43 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **42 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 43 are
+  the source, because this one was stale at 86 for a while: 24 of the 42 are
   `Ext.Level`'s physics and pathfinding, 3 `Ext.StaticData`'s bank writes,
-  6 `Ext.Stats`' creation and functor execution, 6
+  5 `Ext.Stats`' structure edits, stats files and functor execution, 6
   `Ext.Template`'s local and cache managers, and 4 `Ext.Entity`'s
   `Create`, `Destroy`, `GetEntitiesOnTile` and `SetupTracing`.
   `reference/ext-api-surface.txt` lists them with their shapes. For the

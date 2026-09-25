@@ -41,6 +41,7 @@
 #include <GameDefinitions/Stats/Stats.h>
 #include <GameDefinitions/Components/All.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -218,7 +219,7 @@ std::size_t named_elements(ArrayRef const& array, std::size_t nameOffset,
 // is searched for too: whichever offset makes ten consecutive elements
 // resolve is the right one, and it is logged so the drift is on record.
 bool find_objects(unsigned long long runAddr, ArrayRef* out,
-                  std::size_t* nameOffsetOut) {
+                  std::size_t* nameOffsetOut, void const** headerOut) {
     constexpr std::size_t kWindow = 16384;   // either side of the run
     constexpr std::size_t kProbe = 10;       // elements that must resolve
     constexpr std::size_t kMaxNameOffset = 128;
@@ -252,6 +253,7 @@ bool find_objects(unsigned long long runAddr, ArrayRef* out,
             if (named_elements(array, nameOff, kProbe) < kProbe) continue;
             *out = array;
             *nameOffsetOut = nameOff;
+            *headerOut = (void const*)at;
             logf("stats: stats array at %#llx, %u entries, Object::Name at "
                  "+%zu (header says +%zu)", at, array.Size, nameOff,
                  (std::size_t)offsetof(Object, Name));
@@ -267,6 +269,10 @@ bool find_objects(unsigned long long runAddr, ArrayRef* out,
 // engine).
 struct Found {
     ArrayRef Objects{};
+    // Where the Objects array's header lives. The engine grows and rebuilds
+    // the array while mods load, so the buffer and size are re-read from here
+    // rather than kept from the moment it was found.
+    void const* ObjectsHeader{nullptr};
     std::size_t NameOffset{0};          // Object::Name
 
     ArrayRef Lists{};                   // RPGStats::ModifierLists
@@ -834,10 +840,12 @@ bool find_object_offsets(Found const& f, std::size_t* propsOut,
 bool build_from_run(unsigned long long run) {
     ArrayRef objects{};
     std::size_t nameOffset = 0;
-    if (!find_objects(run, &objects, &nameOffset)) return false;
+    void const* header = nullptr;
+    if (!find_objects(run, &objects, &nameOffset, &header)) return false;
 
     Found& f = state();
     f.Objects = objects;
+    f.ObjectsHeader = header;
     f.NameOffset = nameOffset;
     logf("stats: %u stats via the rarity run at %#llx", objects.Size, run);
 
@@ -1004,9 +1012,26 @@ bool search_for_stats() {
 // being true -- the first attempt in practice fails on "Epic" not yet being
 // in the string table. Retrying without a cooldown would be worse, since
 // every call would rescan memory.
+// Re-reads the Objects array from its header, at most every 100 ms unless
+// forced: 27,821 entries were seen mid-load where the finished array holds
+// fewer, and the stale tail pointed at objects the engine had let go.
+void refresh_objects(bool force) {
+    Found& f = state();
+    if (f.ObjectsHeader == nullptr) return;
+    static std::chrono::steady_clock::time_point last{};
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now - last < std::chrono::milliseconds(100)) return;
+    last = now;
+    ArrayRef fresh{};
+    if (array_header_at(f.ObjectsHeader, &fresh)) f.Objects = fresh;
+}
+
 bool ready() {
     Found& f = state();
-    if (f.Objects.Buffer != nullptr) return true;
+    if (f.Objects.Buffer != nullptr) {
+        refresh_objects(false);
+        return true;
+    }
 
     static std::time_t lastAttempt = 0;
     const std::time_t now = std::time(nullptr);
@@ -1103,6 +1128,30 @@ int hash_map_slot(void const* map, char const* name) {
 }  // namespace
 
 // ---- the C surface Ext.Stats is built on ----
+
+// After bg3le itself has grown the Objects array.
+extern "C" void bg3le_stats_objects_changed() {
+    const CacheLock lock(stats_cache_lock());
+    refresh_objects(true);
+}
+
+// A modifier list's handle (its index in RPGStats::ModifierLists), or -1.
+extern "C" int bg3le_stats_list_handle(char const* listName) {
+    const CacheLock lock(stats_cache_lock());
+    Found const& f = state();
+    if (listName == nullptr || !ready() || f.Lists.Buffer == nullptr) return -1;
+    for (std::uint32_t i = 0; i < f.Lists.Size; ++i) {
+        void const* list = nullptr;
+        std::uint32_t id = 0;
+        if (!read_as((char const*)f.Lists.Buffer + i * sizeof(void*), &list) || list == nullptr
+            || !read_as((char const*)list + f.ListNameOffset, &id)) {
+            continue;
+        }
+        char const* text = bg3le_fixed_string(id, nullptr);
+        if (text != nullptr && std::strcmp(text, listName) == 0) return (int)i;
+    }
+    return -1;
+}
 
 extern "C" void* bg3le_stats_manager() {
     const CacheLock lock(stats_cache_lock());

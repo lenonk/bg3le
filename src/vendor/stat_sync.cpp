@@ -20,6 +20,7 @@
 
 #include "../log.h"
 #include "../mem.h"
+#include "engine_containers.h"
 
 namespace bg3le {
 std::uintptr_t load_bias();
@@ -36,6 +37,8 @@ extern "C" char const* bg3le_stats_attr_label(void const* object,
                                               std::size_t index, int raw);
 extern "C" char const* bg3le_stats_attr_string(int raw);
 extern "C" void* bg3le_prototype_find(int kind, char const* name);
+extern "C" void* bg3le_prototype_map(int kind);
+extern "C" void bg3le_prototype_added(int kind, char const* name, void* prototype);
 extern "C" bool bg3le_meta_enum_label_value(char const* enumName,
                                            char const* label,
                                            std::uint64_t* value);
@@ -56,7 +59,8 @@ static_assert(offsetof(InterruptPrototype, Name) == 0);
 static_assert(offsetof(Object, Name) == 0x20);
 static_assert(sizeof(Array<int>) == 16);
 
-// The global every Init reads first: an object holding RPGStats at +0xc8.
+// The global every Init reads first: RPGStats, whose Objects array buffer
+// is at +0xc8 -- the array bg3le found by content.
 constexpr std::uintptr_t kStatsGlobal = 0x7bbd418;
 constexpr std::size_t kStatsInHolder = 0xc8;
 
@@ -287,6 +291,87 @@ char const* sync_interrupt(Object* object, InterruptPrototype* proto) {
 }  // namespace
 }  // namespace bg3le
 
+// RPGStats, if the global still holds the manager bg3le found.
+extern "C" void* bg3le_rpgstats() {
+    const std::uintptr_t bias = bg3le::load_bias();
+    char* rpg = nullptr;
+    void* objects = nullptr;
+    if (!bg3le::safe_read((void const*)(bias + bg3le::kStatsGlobal), &rpg, sizeof(rpg))
+        || rpg == nullptr
+        || !bg3le::safe_read(rpg + bg3le::kStatsInHolder, &objects, sizeof(objects))
+        || objects == nullptr || objects != bg3le_stats_manager()) {
+        return nullptr;
+    }
+    return rpg;
+}
+
+namespace bg3le {
+namespace {
+
+static_assert(offsetof(SpellPrototypeManager, SpellNames) - offsetof(SpellPrototypeManager, Spells) == 0x80);
+static_assert(offsetof(StatusPrototypeManager, StatusNames) - offsetof(StatusPrototypeManager, Statuses) == 0x40);
+
+// Upstream's new-prototype branch of SyncStat: a default prototype, synced,
+// then added to the manager's map and name list.
+template <class P>
+P* fresh_prototype() {
+    auto* p = (P*)bg3se::GameAllocRaw(sizeof(P));
+    if (p == nullptr) return nullptr;
+    std::memset((void*)p, 0, sizeof(P));
+    new (p) P;
+    return p;
+}
+
+char const* add_spell(Object* object, char const* name) {
+    auto* map = (char*)bg3le_prototype_map(0);
+    if (map == nullptr) return "the spell prototype manager is not located";
+    auto* proto = fresh_prototype<SpellPrototype>();
+    if (proto == nullptr) return "out of memory";
+    if (char const* err = sync_spell(object, proto)) return err;
+    std::uint32_t id = 0;
+    std::memcpy(&id, &object->Name, sizeof(id));
+    if (!fs_map_insert<void*>(map, id, proto)) return "the spell map does not hash the way bg3le reads it";
+    array_append<std::uint32_t>(map + 0x80, id);
+    bg3le_prototype_added(0, name, proto);
+    return nullptr;
+}
+
+char const* add_status(Object* object, char const* name) {
+    auto* map = (char*)bg3le_prototype_map(1);
+    if (map == nullptr) return "the status prototype manager is not located";
+    auto* proto = fresh_prototype<StatusPrototype>();
+    if (proto == nullptr) return "out of memory";
+    if (char const* err = sync_status(object, proto)) return err;
+    std::uint32_t id = 0;
+    std::memcpy(&id, &object->Name, sizeof(id));
+    if (!fs_map_insert<void*>(map, id, proto)) return "the status map does not hash the way bg3le reads it";
+    array_append<std::uint32_t>(map + 0x40, id);
+    bg3le_prototype_added(1, name, proto);
+    return nullptr;
+}
+
+// Interrupts are held in the map itself, so the default one goes in first
+// and is synced where it lands, as upstream's add_key then SyncStat do.
+char const* add_interrupt(Object* object, char const* name) {
+    auto* map = (char*)bg3le_prototype_map(2);
+    if (map == nullptr) return "the interrupt prototype manager is not located";
+    struct Raw { alignas(InterruptPrototype) unsigned char Bytes[sizeof(InterruptPrototype)]; } raw;
+    std::memset(raw.Bytes, 0, sizeof(raw.Bytes));
+    new (raw.Bytes) InterruptPrototype;
+    std::uint32_t id = 0;
+    std::memcpy(&id, &object->Name, sizeof(id));
+    void* slot = nullptr;
+    if (!fs_map_insert<Raw>(map, id, raw, &slot) || slot == nullptr) {
+        return "the interrupt map does not hash the way bg3le reads it";
+    }
+    if (char const* err = sync_interrupt(object, (InterruptPrototype*)slot)) return err;
+    bg3le_prototype_added(2, name, slot);
+    return nullptr;
+}
+
+}  // namespace
+}  // namespace bg3le
+
 // Rebuilds the prototype of the named stat. Returns nullptr on success, or
 // when the stat has no prototype to rebuild (upstream does nothing there
 // either); otherwise why it could not.
@@ -299,17 +384,17 @@ extern "C" char const* bg3le_stats_sync(char const* name) {
 
     if (std::strcmp(type, "SpellData") == 0) {
         auto* proto = (bg3se::stats::SpellPrototype*)bg3le_prototype_find(0, name);
-        if (proto == nullptr) return "the spell has no prototype; bg3le cannot add one";
+        if (proto == nullptr) return add_spell(object, name);
         return sync_spell(object, proto);
     }
     if (std::strcmp(type, "StatusData") == 0) {
         auto* proto = (bg3se::stats::StatusPrototype*)bg3le_prototype_find(1, name);
-        if (proto == nullptr) return "the status has no prototype; bg3le cannot add one";
+        if (proto == nullptr) return add_status(object, name);
         return sync_status(object, proto);
     }
     if (std::strcmp(type, "InterruptData") == 0) {
         auto* proto = (bg3se::stats::InterruptPrototype*)bg3le_prototype_find(2, name);
-        if (proto == nullptr) return "the interrupt has no prototype; bg3le cannot add one";
+        if (proto == nullptr) return add_interrupt(object, name);
         return sync_interrupt(object, proto);
     }
     if (std::strcmp(type, "PassiveData") == 0) {

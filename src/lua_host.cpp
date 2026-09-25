@@ -4733,6 +4733,20 @@ int l_settings_flag(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.StatsCreate(name, modifierList) -> address, or nil and why
+extern "C" void* bg3le_stats_create(char const* name, char const* listName, char const** err);
+int l_stats_create(lua_State* L) {
+    char const* err = nullptr;
+    void* object = bg3le_stats_create(luaL_checkstring(L, 1), luaL_checkstring(L, 2), &err);
+    if (object == nullptr) {
+        lua_pushnil(L);
+        lua_pushstring(L, err != nullptr ? err : "stat creation failed");
+        return 2;
+    }
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)object);
+    return 1;
+}
+
 // Ext._Internal.StatSync(name) -> true, or nil and why
 extern "C" char const* bg3le_stats_sync(char const* name);
 int l_stat_sync(lua_State* L) {
@@ -6446,6 +6460,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsFind");
     lua_pushcfunction(g_lua, l_stat_sync);
     lua_setfield(g_lua, -2, "StatSync");
+    lua_pushcfunction(g_lua, l_stats_create);
+    lua_setfield(g_lua, -2, "StatsCreate");
     lua_pushcfunction(g_lua, l_builtin_file);
     lua_setfield(g_lua, -2, "BuiltinFile");
     lua_pushcfunction(g_lua, l_string_key_find);
@@ -12467,8 +12483,35 @@ function Ext.Stats.SetPersistence()
   Ext._Internal.WarnOnce("Ext.Stats.SetPersistence() is deprecated")
 end
 
-Ext.Stats.Create = needs(
-  "Ext.Stats.Create needs the engine's stat allocation and sync path")
+-- Upstream's Create: a new stats entry in the modifier list, copied from a
+-- template if one is named; nil, with upstream's message, if the name is
+-- taken, the list unknown or the template missing. Sync gives it a prototype.
+local create_warning_shown = false
+function Ext.Stats.Create(statName, modifierList, copyFromTemplate, byRef)
+  if not Ext._Internal.StatsModuleLoad and Ext.IsServer() and not create_warning_shown then
+    create_warning_shown = true
+    Ext.Log.PrintWarning("Stats entres created after ModuleLoad must be synced manually; "
+      .. "make sure that you call SyncStat() on it when you're finished!")
+  end
+  local addr, err = Ext._Internal.StatsCreate(tostring(statName), tostring(modifierList))
+  if addr == nil then
+    Ext.Log.PrintError(err)
+    return nil
+  end
+  local stat = Ext.Stats.Get(statName)
+  if copyFromTemplate ~= nil then
+    if Ext._Internal.StatsFind(copyFromTemplate) == nil then
+      Ext.Log.PrintError("Cannot copy stats from nonexistent template: " .. tostring(copyFromTemplate))
+      return nil
+    end
+    local ok, copyErr = pcall(stat.CopyFrom, stat, copyFromTemplate)
+    if not ok then
+      Ext.Log.PrintError(tostring(copyErr))
+      return nil
+    end
+  end
+  return stat
+end
 Ext.Stats.AddAttribute = needs(
   "Ext.Stats.AddAttribute needs to extend a modifier list, which is "
   .. "parsed once at load")

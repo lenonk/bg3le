@@ -153,6 +153,7 @@ int kind_of(void const* keys, std::uint32_t count) {
 struct Table {
     std::unordered_map<std::string, std::uint64_t> ByName;
     std::vector<std::string> Order;
+    std::uint64_t MapAt{0};  // the manager's map, for adding a prototype
 };
 
 struct Prototypes {
@@ -461,8 +462,11 @@ bool harvest_map(unsigned long long at, std::size_t k, Table* into) {
         const std::size_t stride =
             inline_stride(keys, values, count, kKinds[k].NameOffset);
         if (stride == 0 || kind_of(keys, count) != (int)k) return false;
-        return harvest_inline(keys, values, count, kKinds[k].NameOffset,
-                              stride, into) > 0;
+        if (harvest_inline(keys, values, count, kKinds[k].NameOffset, stride, into) == 0) {
+            return false;
+        }
+        into->MapAt = at;
+        return true;
     }
 
     if (!self_consistent(keys, values, count, kKinds[k].NameOffset)) {
@@ -472,7 +476,9 @@ bool harvest_map(unsigned long long at, std::size_t k, Table* into) {
     // the path was recorded under: the spell and status managers look
     // identical, and adopting one as the other would be silent.
     if (kind_of(keys, count) != (int)k) return false;
-    return harvest(keys, values, count, kKinds[k].NameOffset, into) > 0;
+    if (harvest(keys, values, count, kKinds[k].NameOffset, into) == 0) return false;
+    into->MapAt = at;
+    return true;
 }
 
 // The managers a previous run recorded a path to, with no scanning.
@@ -706,6 +712,7 @@ bool build() {
                     kKinds[kind].NameOffset, &found.Kinds[kind]);
         if (added > 0) {
             at[kind] = candidate.At;
+            found.Kinds[kind].MapAt = candidate.At;
             logf("prototypes: %zu %s prototypes at %#llx", added,
                  kKinds[kind].Name, candidate.At);
         }
@@ -729,6 +736,7 @@ bool build() {
             kKinds[k].NameOffset, stride, &found.Kinds[k]);
         if (added > 0) {
             at[k] = candidate.At;
+            found.Kinds[k].MapAt = candidate.At;
             logf("prototypes: %zu %s prototypes at %#llx, stride %zu",
                  added, kKinds[k].Name, candidate.At, stride);
         }
@@ -830,6 +838,21 @@ extern "C" void* bg3le_prototype_find(int kind, char const* name) {
     auto it = table->ByName.find(name);
     if (it == table->ByName.end()) return nullptr;
     return (void*)(std::uintptr_t)it->second;
+}
+
+// The manager's map for a kind, or 0.
+extern "C" void* bg3le_prototype_map(int kind) {
+    Table const* table = table_of(kind);
+    return table != nullptr ? (void*)(std::uintptr_t)table->MapAt : nullptr;
+}
+
+// A prototype bg3le has just added to the manager.
+extern "C" void bg3le_prototype_added(int kind, char const* name, void* prototype) {
+    if (!ready() || kind < 0 || (std::size_t)kind >= std::size(kKinds) || name == nullptr) return;
+    Table& table = state().Kinds[kind];
+    if (table.ByName.emplace(name, (std::uint64_t)(std::uintptr_t)prototype).second) {
+        table.Order.push_back(name);
+    }
 }
 
 extern "C" std::size_t bg3le_prototype_count(int kind) {
