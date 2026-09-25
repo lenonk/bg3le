@@ -7,6 +7,11 @@
 #include <Lua/Libs/ClientUI/Symbols.inl>
 #include <Lua/Libs/ClientUI/ClassCache.inl>
 
+// bg3le: the game has these functions; see bg3le_noesis_builtins.inl.
+#if defined(BG3LE_NOESIS_FORWARD)
+#include <bg3le_noesis_builtins.inl>
+#else
+
 BEGIN_BARE_NS(Noesis)
 
 namespace Boxing
@@ -820,3 +825,5 @@ void Visual::RemoveVisualChild(Visual* child)
 }
 
 END_BARE_NS()
+
+#endif // BG3LE_NOESIS_FORWARD

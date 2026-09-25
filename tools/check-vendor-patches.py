@@ -134,6 +134,12 @@ CHECKS = [
      lambda: "ls__gTextureAtlasMap == nullptr" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")),
     ("IncTextureRef tolerates a missing resource bank",
      lambda: "auto bank = GetStaticSymbols().GetCurrentResourceBank();" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")),
+    ("Noesis builtins forward to the game",
+     lambda: "#include <bg3le_noesis_builtins.inl>" in text("BG3Extender/Lua/Libs/ClientUI/Builtins.inl")
+             and text("BG3Extender/GameDefinitions/UI.h").count("#if !defined(BG3LE_NOESIS_FORWARD)") == 2),
+    ("Ext.UI.GetRoot uses the View and the bridge is included",
+     lambda: "bg3le::noesis_root()" in text("BG3Extender/Lua/Libs/ClientUI/Module.inl")
+             and "#include <bg3le_noesis_lua.inl>" in text("BG3Extender/Lua/Libs/ClientUI/Module.inl")),
     ("icon atlases register their resident texture",
      lambda: "reinterpret_cast<TextureDescriptor*>(atlas->Texture)" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")
              and "bool Resident{ false };" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.h")),

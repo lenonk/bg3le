@@ -19,3 +19,13 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 echo "no undefined bg3le symbols"
+
+# Noesis is local to the game executable, so nothing resolves these at load
+# time; each needs an entry in src/noesis_forward.cpp.
+noesis=$(nm -D --undefined-only "$LIB" | grep -E " U _Z.*6Noesis" || true)
+if [ -n "$noesis" ]; then
+    echo "Noesis symbols missing from src/noesis_forward.cpp:" >&2
+    echo "$noesis" >&2
+    exit 1
+fi
+echo "no undefined Noesis symbols"

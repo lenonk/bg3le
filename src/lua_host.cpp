@@ -1130,6 +1130,8 @@ extern "C" std::uint32_t bg3le_imgui_set_callback(std::uint64_t handle,
                                                   void* state);
 extern "C" bool bg3le_imgui_clear_callback(std::uint64_t handle,
                                            char const* name);
+// Ext.UI's C side, src/vendor/bg3le_noesis_lua.inl.
+extern "C" void bg3le_ui_register(lua_State* L);
 extern "C" bool bg3le_imgui_take_event(void* state, std::uint32_t* id,
                                        std::uint64_t* widget,
                                        std::uint8_t* argKind, bool* argBool,
@@ -5626,6 +5628,7 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ImguiClearCallback");
     lua_pushcfunction(g_lua, l_imgui_take_event);
     lua_setfield(g_lua, -2, "ImguiTakeEvent");
+    bg3le_ui_register(g_lua);
     lua_pushcfunction(g_lua, l_imgui_input_state);
     lua_setfield(g_lua, -2, "ImguiInputState");
     lua_pushcfunction(g_lua, l_imgui_window_geometry);
@@ -8338,6 +8341,206 @@ if Ext._Internal.IsClientState() then
   end
 end
 
+-- ---- Ext.UI ----
+--
+-- Upstream's client module over the game's Noesis. A Noesis object is a
+-- proxy around a light userdata, with upstream's methods and getters and the
+-- object's own properties behind them; src/vendor/bg3le_noesis_lua.inl is
+-- the C side. Commands and routed events are queued there and delivered by
+-- the tick pump, so a handler cannot set Handled on the event it is given.
+if Ext._Internal.IsClientState() then
+  local I = Ext._Internal
+  Ext.UI = {}
+
+  local UiObject = {}
+  local ptr_of = setmetatable({}, {__mode = "k"})
+  local proxies = setmetatable({}, {__mode = "v"})
+
+  local function wrap(ptr)
+    if ptr == nil then return nil end
+    local proxy = proxies[ptr]
+    if proxy == nil then
+      proxy = setmetatable({}, UiObject)
+      ptr_of[proxy] = ptr
+      proxies[ptr] = proxy
+    end
+    return proxy
+  end
+
+  local function unwrap(value)
+    if getmetatable(value) == UiObject then return ptr_of[value] end
+    return value
+  end
+
+  local function out(value)
+    if type(value) == "userdata" then return wrap(value) end
+    return value
+  end
+
+  local function wrap_all(t)
+    for k, v in pairs(t) do t[k] = out(v) end
+    return t
+  end
+
+  -- Handler ids the C side queues against: commands and event subscriptions.
+  local handlers = {}
+  local next_handler = 0
+  local command_handler = {}
+  local subscription_handler = {}
+
+  local function add_handler(fn)
+    next_handler = next_handler + 1
+    handlers[next_handler] = fn
+    return next_handler
+  end
+
+  local function no_property(ptr, name)
+    return string.format("Object %s has no property named '%s'",
+                         I.UiTypeName(ptr), tostring(name))
+  end
+
+  local methods = {}
+
+  function methods:GetProperty(name)
+    local found, value = I.UiGet(ptr_of[self], name)
+    if not found then
+      Ext.Log.PrintError(no_property(ptr_of[self], name))
+      return nil
+    end
+    return out(value)
+  end
+
+  function methods:SetProperty(name, value)
+    if not I.UiSet(ptr_of[self], name, unwrap(value)) then
+      Ext.Log.PrintError(no_property(ptr_of[self], name))
+    end
+  end
+
+  function methods:GetAllProperties()
+    return wrap_all(I.UiProperties(ptr_of[self], "all"))
+  end
+  function methods:DirectProperties()
+    return wrap_all(I.UiProperties(ptr_of[self], "direct"))
+  end
+  function methods:DependencyProperties()
+    return wrap_all(I.UiProperties(ptr_of[self], "dependency"))
+  end
+  function methods:ToString() return I.UiToString(ptr_of[self]) end
+  function methods:VisualChild(i) return wrap(I.UiVisualChild(ptr_of[self], i)) end
+  function methods:Child(i) return wrap(I.UiChild(ptr_of[self], i)) end
+  function methods:Find(name) return wrap(I.UiFind(ptr_of[self], name)) end
+  function methods:Resource(key, full)
+    return wrap(I.UiResource(ptr_of[self], key, full == true))
+  end
+  function methods:CanExecute(arg) return I.UiCanExecute(ptr_of[self], unwrap(arg)) end
+  function methods:Execute(arg) I.UiExecute(ptr_of[self], unwrap(arg)) end
+
+  function methods:SetHandler(fn)
+    local ptr = ptr_of[self]
+    local old = command_handler[ptr]
+    if old ~= nil then handlers[old] = nil end
+    local id = fn ~= nil and add_handler(fn) or 0
+    command_handler[ptr] = fn ~= nil and id or nil
+    I.UiSetHandler(ptr, id)
+  end
+
+  function methods:Subscribe(event, fn)
+    local id = add_handler(fn)
+    local index = I.UiSubscribe(ptr_of[self], event, id)
+    if index == nil then
+      handlers[id] = nil
+      return nil
+    end
+    subscription_handler[index] = id
+    return index
+  end
+
+  function methods:Unsubscribe(index)
+    local id = subscription_handler[index]
+    if id ~= nil then handlers[id] = nil end
+    subscription_handler[index] = nil
+    return I.UiUnsubscribe(index)
+  end
+
+  local getters = {
+    Type = function(ptr) return I.UiTypeName(ptr) end,
+    VisualChildrenCount = function(ptr) return I.UiVisualCount(ptr) end,
+    VisualParent = function(ptr) return wrap(I.UiVisualParent(ptr)) end,
+    ChildrenCount = function(ptr) return I.UiChildCount(ptr) end,
+    Parent = function(ptr) return wrap(I.UiParent(ptr)) end,
+  }
+
+  UiObject.__index = function(self, key)
+    local method = methods[key]
+    if method ~= nil then return method end
+    local ptr = ptr_of[self]
+    local getter = getters[key]
+    if getter ~= nil then return getter(ptr) end
+    local found, value = I.UiGet(ptr, key)
+    if found then return out(value) end
+    error(no_property(ptr, key), 2)
+  end
+
+  UiObject.__newindex = function(self, key, value)
+    if not I.UiSet(ptr_of[self], key, unwrap(value)) then
+      error(no_property(ptr_of[self], key), 2)
+    end
+  end
+
+  UiObject.__tostring = function(self)
+    return string.format("%s (%s)", I.UiTypeName(ptr_of[self]), tostring(ptr_of[self]))
+  end
+
+  function Ext.UI.GetRoot() return wrap(I.UiRoot()) end
+
+  function Ext.UI.RegisterType(name, properties, wrappedContext)
+    return I.UiRegisterType(name, properties or {}, wrappedContext)
+  end
+
+  function Ext.UI.Instantiate(name, wrappedContext)
+    return wrap(I.UiInstantiate(name, unwrap(wrappedContext)))
+  end
+
+  function Ext.UI.SetState()
+    Ext.Log.PrintError("Ext.UI.SetState(): Deprecated")
+  end
+
+  function Ext.UI.EnableErrorReporting(enable) end
+
+  for _, name in ipairs({"GetStateMachine", "GetPickingHelper",
+                         "GetCursorControl", "GetDragDrop"}) do
+    Ext.UI[name] = function()
+      error("bg3le: Ext.UI." .. name .. " needs an engine manager that is "
+            .. "not located yet", 2)
+    end
+  end
+
+  local function call(fn, ...)
+    local ok, err = xpcall(fn, debug.traceback, ...)
+    if not ok then
+      Ext.Log.PrintError("Error while dispatching UI event: " .. tostring(err))
+    end
+  end
+
+  function Ext._Internal.UiPump()
+    while true do
+      local id, command, parameter = I.UiTakeCommand()
+      if id == nil then break end
+      local fn = handlers[id]
+      if fn ~= nil then call(fn, wrap(command), wrap(parameter)) end
+    end
+    while true do
+      local id, sender, event, source = I.UiTakeEvent()
+      if id == nil then break end
+      local fn = handlers[id]
+      if fn ~= nil then
+        call(fn, wrap(sender), {RoutedEvent = event, Source = wrap(source),
+                                Handled = false})
+      end
+    end
+  end
+end
+
 function Ext.Utils.GetDialogManager()
   error("bg3le: Ext.Utils.GetDialogManager needs the engine's dialog "
         .. "manager, which is not located yet", 2)
@@ -8555,6 +8758,7 @@ function Ext._Internal.RunTimers()
 
   -- And what the overlay's widgets queued, for the same reason.
   Ext._Internal.ImguiPump()
+  if Ext._Internal.UiPump then Ext._Internal.UiPump() end
 
   -- And the component events the engine raised.
   if Ext._Internal.DeliverComponentEvents then
@@ -8569,8 +8773,15 @@ function Ext._Internal.RunTimers()
   local now = Ext.Timer.MonotonicTime()
   if first_tick == nil then first_tick = now end
 
+  -- Collected first: a callback that starts a timer adds to the table, and
+  -- adding a key mid-pairs is "invalid key to 'next'".
+  local due = {}
   for handle, t in pairs(timers) do
-    if not t.paused and now >= t.due then
+    if not t.paused and now >= t.due then due[#due + 1] = handle end
+  end
+  for _, handle in ipairs(due) do
+    local t = timers[handle]
+    if t ~= nil then
       if t.every then t.due = now + t.every else timers[handle] = nil end
       local ok, err = xpcall(t.fn, debug.traceback, handle)
       if not ok then

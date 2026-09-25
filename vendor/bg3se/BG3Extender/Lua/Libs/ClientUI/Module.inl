@@ -50,18 +50,31 @@ void MakePolymorphicRef(lua_State* L, Noesis::RoutedEventArgs* value, LifetimeHa
 
 END_NS()
 
+#if defined(BG3LE_NOESIS_FORWARD)
+namespace bg3le { void* noesis_root(); }
+#endif
+
 /// <lua_module>UI</lua_module>
 BEGIN_NS(ecl::lua::ui)
 
 Noesis::FrameworkElement* GetRoot()
 {
     Noesis::gStaticSymbols.Initialize();
+#if defined(BG3LE_NOESIS_FORWARD)
+    // bg3le: the View's content, found by vtable; no resource manager needed.
+    return static_cast<Noesis::FrameworkElement*>(bg3le::noesis_root());
+#else
     return (*GetStaticSymbols().ls__gGlobalResourceManager)->UI->NoesisUIManager.MainCanvas;
+#endif
 }
 
 bg3se::ui::UIStateMachine* GetStateMachine()
 {
     Noesis::gStaticSymbols.Initialize();
+#if defined(BG3LE_NOESIS_FORWARD)
+    // bg3le: the resource manager is not located yet.
+    if (GetStaticSymbols().ls__gGlobalResourceManager == nullptr) return nullptr;
+#endif
     return (*GetStaticSymbols().ls__gGlobalResourceManager)->UI->StateMachine.StateMachineComponent;
 }
 
@@ -195,3 +208,8 @@ void RegisterUILib()
 }
 
 END_NS()
+
+// bg3le: Ext.UI on bg3le's own Lua host.
+#if defined(BG3LE_NOESIS_FORWARD)
+#include <bg3le_noesis_lua.inl>
+#endif

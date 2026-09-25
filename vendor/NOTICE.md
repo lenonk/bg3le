@@ -368,6 +368,24 @@ without looking it up or loading it, and marks it resident so the engine's
 `UnloadTexture` is never called for a texture bg3le did not load. The
 upstream path is unchanged for textures that are not in an atlas.
 
+**`Lua/Libs/ClientUI/Builtins.inl` and `GameDefinitions/UI.h` — the Noesis
+functions go to the game's own copies.** Upstream links no Noesis library, so
+these reimplement `Reflection`, `SymbolManager`, `TypeClass`, `BaseCommand`
+and the rest against Windows data layouts and SRWLOCKs; the Linux game has
+all of them as local symbols and locks with `pthread_spin_lock`. Under
+`BG3LE_NOESIS_FORWARD` the reimplementations are compiled out, and
+`src/noesis_forward.cpp` defines each as a jump to the game's function,
+resolved from `.symtab`. `src/vendor/bg3le_noesis_builtins.inl` keeps
+`LuaDelegateCommand` and the one function the game lacks.
+
+**`Lua/Libs/ClientUI/Module.inl` — `Ext.UI.GetRoot` returns the View's
+content, and bg3le's Ext.UI bridge is included.** Upstream reads the root
+from `gGlobalResourceManager`, which bg3le has not located; the View is
+found by hooking its per-frame `Update`. `GetStateMachine` returns null
+instead of dereferencing the missing manager. The bridge,
+`src/vendor/bg3le_noesis_lua.inl`, is included at the end so it can use
+upstream's class cache and custom-type builder.
+
 ## vendor/compat — bg3le's own code
 
 Shims that let the upstream sources compile unmodified. They are force-included

@@ -48,6 +48,7 @@ struct ReflectionInternals
     HashMap<uint32_t, Type*> NameToType;
 };
 
+#if !defined(BG3LE_NOESIS_FORWARD)
 inline void* Alloc(SizeT size)
 {
     return GameAllocRaw(size);
@@ -70,6 +71,8 @@ inline void Dealloc(void* ptr)
     return GameFree(ptr);
 }
 
+#endif
+
 inline char const* Type::GetName() const
 {
     return mName.Str();
@@ -80,6 +83,7 @@ inline Symbol Type::GetTypeId() const
     return mName;
 }
 
+#if !defined(BG3LE_NOESIS_FORWARD)
 inline ReflectionInternals* GetReflection()
 {
     return (ReflectionInternals *)((uintptr_t)GetStaticSymbols().Noesis__Reflection__Data - sizeof(Noesis::BaseVector_));
@@ -117,6 +121,8 @@ inline const Type* Reflection::GetType(Symbol name)
     ReleaseSRWLockShared(lock);
     return val;
 }
+
+#endif
 
 inline TypeClass const* TypeClass::GetBase() const
 {

@@ -275,6 +275,22 @@ component's declared size with the size the engine recorded, and
   texture atlas map is located, and an atlas's resident texture is handed
   to the renderer as it is. See
   [reference/IMGUI-ASSESSMENT.md](reference/IMGUI-ASSESSMENT.md)
+- **`Ext.UI` on the game's Noesis**, so Mod Configuration Menu's main-menu
+  button opens its window. Upstream links no Noesis library and reimplements
+  the pieces it calls against Windows internals; the Linux game has every
+  one of them as a local symbol, so `src/noesis_forward.cpp` sends each call
+  to the game's own function, resolved from `.symtab`. The class layouts and
+  vtables were checked against the game's: the headers are Noesis 3.1.7, the
+  game 3.1.6, and all 38 shared vtables match. The root is the content of the
+  one `Noesis::View`, which is caught by hooking its per-frame `Update`.
+  Elements are proxies with upstream's `Find`, `Child`, `VisualChild`,
+  `GetProperty`/`SetProperty`, `Subscribe` and the rest, over the same class
+  cache and value conversions; `RegisterType` and `Instantiate` build custom
+  data contexts with upstream's own builder, and a `Command` property's
+  `SetHandler` runs when the button is pressed. Commands and routed events
+  are delivered on the client tick, so a handler cannot set `Handled` on its
+  event; `WriteCallback`, `GetStateMachine` and the picking, cursor and
+  drag-and-drop managers are not there yet
 - **`Ext.Loca` on the engine's own `TranslatedStringRepository`**, read and
   written as upstream does, so a string a mod sets is what the game's
   interface shows — Mod Configuration Menu's main-menu button is labelled
@@ -471,23 +487,12 @@ component's declared size with the size the engine recorded, and
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
-- **The client-side modules.** `Ext.ClientUI` in particular is blocked on the
-  placeholder Noesis RTTI — the native game ships no Noesis typeinfo at all,
-  so `src/vendor/noesis_rtti_linux.cpp` aliases 19 of them to one real
-  placeholder type. That is safe only while no Noesis `dynamic_cast` runs. The
-  real fix is keeping Noesis types out of the generated property maps
+- **Input events.** `KeyInput`, `MouseButtonInput` and the controller events
+  are declared but never fired, so Mod Configuration Menu's button in the
+  in-game menu, which it looks for when Escape is pressed, is not wired up
 - **Saving `Ext.Vars` and persistent timers.** They go in the same save
   region as `PersistentVars`, which is in place; their nodes are not written
   yet.
-- **`Ext.UI` (Noesis), and so Mod Configuration Menu's main-menu button.**
-  MCM builds its whole window (it opens from the console), but hands its
-  button a Noesis data context through `Ext.UI.GetRoot`, `RegisterType` and
-  `Instantiate`. Upstream links Noesis as a DLL; here it is inside the
-  executable, reachable through its symbols. The root is found (the one
-  `Noesis::View`'s content, via a recorded static) and the game's Noesis
-  functions are callable by name; the element proxies, properties and
-  custom types are the rest. Until then the button runs the vanilla command
-  it is bound to, which opens the Larian account prompt.
 - **Osiris user queries (`QRY_*`).** Not callable yet: upstream evaluates
   them through the Rete node's `IsValid` with an identity adapter, and
   neither is located in this build.

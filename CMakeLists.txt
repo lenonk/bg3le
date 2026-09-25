@@ -240,6 +240,7 @@ target_compile_definitions(bg3se_vendor PRIVATE
     OSI_EOCAPP
     OSI_EXTENSION_BUILD
     NS_STATIC_LIBRARY
+    BG3LE_NOESIS_FORWARD  # Noesis calls go to the game; src/noesis_forward.cpp
     GLM_FORCE_INTRINSICS   # MSVC enables SIMD implicitly; glm needs it set
     GOOGLE_PROTOBUF_NO_RTTI
     _ITERATOR_DEBUG_LEVEL=0
@@ -279,6 +280,9 @@ endif()
 file(GLOB ABSL_LIBS ${ABSL_PREFIX}/lib/libabsl_*.a)
 list(APPEND ABSL_LIBS ${EXTERNAL}/protobuf/build/third_party/utf8_range/libutf8_validity.a)
 
+# bg3le_noesis_*.inl, included from upstream ClientUI sources.
+target_include_directories(bg3se_vendor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor)
+
 target_include_directories(bg3se_vendor PRIVATE
     ${EXTERNAL}/protobuf/src
     ${ABSL_PREFIX}/include)
@@ -304,6 +308,7 @@ add_library(bg3le SHARED
     src/savegame.cpp
     src/game_state.cpp
     src/noesis_ui.cpp
+    src/noesis_forward.cpp
     src/osi.cpp
     src/debug_server.cpp
     src/hook.cpp

@@ -3,11 +3,12 @@
 // Upstream links Noesis.dll; here Noesis is compiled into the executable and
 // every one of its functions is a local symbol in .symtab, so they are called
 // through addresses resolved by mangled name. The UI root is the content of
-// the one Noesis::View, found by its vtable and then recorded as a static
-// path so later runs read it directly.
+// the one Noesis::View, which hands itself over the first time the game calls
+// its per-frame Update: that vtable slot, and its IView thunk, are hooked.
 
 #include "noesis_ui.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -20,10 +21,7 @@
 extern "C" bool bg3le_scannable_region(char const* line,
                                        unsigned long long* from,
                                        unsigned long long* to);
-extern "C" std::size_t bg3le_static_count(char const* key);
-extern "C" void* bg3le_static_get(char const* key, std::size_t which);
-extern "C" void bg3le_static_confirm(char const* key, std::size_t which);
-extern "C" bool bg3le_static_record(char const* key, void const* object);
+extern "C" std::size_t bg3le_noesis_resolve(void* (*find)(char const*));
 
 namespace bg3le {
 namespace {
@@ -47,6 +45,58 @@ bool is_view(void* object) {
         && vt == view_vtable();
 }
 
+// The IView subobject's offset, from the thunk's mangled name.
+constexpr std::size_t kIViewOffset = 16;
+
+// View::Update(double) returns whether a render is needed; passed through.
+using UpdateProc = std::uint64_t (*)(void*, double);
+UpdateProc g_update = nullptr;
+UpdateProc g_update_thunk = nullptr;
+std::atomic<void*> g_view{nullptr};
+bool g_hooked = false;
+
+void saw_view(void* view) {
+    void* expected = nullptr;
+    if (g_view.compare_exchange_strong(expected, view)) {
+        logf("noesis: View at %p", view);
+    } else if (expected != view && !is_view(expected)) {
+        g_view.store(view);  // the old one is gone
+        logf("noesis: View replaced, now at %p", view);
+    }
+}
+
+std::uint64_t update_hook(void* view, double time) {
+    saw_view(view);
+    return g_update(view, time);
+}
+
+std::uint64_t update_thunk_hook(void* iview, double time) {
+    saw_view(static_cast<char*>(iview) - kIViewOffset);
+    return g_update_thunk(iview, time);
+}
+
+// Hooks the View vtable slot that holds `function`.
+bool hook_view_slot(char const* function, void* replacement, UpdateProc* original) {
+    const std::uintptr_t vt = view_vtable();
+    auto target = reinterpret_cast<std::uintptr_t>(resolve(function));
+    if (vt == 0 || target == 0) return false;
+    // The View vtable and its IView part: 99 entries.
+    for (std::size_t i = 0; i < 99; ++i) {
+        std::uintptr_t entry = 0;
+        const std::uintptr_t slot = vt + i * 8;
+        if (!safe_read(reinterpret_cast<void*>(slot), &entry, sizeof(entry))) break;
+        if (entry != target) continue;
+        void* previous = nullptr;
+        if (!hook_slot(slot - load_bias(), target - load_bias(), replacement, &previous)) {
+            return false;
+        }
+        *original = reinterpret_cast<UpdateProc>(previous);
+        return true;
+    }
+    return false;
+}
+
+// Fallback for when the hooks could not go in: a one-off scan for the vtable.
 void* scan_for_view() {
     const std::uintptr_t want = view_vtable();
     if (want == 0) return nullptr;
@@ -80,26 +130,30 @@ void* scan_for_view() {
 
 }  // namespace
 
-void noesis_set_symbols(const SymbolTable* symbols) { g_symbols = symbols; }
+void noesis_set_symbols(const SymbolTable* symbols) {
+    g_symbols = symbols;
+    const std::size_t missing = bg3le_noesis_resolve(
+        [](char const* name) -> void* { return resolve(name); });
+    if (missing != 0) logf("noesis: %zu forwarded functions unresolved", missing);
+
+    g_hooked = hook_view_slot("_ZN6Noesis4View6UpdateEd",
+                              reinterpret_cast<void*>(&update_hook), &g_update)
+        && hook_view_slot("_ZThn16_N6Noesis4View6UpdateEd",
+                          reinterpret_cast<void*>(&update_thunk_hook), &g_update_thunk);
+    if (!g_hooked) logf("noesis: View::Update not hooked; Ext.UI will scan for the View");
+}
 
 void* noesis_view() {
-    static void* cached = nullptr;
-    if (is_view(cached)) return cached;
+    void* view = g_view.load();
+    if (is_view(view)) return view;
+    if (g_hooked) return nullptr;  // no UI yet
 
-    constexpr char const* kKey = "noesis.view";
-    for (std::size_t i = 0; i < bg3le_static_count(kKey); ++i) {
-        void* candidate = bg3le_static_get(kKey, i);
-        if (is_view(candidate)) {
-            bg3le_static_confirm(kKey, i);
-            return cached = candidate;
-        }
+    static void* scanned = nullptr;
+    if (!is_view(scanned)) {
+        scanned = scan_for_view();
+        if (scanned != nullptr) logf("noesis: View at %p (scanned)", scanned);
     }
-    void* view = scan_for_view();
-    if (view != nullptr) {
-        logf("noesis: View at %p (scanned)", view);
-        bg3le_static_record(kKey, view);
-    }
-    return cached = view;
+    return scanned;
 }
 
 void* noesis_root() {
@@ -108,20 +162,6 @@ void* noesis_root() {
         resolve("_ZNK6Noesis4View10GetContentEv"));
     void* view = noesis_view();
     return view != nullptr && get != nullptr ? get(view) : nullptr;
-}
-
-void* noesis_find_name(void* element, char const* name) {
-    using FindName = void* (*)(void const*, char const*);
-    static auto find = reinterpret_cast<FindName>(
-        resolve("_ZNK6Noesis16FrameworkElement8FindNameEPKc"));
-    return element != nullptr && find != nullptr ? find(element, name) : nullptr;
-}
-
-char const* noesis_name(void* element) {
-    using GetName = char const* (*)(void const*);
-    static auto get = reinterpret_cast<GetName>(
-        resolve("_ZNK6Noesis16FrameworkElement7GetNameEv"));
-    return element != nullptr && get != nullptr ? get(element) : nullptr;
 }
 
 }  // namespace bg3le

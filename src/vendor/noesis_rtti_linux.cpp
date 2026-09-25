@@ -50,7 +50,9 @@ NoesisRttiPlaceholder::~NoesisRttiPlaceholder() = default;
     ".set " mangled ", _ZTIN5bg3le21NoesisRttiPlaceholderE\n"
 
 __asm__(BG3LE_ALIAS_TYPEINFO("_ZTIN6Noesis10BaseObjectE")
+        BG3LE_ALIAS_TYPEINFO("_ZTIN6Noesis10BoxedValueE")
         BG3LE_ALIAS_TYPEINFO("_ZTIN6Noesis11BaseCommandE")
+        BG3LE_ALIAS_TYPEINFO("_ZTIN6Noesis24BaseObservableCollectionE")
         BG3LE_ALIAS_TYPEINFO("_ZTIN6Noesis11RoutedEventE")
         BG3LE_ALIAS_TYPEINFO("_ZTIN6Noesis12TypeMetaDataE")
         BG3LE_ALIAS_TYPEINFO("_ZTIN6Noesis12TypePropertyE")
