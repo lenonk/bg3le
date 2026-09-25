@@ -4062,6 +4062,52 @@ int l_physics_query(lua_State* L) {
     return 2;
 }
 
+// Ext._Internal.AiEntitiesOnTile(client, x, y, z) -> {handle...}
+extern "C" std::size_t bg3le_ai_entities_on_tile(bool client, float const* v,
+                                                 std::uint64_t* out, std::size_t cap);
+int l_ai_entities_on_tile(lua_State* L) {
+    const float v[3] = {(float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3),
+                        (float)luaL_checknumber(L, 4)};
+    std::vector<std::uint64_t> handles(64);
+    std::size_t n = bg3le_ai_entities_on_tile(lua_toboolean(L, 1) != 0, v, handles.data(), handles.size());
+    if (n > handles.size()) {
+        handles.resize(n);
+        n = bg3le_ai_entities_on_tile(lua_toboolean(L, 1) != 0, v, handles.data(), handles.size());
+    }
+    lua_createtable(L, (int)n, 0);
+    for (std::size_t i = 0; i < n && i < handles.size(); ++i) {
+        lua_pushinteger(L, (lua_Integer)handles[i]);
+        lua_rawseti(L, -2, (int)i + 1);
+    }
+    return 1;
+}
+
+// Ext._Internal.AiTileInfo(client, x, y, z) -> address, or nothing
+extern "C" void* bg3le_ai_tile_info(bool client, float const* v);
+int l_ai_tile_info(lua_State* L) {
+    const float v[3] = {(float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3),
+                        (float)luaL_checknumber(L, 4)};
+    void* at = bg3le_ai_tile_info(lua_toboolean(L, 1) != 0, v);
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.AiHeightsAt(client, x, z) -> {height...}
+extern "C" std::size_t bg3le_ai_heights_at(bool client, float x, float z, float* out,
+                                           std::size_t cap);
+int l_ai_heights_at(lua_State* L) {
+    float heights[64];
+    const std::size_t n = bg3le_ai_heights_at(lua_toboolean(L, 1) != 0, (float)luaL_checknumber(L, 2),
+                                              (float)luaL_checknumber(L, 3), heights, 64);
+    lua_createtable(L, (int)n, 0);
+    for (std::size_t i = 0; i < n && i < 64; ++i) {
+        lua_pushnumber(L, heights[i]);
+        lua_rawseti(L, -2, (int)i + 1);
+    }
+    return 1;
+}
+
 // Ext._Internal.TemplateIds() -> every template id
 int l_template_ids(lua_State* L) {
     const std::size_t count = bg3le_templates_count();
@@ -6543,6 +6589,12 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "LevelDataManager");
     lua_pushcfunction(g_lua, l_physics_query);
     lua_setfield(g_lua, -2, "PhysicsQuery");
+    lua_pushcfunction(g_lua, l_ai_entities_on_tile);
+    lua_setfield(g_lua, -2, "AiEntitiesOnTile");
+    lua_pushcfunction(g_lua, l_ai_tile_info);
+    lua_setfield(g_lua, -2, "AiTileInfo");
+    lua_pushcfunction(g_lua, l_ai_heights_at);
+    lua_setfield(g_lua, -2, "AiHeightsAt");
     lua_pushcfunction(g_lua, l_level_add_persistent_template);
     lua_setfield(g_lua, -2, "LevelAddPersistentTemplate");
     lua_pushcfunction(g_lua, l_loca_get);
@@ -13019,8 +13071,6 @@ function Ext.Entity.GetEntitiesAroundPosition(position, radius)
   end
   return out
 end
-Ext.Entity.GetEntitiesOnTile = needs(
-  "Ext.Entity.GetEntitiesOnTile needs the level's tile grid")
 -- Upstream's Create allocates a handle through bg3se's own copy of the
 -- engine's per-thread handle generator. Tried here (Ext._Internal.EntityCreate):
 -- the entity is created and alive, but the calling thread's generator starts
@@ -13324,9 +13374,25 @@ function L.SweepBoxAll(s, d, x, t, i, e, c) return query(8, "all", s, d, x, 0, 0
 function L.TestBox(p, x, t, i, e) return query(9, "all", p, nil, x, 0, 0, t, i, e, 0) end
 function L.TestSphere(p, r, t, i, e) return query(10, "all", p, nil, nil, r, 0, t, i, e, 0) end
 
-for _, name in ipairs({"GetHeightsAt", "GetTileDebugInfo", "GetEntitiesOnTile"}) do
-  Ext.Level[name] = needs(
-    "Ext.Level." .. name .. " needs the level's AI grid layout")
+-- The AI grid's tiles, as upstream's: read in src/vendor/level.cpp.
+function Ext.Level.GetEntitiesOnTile(pos)
+  local x, y, z = query_vec(pos, "the position")
+  local out = {}
+  for i, handle in ipairs(Ext._Internal.AiEntitiesOnTile(Ext._Internal.IsClientState(), x, y, z)) do
+    out[i] = Ext._Internal.EntityValue(handle)
+  end
+  return out
+end
+
+function Ext.Level.GetTileDebugInfo(pos)
+  local x, y, z = query_vec(pos, "the position")
+  local at = Ext._Internal.AiTileInfo(Ext._Internal.IsClientState(), x, y, z)
+  if at == nil then return nil end
+  return Ext._Internal.PointedObject(at, "AiGridLuaTile")
+end
+
+function Ext.Level.GetHeightsAt(x, z)
+  return Ext._Internal.AiHeightsAt(Ext._Internal.IsClientState(), x, z)
 end
 
 for _, name in ipairs({"FindPath", "BeginPathfinding",

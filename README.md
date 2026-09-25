@@ -304,6 +304,12 @@ component's declared size with the size the engine recorded, and
   the engine reads them: upstream passes them swapped, which here hands PhysX
   a box with negative half-extents and crashes. Results are upstream's
   thread-local hit objects, reused rather than freed
+- **`Ext.Level`'s AI grid tiles**: `GetEntitiesOnTile` (and upstream's
+  `Ext.Entity` alias of it), `GetTileDebugInfo` and `GetHeightsAt`, as
+  upstream's `Ai.inl` computes them over the current level's grid, whose
+  vendored layout matches this build. Under the host they find the tile it
+  stands on (its top 0.01m from the character's feet, flagged as blocked by a
+  character) and the host as the one entity on it
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -589,15 +595,14 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **20 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **16 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 11 of the 20 are
-  `Ext.Level`'s pathfinding, tiles and surface actions, 3
-  `Ext.StaticData`'s bank writes, 2 `Ext.Stats`' functor execution, and 4
-  `Ext.Entity`'s
-  `Create`, `Destroy`, `GetEntitiesOnTile` and `SetupTracing`.
+  the source, because this one was stale at 86 for a while: 8 of the 16 are
+  `Ext.Level`'s pathfinding and surface actions, 3 `Ext.StaticData`'s bank
+  writes, 2 `Ext.Stats`' functor execution, and 3 `Ext.Entity`'s `Create`,
+  `Destroy` and `SetupTracing`.
   `reference/ext-api-surface.txt` lists them with their shapes
 - **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
