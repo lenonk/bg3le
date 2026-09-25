@@ -332,14 +332,28 @@ add_library(bg3le SHARED
     src/sdl_forward.cpp
     src/math.cpp
     src/ext_libs.cpp
+    src/builtin_lua.cpp
     # Yann Collet's LZ4, vendored rather than linked: the sniper container
     # need not have liblz4, and a missing DT_NEEDED would stop bg3le loading
     # at all. See vendor/NOTICE.md.
     external/lz4/lz4.c
 )
 set_source_files_properties(external/lz4/lz4.c PROPERTIES COMPILE_FLAGS -w)
+# bg3se's builtin Lua scripts, for builtin:// paths.
+set(BUILTIN_LUA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/vendor/bg3se/BG3Extender/LuaScripts)
+file(GLOB_RECURSE BUILTIN_LUA_FILES ${BUILTIN_LUA_ROOT}/*.lua)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_lua.inc
+    COMMAND ${CMAKE_COMMAND} -DROOT=${BUILTIN_LUA_ROOT}
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_lua.inc
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed-builtin-lua.cmake
+    DEPENDS ${BUILTIN_LUA_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed-builtin-lua.cmake)
+set_source_files_properties(src/builtin_lua.cpp PROPERTIES
+    OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_lua.inc)
+target_sources(bg3le PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_lua.inc)
 target_include_directories(bg3le PRIVATE external/lz4
-    ${EXTERNAL}/glm)
+    ${EXTERNAL}/glm ${CMAKE_CURRENT_BINARY_DIR}/generated)
 # vulkan and SDL2 resolve from the host process, which has both loaded before
 # bg3le is.
 target_link_libraries(bg3le PRIVATE dl lua_static bg3se_vendor vulkan SDL2)

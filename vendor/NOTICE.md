@@ -13,8 +13,9 @@ them, and would not be a realistic project otherwise.
 
 Copied subsystems: `CoreLib/`, `BG3Extender/GameDefinitions/`,
 `BG3Extender/Lua/`, `BG3Extender/Extender/`, `BG3Extender/GameHooks/`,
-`BG3Extender/Osiris/`, plus `stdafx.h`, `resource.h` and
-`BG3Updater/ExtenderAPI.h`.
+`BG3Extender/Osiris/`, `BG3Extender/LuaScripts/` (the builtin:// bundle,
+unmodified, embedded by `cmake/embed-builtin-lua.cmake`), plus `stdafx.h`,
+`resource.h` and `BG3Updater/ExtenderAPI.h`.
 
 `external/lua` is Norbyte's Lua fork; see
 [external/lua/README.bg3le](../external/lua/README.bg3le) for why that one is

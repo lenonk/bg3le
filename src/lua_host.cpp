@@ -4679,6 +4679,24 @@ int l_stats_int64_intern(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.BuiltinFile(path) -> the builtin script's text, or nil
+extern "C" char const* bg3le_builtin_lua(char const* path, std::size_t* size);
+int l_builtin_file(lua_State* L) {
+    std::size_t size = 0;
+    char const* text = bg3le_builtin_lua(luaL_checkstring(L, 1), &size);
+    if (text == nullptr) return 0;
+    lua_pushlstring(L, text, size);
+    return 1;
+}
+
+// Ext._Internal.SettingsFlag(key, default) -> ScriptExtenderSettings.json's
+extern "C" bool bg3le_settings_flag(char const* key, bool fallback);
+int l_settings_flag(lua_State* L) {
+    lua_pushboolean(L, bg3le_settings_flag(luaL_checkstring(L, 1),
+                                           lua_toboolean(L, 2) != 0));
+    return 1;
+}
+
 // Ext._Internal.StatSync(name) -> true, or nil and why
 extern "C" char const* bg3le_stats_sync(char const* name);
 int l_stat_sync(lua_State* L) {
@@ -6330,6 +6348,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsFind");
     lua_pushcfunction(g_lua, l_stat_sync);
     lua_setfield(g_lua, -2, "StatSync");
+    lua_pushcfunction(g_lua, l_builtin_file);
+    lua_setfield(g_lua, -2, "BuiltinFile");
+    lua_pushcfunction(g_lua, l_settings_flag);
+    lua_setfield(g_lua, -2, "SettingsFlag");
     lua_pushcfunction(g_lua, l_stats_type);
     lua_setfield(g_lua, -2, "StatsType");
     lua_pushcfunction(g_lua, l_stats_using);
@@ -6918,12 +6940,14 @@ end
 
 -- ---- Ext.Debug ----
 --
--- bg3le is always in developer mode -- it exists to be developed against --
--- and has no crash reporter to exercise, so Crash refuses rather than
--- taking the game down.
+-- Crash has no crash reporter to exercise, so it refuses rather than taking
+-- the game down.
 Ext.Debug = {}
 
-function Ext.Debug.IsDeveloperMode() return true end
+-- "DeveloperMode" in ScriptExtenderSettings.json, off by default, as
+-- upstream's release builds read it.
+local developer_mode = Ext._Internal.SettingsFlag("DeveloperMode", false)
+function Ext.Debug.IsDeveloperMode() return developer_mode end
 
 function Ext.Debug.DebugBreak()
   local server = Ext._Internal.DebugBreak
@@ -8874,12 +8898,79 @@ function Ext.Utils.LoadString(text, globals)
   return chunk()
 end
 
+-- Upstream's Include: a mod's script (by its UUID or name), a builtin://
+-- script from bg3se's bundle, or a game file. Failures are logged and
+-- return nothing, as upstream's are. Upstream swaps the registry's globals
+-- while it runs, so a nested Include without its own globals sees the
+-- outer one's; include_globals is that.
+local include_globals = nil
+
 function Ext.Utils.Include(modGuid, fileName, globals)
-  local contents = Ext.IO.LoadFile(fileName, "data")
-  if contents == nil then
-    error("Ext.Utils.Include: cannot read " .. tostring(fileName), 2)
+  if globals ~= nil and type(globals) ~= "table" then
+    error("bad argument #3 to 'Include' (table expected, got "
+          .. type(globals) .. ")", 2)
   end
-  return Ext.Utils.LoadString(contents, globals)
+  fileName = tostring(fileName)
+  local text, name
+  if modGuid ~= nil then
+    local reader = Ext._Internal.ModReader(modGuid)
+    if reader == nil then
+      Ext.Log.PrintError("Mod does not exist or is not loaded: " .. tostring(modGuid))
+      return
+    end
+    text, name = reader.Read("Lua/" .. fileName), reader.Name .. "/" .. fileName
+    if text == nil then
+      Ext.Log.PrintError("Script file could not be opened: Mods/" .. reader.Name
+                         .. "/ScriptExtender/Lua/" .. fileName)
+      return
+    end
+  elseif fileName:sub(1, 10) == "builtin://" then
+    text, name = Ext._Internal.BuiltinFile(fileName:sub(11)), fileName
+    if text == nil then
+      Ext.Log.PrintError("Builtin Lua script file could not be opened: " .. fileName:sub(11))
+      return
+    end
+  else
+    text, name = Ext._Internal.LoadFile(fileName, "data"), fileName
+    if text == nil then
+      Ext.Log.PrintError("Script file could not be opened: " .. fileName)
+      return
+    end
+  end
+
+  local env = globals or include_globals
+  local chunk, err
+  if env ~= nil then
+    chunk, err = load(text, name, "t", env)
+  else
+    chunk, err = load(text, name, "t")
+  end
+  if chunk == nil then
+    Ext.Log.PrintError("Failed to parse script: " .. tostring(err))
+    return
+  end
+  local outer = include_globals
+  include_globals = env
+  local results = table.pack(xpcall(chunk, debug.traceback))
+  include_globals = outer
+  if not results[1] then
+    Ext.Log.PrintError("Failed to execute script: " .. tostring(results[2]))
+    return
+  end
+  return table.unpack(results, 2, results.n)
+end
+
+-- Upstream's BuiltinLibrary.lua, verbatim in effect.
+function Ext.Utils.LoadTestLibrary()
+  local env = {}
+  env._G = env
+  setmetatable(env, {__index = _G})
+  Ext.Test = env
+  if Ext.IsServer() then
+    Ext.Utils.Include(nil, "builtin://Tests/ServerTestRunner.lua", env)
+  else
+    Ext.Utils.Include(nil, "builtin://Tests/ClientTestRunner.lua", env)
+  end
 end
 
 -- Profiling is Optick upstream, which is not built here. The calls keep
@@ -9143,10 +9234,6 @@ function Ext.Utils.GetDialogManager()
         .. "manager, which is not located yet", 2)
 end
 
-function Ext.Utils.LoadTestLibrary()
-  error("bg3le: Ext.Utils.LoadTestLibrary needs the bundled test library, "
-        .. "which bg3le does not ship", 2)
-end
 
 -- One prelude builds both states, so these answer for the state they are
 -- asked in rather than being written down.
@@ -11643,6 +11730,15 @@ end
 local mod_readers = {}
 local loading_mod = nil
 
+-- A loaded mod's reader, by its UUID or directory name, as upstream's
+-- FindModByNameGuid takes either.
+function Ext._Internal.ModReader(nameOrGuid)
+  for _, reader in ipairs(mod_readers) do
+    if reader.Uuid == nameOrGuid or reader.Name == nameOrGuid then return reader end
+  end
+  return nil
+end
+
 local function mod_searcher(name)
   local path = string.gsub(name, "%.", "/") .. ".lua"
 
@@ -11823,13 +11919,22 @@ local function load_mod_from(name, uuid, read, report)
   local required = {}
   local function mod_require(path, second)
     if second ~= nil then
-      -- Ext.Require(mod, path): another mod's file. bg3le reaches only
-      -- the mod being loaded, so say so rather than load the wrong one.
+      -- Ext.Require(mod, path): a file of that mod, as upstream's
+      -- FileLoader includes it.
       if path ~= uuid then
-        error("bg3le: Ext.Require(mod, path) can only load files of the "
-              .. "calling mod", 2)
+        local key = tostring(path) .. "/" .. tostring(second)
+        if required[key] == nil then
+          required[key] = table.pack(Ext.Utils.Include(path, second, env))
+        end
+        return table.unpack(required[key], 1, required[key].n)
       end
       path = second
+    end
+    if path:sub(1, 10) == "builtin://" then
+      if required[path] == nil then
+        required[path] = table.pack(Ext.Utils.Include(nil, path, env))
+      end
+      return table.unpack(required[path], 1, required[path].n)
     end
     if required[path] ~= nil then return table.unpack(required[path]) end
     local text = read("Lua/" .. path)
@@ -11875,7 +11980,7 @@ local function load_mod_from(name, uuid, read, report)
   -- Also for the case where the table already existed.
   env.ModuleUUID = uuid
 
-  local reader = { Name = name, Read = read, Env = env }
+  local reader = { Name = name, Uuid = uuid, Read = read, Env = env }
   table.insert(mod_readers, reader)
   local outer = loading_mod
   loading_mod = reader
@@ -12978,6 +13083,13 @@ Ext.Entity.GetEntitiesOnTile = Ext.Level.GetEntitiesOnTile
 for _, entry in ipairs(CONTEXT_MODULES) do
   local name, from, omit = entry[1], entry[2], entry[3]
   if Ext[from] ~= nil then Ext[name] = context_view(Ext[from], omit) end
+end
+
+-- Upstream's BuiltinLibraryServer/Client.lua: in developer mode the test
+-- library and the development helpers load with the state.
+if Ext.Debug.IsDeveloperMode() then
+  Ext.Utils.LoadTestLibrary()
+  Ext.Utils.Include(nil, "builtin://Libs/DevelopmentHelpers.lua")
 end
 
 

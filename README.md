@@ -73,7 +73,15 @@ component's declared size with the size the engine recorded, and
   and runs each file once — Mod Configuration Menu watches that assignment,
   so filling it in afterwards makes every mod look anonymous. Loose
   directories still work, via `BG3LE_MOD_PATH`. Of one 57-mod set, all five
-  script mods load and run, MCM included (v1.40.1, "SE version 32")
+  script mods load and run, MCM included (v1.40.1, "SE version 32").
+  `Ext.Utils.Include` is upstream's: a mod's script by its UUID or name, a
+  game file, or a `builtin://` script from bg3se's own bundle, which is
+  embedded at build time from `vendor/bg3se/BG3Extender/LuaScripts`;
+  `Ext.Require(mod, path)` loads another mod's file through it.
+  `Ext.Utils.LoadTestLibrary` loads upstream's test runner from that bundle,
+  and `"DeveloperMode": true` in `ScriptExtenderSettings.json` (off by
+  default, as upstream's release builds are) loads it with each state along
+  with upstream's development helpers
 - **Achievements with mods active**, the way bg3se's `EnableAchievements`
   does on Windows. bg3se patches `ls::ModuleSettings::IsModded`; nothing here
   exports that name, so bg3le byte-patches the engine's per-module "is this
@@ -518,11 +526,11 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **48 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **47 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 48 are
+  the source, because this one was stale at 86 for a while: 24 of the 47 are
   `Ext.Level`'s physics and pathfinding, 3 `Ext.StaticData`'s bank writes,
   6 `Ext.Stats`' creation and functor execution, 6
   `Ext.Template`'s local and cache managers, and the rest are singles —

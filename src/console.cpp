@@ -167,6 +167,18 @@ bool settings_flag(const std::string& exe_dir, const char* key, bool fallback) {
     return fallback;
 }
 
+// A flag from ScriptExtenderSettings.json next to the game binary.
+extern "C" bool bg3le_settings_flag(char const* key, bool fallback) {
+    char exe[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (n <= 0) return fallback;
+    exe[n] = '\0';
+    std::string dir(exe);
+    const std::size_t slash = dir.rfind('/');
+    if (slash != std::string::npos) dir.erase(slash);
+    return settings_flag(dir, key, fallback);
+}
+
 void maybe_open_console() {
     bool expected = false;
     if (!g_opened.compare_exchange_strong(expected, true)) return;

@@ -49,6 +49,8 @@
 #include "../hook.h"
 #include "../log.h"
 
+extern "C" bool bg3le_settings_flag(char const* key, bool fallback);
+
 namespace bg3le {
 
 namespace {
@@ -122,6 +124,9 @@ void extender_globals_init() {
     // -- bg3le's contexts are its own -- so the flush is skipped, which is
     // the right answer until bg3le delivers those callbacks itself.
     bg3se::gExtender->GetClient().ResetExtensionState();
+    // Upstream reads it from ScriptExtenderSettings.json; off by default.
+    bg3se::gExtender->GetConfig().DeveloperMode =
+        bg3le_settings_flag("DeveloperMode", false);
 
     logf("extender: globals stood up (config, static symbols and the client "
          "extension state; global switches are bg3le's default until the "
