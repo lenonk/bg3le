@@ -161,7 +161,13 @@ component's declared size with the size the engine recorded, and
   for each of the 1,302 engine functions. The database names far more than the
   bound list does — a procedure and a user query have no dispatch handle and
   are exactly what a mod author wants annotations for — so it is generated
-  from the database and the bound list together
+  from the database and the bound list together. `Ext.Types.GenerateIdeHelpers`
+  is upstream's own `IdeHelpersGenerator.lua`, loaded with the state as
+  `ServerStartup.lua` loads it, over the type registry below: 3,129 classes
+  and every module in 1.17 MB, in 13 seconds. The C++ documentation it merges
+  in, `IdeHelpersNativeData.lua`, upstream builds outside its repository;
+  `tools/gen-ide-native-data.py` builds it from the same doc comments in the
+  vendored sources, at build time
 - **A client Lua context as well as the server's.** The game is two contexts
   in one process and upstream runs a Lua state for each, so bg3le does too:
   each has its own `Ext`, its own `Mods` table, and runs the bootstrap that
@@ -628,10 +634,20 @@ component's declared size with the size the engine recorded, and
   it — the stats array, the modifier lists, the value lists, the string,
   int64, guid and float pools, and `Object`'s own field offsets — is located
   by content and validated before use
-- `Ext.Types` over the same metadata. `GetAllTypes` lists all 3,071 reflected
-  classes, and a component or resource view reports its own type, so
-  `GetObjectType`, `TypeOf` and `IsA` answer for `entity.Health` and for a
-  nested struct rather than only for a stat. `AddCustomFunction` and
+- `Ext.Types` over upstream's own `TypeInformationRepository`, built the way
+  `ScriptExtender::PostStartup` builds it (enumerations, property maps,
+  registry, modules) on first use, in about 120 ms (`src/vendor/type_info.cpp`).
+  `GetTypeInfo` returns upstream's `TypeInformation` for all 4,358 types --
+  primitives, enumerations and bitfields, arrays, maps, sets, objects with
+  their members, parents and method signatures, and the `Module_*` types --
+  and `GetAllTypes` lists them. MSVC's `__int64` is `long long` here, a type of
+  its own, so it is pointed at `int64`; without that, 86 members had no type.
+  A component or resource view reports its own type, so `GetObjectType`,
+  `TypeOf` and `IsA` (through `ParentType`, and an error for an unknown type,
+  as upstream's) answer for `entity.Health` and for a nested struct.
+  `Ext.Stats.GetStatsManager` is the `RPGStats` object, as upstream's, with
+  `ExtraData` a live map found by its contents (the vendored layout drifts
+  before it); writes land in the engine. `AddCustomFunction` and
   `AddCustomProperty` work: upstream grafts them onto the type's property map,
   and bg3le keeps them keyed by type name, which every view of that type
   consults where the property map would have answered

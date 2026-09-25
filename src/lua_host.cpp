@@ -5083,6 +5083,163 @@ int l_string_key_set(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.TypeInfoAt(name) -> the registry's TypeInformation address, or nil
+extern "C" void const* bg3le_type_info(char const* name);
+int l_type_info_at(lua_State* L) {
+    void const* at = bg3le_type_info(luaL_checkstring(L, 1));
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.TypeInfoRef(address) -> a TypeInformationRef's target, or nil
+extern "C" void const* bg3le_type_info_ref(void const* ref);
+int l_type_info_ref(lua_State* L) {
+    void const* at = bg3le_type_info_ref((void const*)(std::uintptr_t)luaL_checkinteger(L, 1));
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+struct Bg3leTypeInfo {
+    char const* TypeName;
+    char const* NativeName;
+    char const* Kind;
+    void const* KeyType;
+    void const* ElementType;
+    void const* ParentType;
+    char const* ModuleRole;
+    char const* ComponentName;
+    char const* SystemName;
+    bool HasWildcardProperties;
+    bool VarargParams;
+    bool VarargsReturn;
+    bool IsBitfield;
+    bool IsBuiltin;
+};
+extern "C" bool bg3le_type_info_fields(void const* at, Bg3leTypeInfo* out);
+extern "C" void bg3le_type_info_each(void const* at, int which,
+                                     void (*each)(void*, char const*, void const*, unsigned long long),
+                                     void* user);
+extern "C" void bg3le_type_info_names(void (*each)(void*, char const*), void* user);
+
+// Ext._Internal.TypeInfoFields(address) -> the scalars, refs as addresses
+int l_type_info_fields(lua_State* L) {
+    Bg3leTypeInfo f{};
+    if (!bg3le_type_info_fields((void const*)(std::uintptr_t)luaL_checkinteger(L, 1), &f)) return 0;
+    lua_newtable(L);
+    // An empty FixedString is "" upstream, not nil.
+    auto text = [L](char const* key, char const* value) {
+        lua_pushstring(L, value != nullptr ? value : "");
+        lua_setfield(L, -2, key);
+    };
+    auto ref = [L](char const* key, void const* value) {
+        if (value == nullptr) return;
+        lua_pushinteger(L, (lua_Integer)(std::uintptr_t)value);
+        lua_setfield(L, -2, key);
+    };
+    auto flag = [L](char const* key, bool value) {
+        lua_pushboolean(L, value);
+        lua_setfield(L, -2, key);
+    };
+    text("TypeName", f.TypeName);
+    text("NativeName", f.NativeName);
+    text("Kind", f.Kind);
+    ref("KeyType", f.KeyType);
+    ref("ElementType", f.ElementType);
+    ref("ParentType", f.ParentType);
+    text("ModuleRole", f.ModuleRole);
+    text("ComponentName", f.ComponentName);
+    text("SystemName", f.SystemName);
+    flag("HasWildcardProperties", f.HasWildcardProperties);
+    flag("VarargParams", f.VarargParams);
+    flag("VarargsReturn", f.VarargsReturn);
+    flag("IsBitfield", f.IsBitfield);
+    flag("IsBuiltin", f.IsBuiltin);
+    return 1;
+}
+
+// Ext._Internal.TypeInfoEach(address, which) -> {key = address} for Members
+// (0) and Methods (1), {label = value} for EnumValues (2), {address, ...}
+// for Params (3) and ReturnValues (4)
+int l_type_info_each(lua_State* L) {
+    auto const* at = (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    const int which = (int)luaL_checkinteger(L, 2);
+    lua_newtable(L);
+    bg3le_type_info_each(
+        at, which,
+        [](void* user, char const* key, void const* type, unsigned long long value) {
+            auto* S = static_cast<lua_State*>(user);
+            if (key == nullptr) {
+                lua_pushinteger(S, (lua_Integer)(std::uintptr_t)type);
+                lua_rawseti(S, -2, luaL_len(S, -2) + 1);
+                return;
+            }
+            if (type != nullptr) {
+                lua_pushinteger(S, (lua_Integer)(std::uintptr_t)type);
+            } else {
+                lua_pushinteger(S, (lua_Integer)value);
+            }
+            lua_setfield(S, -2, key);
+        },
+        L);
+    return 1;
+}
+
+// Ext._Internal.TypeInfoNames() -> every registered type name
+int l_type_info_names(lua_State* L) {
+    lua_newtable(L);
+    bg3le_type_info_names(
+        [](void* user, char const* name) {
+            auto* S = static_cast<lua_State*>(user);
+            if (name == nullptr) return;
+            lua_pushstring(S, name);
+            lua_rawseti(S, -2, luaL_len(S, -2) + 1);
+        },
+        L);
+    return 1;
+}
+
+// Ext._Internal.StatsManagerAddress() -> RPGStats, or nil
+extern "C" void* bg3le_rpgstats();
+int l_stats_manager_address(lua_State* L) {
+    void* at = bg3le_rpgstats();
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.StatsExtraGet(name) -> RPGStats::ExtraData's value, or nil
+extern "C" bool bg3le_stats_extra_get(char const* name, float* out);
+int l_stats_extra_get(lua_State* L) {
+    float value = 0;
+    if (!lua_isstring(L, 1) || !bg3le_stats_extra_get(lua_tostring(L, 1), &value)) return 0;
+    lua_pushnumber(L, value);
+    return 1;
+}
+
+// Ext._Internal.StatsExtraSet(name, value) -> bool
+extern "C" bool bg3le_stats_extra_set(char const* name, float value);
+int l_stats_extra_set(lua_State* L) {
+    lua_pushboolean(L, bg3le_stats_extra_set(luaL_checkstring(L, 1), (float)luaL_checknumber(L, 2)));
+    return 1;
+}
+
+// Ext._Internal.StatsExtraAll() -> {name = value}
+extern "C" void bg3le_stats_extra_each(void (*each)(void*, char const*, float), void* user);
+int l_stats_extra_all(lua_State* L) {
+    lua_newtable(L);
+    bg3le_stats_extra_each(
+        [](void* user, char const* name, float value) {
+            auto* S = static_cast<lua_State*>(user);
+            if (name == nullptr) return;
+            lua_pushnumber(S, value);
+            lua_setfield(S, -2, name);
+        },
+        L);
+    return 1;
+}
+
 // Ext._Internal.BuiltinFile(path) -> the builtin script's text, or nil
 extern "C" char const* bg3le_builtin_lua(char const* path, std::size_t* size);
 int l_builtin_file(lua_State* L) {
@@ -7111,6 +7268,24 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsEnumAdd");
     lua_pushcfunction(g_lua, l_stats_attr_add);
     lua_setfield(g_lua, -2, "StatsAttrAdd");
+    lua_pushcfunction(g_lua, l_type_info_fields);
+    lua_setfield(g_lua, -2, "TypeInfoFields");
+    lua_pushcfunction(g_lua, l_type_info_each);
+    lua_setfield(g_lua, -2, "TypeInfoEach");
+    lua_pushcfunction(g_lua, l_type_info_names);
+    lua_setfield(g_lua, -2, "TypeInfoNames");
+    lua_pushcfunction(g_lua, l_stats_extra_get);
+    lua_setfield(g_lua, -2, "StatsExtraGet");
+    lua_pushcfunction(g_lua, l_stats_extra_set);
+    lua_setfield(g_lua, -2, "StatsExtraSet");
+    lua_pushcfunction(g_lua, l_stats_extra_all);
+    lua_setfield(g_lua, -2, "StatsExtraAll");
+    lua_pushcfunction(g_lua, l_stats_manager_address);
+    lua_setfield(g_lua, -2, "StatsManagerAddress");
+    lua_pushcfunction(g_lua, l_type_info_at);
+    lua_setfield(g_lua, -2, "TypeInfoAt");
+    lua_pushcfunction(g_lua, l_type_info_ref);
+    lua_setfield(g_lua, -2, "TypeInfoRef");
     lua_pushcfunction(g_lua, l_builtin_file);
     lua_setfield(g_lua, -2, "BuiltinFile");
     lua_pushcfunction(g_lua, l_string_key_find);
@@ -8347,7 +8522,8 @@ Ext.Enums = setmetatable({}, {
 
 function Ext.Types.GetAllTypes()
   if type_names_cache == nil then
-    type_names_cache = Ext._Internal.TypeNames()
+    type_names_cache = Ext._Internal.TypeInfoNames()
+    if #type_names_cache == 0 then type_names_cache = Ext._Internal.TypeNames() end
     table.sort(type_names_cache)
   end
   -- A copy: upstream returns a fresh array, and a caller sorting or
@@ -8357,36 +8533,82 @@ function Ext.Types.GetAllTypes()
   return out
 end
 
+-- Upstream's TypeInformation, from its own registry (src/vendor/type_info.cpp),
+-- as a read-only view whose refs are views in turn.
+do
+local TYPE_INFO_KEYS = {
+  "TypeName", "Kind", "NativeName", "KeyType", "ElementType", "ParentType",
+  "Members", "Methods", "HasWildcardProperties", "EnumValues",
+  "ReturnValues", "Params", "VarargParams", "VarargsReturn", "IsBitfield",
+  "IsBuiltin", "ModuleRole", "ComponentName", "SystemName",
+}
+local TYPE_INFO_KEYSET = {}
+for _, k in ipairs(TYPE_INFO_KEYS) do TYPE_INFO_KEYSET[k] = true end
+local type_info_views = {}
+
+local function type_info_view(at)
+  if at == nil then return nil end
+  local view = type_info_views[at]
+  if view ~= nil then return view end
+  local loaded = {}
+  local function get(k)
+    if loaded[k] ~= nil then return loaded[k] end
+    local value
+    if k == "Members" or k == "Methods" then
+      value = {}
+      for name, a in pairs(Ext._Internal.TypeInfoEach(at, k == "Members" and 0 or 1)) do
+        if a ~= 0 then value[name] = type_info_view(a) end
+      end
+    elseif k == "EnumValues" then
+      value = Ext._Internal.TypeInfoEach(at, 2)
+    elseif k == "Params" or k == "ReturnValues" then
+      value = {}
+      -- An unbound ref is nil, as upstream pushes it.
+      for i, a in ipairs(Ext._Internal.TypeInfoEach(at, k == "Params" and 3 or 4)) do
+        if a ~= 0 then value[i] = type_info_view(a) end
+      end
+    else
+      value = (Ext._Internal.TypeInfoFields(at) or {})[k]
+      if k == "KeyType" or k == "ElementType" or k == "ParentType" then
+        value = type_info_view(value)
+      end
+    end
+    loaded[k] = value
+    return value
+  end
+  view = Ext._Internal.NewObjectProxy({
+    __index = function(_, k)
+      if TYPE_INFO_KEYSET[k] then return get(k) end
+      return nil
+    end,
+    __newindex = function(_, k)
+      error("Cannot set property " .. tostring(k) .. " of TypeInformation", 2)
+    end,
+    __pairs = function()
+      local i = 0
+      return function()
+        while true do
+          i = i + 1
+          local k = TYPE_INFO_KEYS[i]
+          if k == nil then return nil end
+          local v = get(k)
+          if v ~= nil then return k, v end
+        end
+      end
+    end,
+    __name = "TypeInformation",
+    __bg3leIdentity = string.format("p:%x", at),
+  })
+  type_info_views[at] = view
+  return view
+end
+
 function Ext.Types.GetTypeInfo(typeName)
   if type(typeName) ~= "string" then return nil end
-
-  local fields = Ext._Internal.ObjectFields(typeName, "")
-  if fields == nil then return nil end
-
-  local members = {}
-  for name, kind in pairs(fields) do
-    members[name] = kind
-  end
-
-  return {
-    TypeName = typeName,
-    NativeName = typeName,
-    Kind = "Object",
-    Members = members,
-    Methods = {},
-    EnumValues = {},
-    ReturnValues = {},
-    Params = {},
-    IsBitfield = false,
-    IsBuiltin = false,
-    HasWildcardProperties = false,
-    ComponentName = Ext._Internal.TypeIsComponent(typeName),
-    -- Filled where bg3le knows them; the rest are absent rather than
-    -- guessed, and a nil here reads the same as upstream's empty ref.
-    ParentType = nil,
-    ElementType = nil,
-    KeyType = nil,
-  }
+  local view = type_info_view(Ext._Internal.TypeInfoAt(typeName))
+  if view == nil or view.Kind == "Unknown" then return nil end
+  return view
+end
 end
 
 function Ext.Types.GetObjectType(object)
@@ -8404,8 +8626,17 @@ function Ext.Types.TypeOf(object)
   return Ext.Types.GetTypeInfo(name)
 end
 
+-- Upstream's: an unknown type name is an error; a type is also each of its
+-- ancestors.
 function Ext.Types.IsA(object, typeName)
-  return Ext.Types.GetObjectType(object) == typeName
+  local expected = Ext.Types.GetTypeInfo(typeName)
+  if expected == nil then error("No such type: " .. tostring(typeName), 2) end
+  local ty = Ext.Types.TypeOf(object)
+  while ty ~= nil do
+    if ty == expected then return true end
+    ty = ty.ParentType
+  end
+  return false
 end
 
 -- Upstream's GetDebugName: an entity is "Entity", an object its struct's
@@ -8603,7 +8834,7 @@ function Ext._Internal.ViewTypeName(class, prefix)
   if prefix == "" then return Ext._Internal.ClassName(class) end
   local raw = Ext._Internal.TypeNameAt(class, prefix)
   if raw == nil then return nil end
-  local plain = raw:gsub("^bg3se::", "")
+  local plain = raw:gsub("bg3se::", "")
   return Ext._Internal.ClassName(plain) or plain
 end
 
@@ -8650,10 +8881,6 @@ function Ext.Types.AddCustomProperty(typeName, property, getter, setter)
                          {Get = getter, Set = setter})
 end
 
--- Listed under both modules upstream, and the same generator behind each.
-function Ext.Types.GenerateIdeHelpers(builtinOnly)
-  return Ext.Debug.GenerateIdeHelpers(builtinOnly)
-end
 
 -- ---- Ext.Vars ----
 --
@@ -9409,6 +9636,8 @@ local kClientEvents = {
   "KeyInput", "MouseButtonInput", "MouseWheelInput", "ControllerAxisInput",
   "ControllerButtonInput", "ViewportResized",
 }
+Ext._Internal._PublishedSharedEvents = kSharedEvents
+Ext._Internal._PublishedEvents = kServerEvents
 
 local engine_events = {}
 
@@ -13180,17 +13409,47 @@ function Ext.Stats.GetModifierAttributes(modifierList)
   return out
 end
 
-function Ext.Stats.GetStatsManager()
-  local addr = Ext._Internal.StatsManagerAddress
-        and Ext._Internal.StatsManagerAddress() or nil
-  return {
-    Address = addr,
-    -- Upstream hands back the RPGStats object itself. bg3le reads that
-    -- object through located offsets rather than a mapped struct, so what
-    -- it can offer is the counts and the entry points that read it.
-    StatsCount = Ext._Internal.StatsCount(),
-    ExtraData = {},
-  }
+-- Upstream's: the RPGStats object itself, with ExtraData as a live map.
+do
+  local extra
+  local function extra_data()
+    extra = extra or Ext._Internal.NewObjectProxy({
+      __index = function(_, k) return Ext._Internal.StatsExtraGet(k) end,
+      __newindex = function(_, k, v)
+        if type(v) ~= "number" or not Ext._Internal.StatsExtraSet(tostring(k), v) then
+          error("Cannot set ExtraData." .. tostring(k) .. " to " .. tostring(v), 2)
+        end
+      end,
+      __pairs = function()
+        return next, Ext._Internal.StatsExtraAll(), nil
+      end,
+      __name = "HashMap<FixedString, float>",
+    })
+    return extra
+  end
+
+  function Ext.Stats.GetStatsManager()
+    local addr = Ext._Internal.StatsManagerAddress()
+    if addr == nil then return nil end
+    local view = Ext._Internal.PointedObject(addr, "stats::RPGStats")
+    return Ext._Internal.NewObjectProxy({
+      __index = function(_, k)
+        if k == "ExtraData" then return extra_data() end
+        return view[k]
+      end,
+      __newindex = function(_, k, v) view[k] = v end,
+      __pairs = function()
+        local f, st, c = pairs(view)
+        return function(_, key)
+          local k, v = f(st, key)
+          if k == "ExtraData" then v = extra_data() end
+          return k, v
+        end, st, c
+      end,
+      __name = "stats::RPGStats",
+      __bg3leIdentity = string.format("p:%x", addr),
+    })
+  end
 end
 
 -- Every stat that a mod loading before the named one could have seen.
@@ -14411,6 +14670,8 @@ end
 -- Upstream's own Lua for these, from the builtin bundle: LoadStatsFile reads
 -- a stats .txt through Create, SetRawAttribute, CopyFrom and Sync.
 Ext.Utils.Include(nil, "builtin://Libs/Stats.lua")
+-- ServerStartup.lua's: Ext.Types.GenerateIdeHelpers over the type registry.
+Ext.Utils.Include(nil, "builtin://Libs/IdeHelpersGenerator.lua")
 
 -- Upstream's BuiltinLibraryServer/Client.lua: in developer mode the test
 -- library and the development helpers load with the state.

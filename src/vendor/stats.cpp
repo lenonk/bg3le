@@ -80,6 +80,7 @@ namespace {
 
 using bg3se::stats::Modifier;
 using bg3se::stats::ModifierList;
+static_assert(offsetof(ModifierList, Name) == 92);
 using bg3se::stats::Object;
 using bg3se::stats::RPGEnumeration;
 using bg3se::stats::RPGStats;

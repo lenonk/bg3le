@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 #include <new>
 #include <string>
 #include <string_view>
@@ -282,4 +283,76 @@ extern "C" bool bg3le_stats_combo_set(void* object, int which, char const* const
     for (int i = 0; i < count; ++i) fresh->push_back(FixedString(names[i]));
     std::memcpy((void*)set, raw, sizeof(raw));
     return true;
+}
+
+// RPGStats::ExtraData, which upstream exposes as a live map.
+namespace {
+// Whether a map's keys hold both wanted strings.
+bool map_has_keys(void const* at, std::uint32_t a, std::uint32_t b) {
+    bg3le::RawMap m{};
+    if (!bg3le::safe_read(at, &m, sizeof(m)) || m.Keys == nullptr
+        || m.KeysSize < 32 || m.KeysSize > 8192 || m.KeysSize > m.KeysCapacity) {
+        return false;
+    }
+    std::vector<std::uint32_t> keys(m.KeysSize);
+    if (!bg3le::safe_read(m.Keys, keys.data(), keys.size() * sizeof(std::uint32_t))) return false;
+    bool hasA = false, hasB = false;
+    for (auto k : keys) {
+        hasA = hasA || k == a;
+        hasB = hasB || k == b;
+    }
+    return hasA && hasB;
+}
+
+// The vendored RPGStats drifts from the engine's before ExtraData, so the
+// pointer is found by what its map holds.
+HashMap<FixedString, float>* extra_data() {
+    static std::ptrdiff_t offset = -1;
+    auto* rpg = static_cast<char*>(bg3le_rpgstats());
+    if (rpg == nullptr) return nullptr;
+    if (offset < 0) {
+        const FixedString a("DefaultDC"), b("LethalHP");
+        for (std::ptrdiff_t off = offsetof(RPGStats, StatsFunctors); off < 0x2000 && offset < 0; off += 8) {
+            void* candidate = nullptr;
+            if (bg3le::safe_read(rpg + off, &candidate, sizeof(candidate)) && candidate != nullptr
+                && map_has_keys(candidate, a.Index, b.Index)) {
+                offset = off;
+                bg3le::logf("stats: RPGStats::ExtraData at +%#tx", off);
+            }
+        }
+        if (offset < 0) return nullptr;
+    }
+    void* map = nullptr;
+    if (!bg3le::safe_read(rpg + offset, &map, sizeof(map))) return nullptr;
+    return static_cast<HashMap<FixedString, float>*>(map);
+}
+}  // namespace
+
+extern "C" bool bg3le_stats_extra_get(char const* name, float* out) {
+    auto* map = extra_data();
+    if (map == nullptr || name == nullptr) return false;
+    auto* value = map->try_get(FixedString(name));
+    if (value == nullptr) return false;
+    *out = *value;
+    return true;
+}
+
+// An existing key is written in place; a new one goes in through fresh buffers.
+extern "C" bool bg3le_stats_extra_set(char const* name, float value) {
+    auto* map = extra_data();
+    if (map == nullptr || name == nullptr) return false;
+    const FixedString key(name);
+    if (auto* slot = map->try_get(key)) {
+        *slot = value;
+        return true;
+    }
+    return bg3le::fs_map_insert<float>(map, key.Index, value);
+}
+
+extern "C" void bg3le_stats_extra_each(void (*each)(void* user, char const* name, float value), void* user) {
+    auto* map = extra_data();
+    if (map == nullptr) return;
+    for (auto it = map->begin(); it != map->end(); ++it) {
+        each(user, it.Key().GetString(), it.Value());
+    }
 }

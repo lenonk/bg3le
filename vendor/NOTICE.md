@@ -315,6 +315,16 @@ every new entry into the free list, which is the state the engine's own
 threads show: one 32,768-entry page, `{Index = i + 1, Salt = 1}`. Checked by
 `tools/check-vendor-patches.py`.
 
+### ModifierList::Name sits in the attribute manager's tail padding
+
+`GameDefinitions/Stats/Stats.h`: `CNamedElementManager<Modifier>` holds 92
+bytes of data in a 96-byte object, and the engine puts `ModifierList::Name` at
++92, where Itanium places a field after a potentially-overlapping subobject.
+As a plain member it landed at +96 and read half a pointer. `Attributes` is
+marked `[[no_unique_address]]`, which lays it out that way.
+`src/vendor/stats.cpp` asserts the offset; checked by
+`tools/check-vendor-patches.py`.
+
 ### Generated files
 
 Upstream gitignores these; they are committed here so the tree builds without

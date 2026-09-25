@@ -187,6 +187,7 @@ list(APPEND VENDOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/static_data_write.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/entity_trace.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_functor_set.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/type_info.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/prototypes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_sync.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_create.cpp
@@ -344,12 +345,21 @@ set_source_files_properties(external/lz4/lz4.c PROPERTIES COMPILE_FLAGS -w)
 set(BUILTIN_LUA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/vendor/bg3se/BG3Extender/LuaScripts)
 file(GLOB_RECURSE BUILTIN_LUA_FILES ${BUILTIN_LUA_ROOT}/*.lua)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated)
+# Upstream's IdeHelpersNativeData.lua, which it builds outside its repository.
+set(BUILTIN_EXTRA_ROOT ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_extra)
+file(GLOB BG3SE_LUA_LIBS ${VENDOR_ROOT}/BG3Extender/Lua/Libs/*.inl)
+add_custom_command(
+    OUTPUT ${BUILTIN_EXTRA_ROOT}/Libs/IdeHelpersNativeData.lua
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen-ide-native-data.py
+            ${VENDOR_ROOT}/BG3Extender ${BUILTIN_EXTRA_ROOT}/Libs/IdeHelpersNativeData.lua
+    DEPENDS ${BG3SE_LUA_LIBS} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen-ide-native-data.py)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_lua.inc
-    COMMAND ${CMAKE_COMMAND} -DROOT=${BUILTIN_LUA_ROOT}
+    COMMAND ${CMAKE_COMMAND} -DROOT=${BUILTIN_LUA_ROOT} -DEXTRA=${BUILTIN_EXTRA_ROOT}
             -DOUT=${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_lua.inc
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed-builtin-lua.cmake
-    DEPENDS ${BUILTIN_LUA_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed-builtin-lua.cmake)
+    DEPENDS ${BUILTIN_LUA_FILES} ${BUILTIN_EXTRA_ROOT}/Libs/IdeHelpersNativeData.lua
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed-builtin-lua.cmake)
 set_source_files_properties(src/builtin_lua.cpp PROPERTIES
     OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_lua.inc)
 target_sources(bg3le PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_lua.inc)

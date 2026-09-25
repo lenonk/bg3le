@@ -1,13 +1,23 @@
 # Embeds bg3se's builtin Lua scripts (vendor/bg3se/BG3Extender/LuaScripts,
 # by Norbyte and the bg3se contributors) so builtin:// paths resolve.
-# Usage: cmake -DROOT=<scripts dir> -DOUT=<generated .inc> -P this file
+# Usage: cmake -DROOT=<scripts dir> [-DEXTRA=<generated scripts dir>]
+#              -DOUT=<generated .inc> -P this file
 file(GLOB_RECURSE scripts RELATIVE ${ROOT} ${ROOT}/*.lua)
+set(extra "")
+if(EXTRA)
+    file(GLOB_RECURSE extra RELATIVE ${EXTRA} ${EXTRA}/*.lua)
+endif()
 list(SORT scripts)
 set(body "")
 set(index "")
 set(n 0)
-foreach(rel ${scripts})
-    file(READ ${ROOT}/${rel} hex HEX)
+foreach(rel ${scripts} ${extra})
+    if(EXISTS ${ROOT}/${rel})
+        set(from ${ROOT}/${rel})
+    else()
+        set(from ${EXTRA}/${rel})
+    endif()
+    file(READ ${from} hex HEX)
     string(LENGTH "${hex}" hexlen)
     math(EXPR size "${hexlen} / 2")
     string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," bytes "${hex}")

@@ -57,7 +57,9 @@ struct Modifier : public Noncopyable<Modifier>
 
 struct ModifierList : public Noncopyable<ModifierList>
 {
-    CNamedElementManager<Modifier> Attributes;
+    // bg3le: the engine puts Name in the manager's tail padding (+92), as
+    // Itanium lays out a potentially-overlapping member.
+    [[no_unique_address]] CNamedElementManager<Modifier> Attributes;
     FixedString Name;
 
     inline FixedString const& GetElementName() const
