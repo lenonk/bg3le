@@ -132,6 +132,21 @@ struct VectorTraits<Array<T>> {
     using Elem = T;
 };
 
+// CompactSet (and TrackedCompactSet, MiniCompactSet) is laid out as an
+// Array is and reads the same way, through size() and data(). Its resize()
+// sets the capacity rather than the length, so it is read-only here.
+template <class T>
+struct CompactSetTraits {
+    static constexpr bool kIsCompactSet = false;
+    using Elem = void;
+};
+
+template <class T, class Allocator, bool StoreSize, class TSize>
+struct CompactSetTraits<CompactSet<T, Allocator, StoreSize, TSize>> {
+    static constexpr bool kIsCompactSet = true;
+    using Elem = T;
+};
+
 template <class A>
 std::size_t array_count_thunk(void const* container) {
     return (std::size_t)static_cast<A const*>(container)->size();
@@ -684,7 +699,8 @@ constexpr FieldKind kind_of() {
             return FieldKind::Unsupported;
         }
     } else if constexpr (VectorTraits<T>::kIsVector
-                         || SetTraits<T>::kIsSet) {
+                         || SetTraits<T>::kIsSet
+                         || CompactSetTraits<T>::kIsCompactSet) {
         return FieldKind::DynArray;
     } else if constexpr (MapTraits<T>::kIsMap) {
         return FieldKind::Map;
@@ -852,6 +868,12 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
                       && std::is_move_constructible_v<E>) {
             f.Resize = &array_resize_thunk<T>;
         }
+    } else if constexpr (CompactSetTraits<T>::kIsCompactSet) {
+        using E = typename CompactSetTraits<T>::Elem;
+        describe_elements.template operator()<E>();
+        f.Count = &array_count_thunk<T>;
+        f.Data = &array_data_thunk<T>;
+        f.ReadOnly = true;
     } else if constexpr (SetTraits<T>::kIsSet) {
         using E = typename SetTraits<T>::Elem;
         describe_elements.template operator()<E>();

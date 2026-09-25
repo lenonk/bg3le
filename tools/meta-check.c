@@ -354,6 +354,22 @@ int main(int argc, char** argv) {
         printf("\ncoverage: %zu of %zu fields convert across %zu components"
                " (%.1f%%)\n", usable, fields, components,
                fields ? 100.0 * (double)usable / (double)fields : 0.0);
+
+        // And across every class the metadata describes, which is where the
+        // containers components do not use (CompactSet, the resource types')
+        // show up.
+        size_t allFields = 0, allUsable = 0;
+        for (size_t i = 0; i < meta_class_count(); i++) {
+            void const* cls = meta_class_at(i);
+            if (cls == NULL) continue;
+            size_t fn = meta_fields(cls, names, kinds, 256);
+            for (size_t j = 0; j < fn; j++) {
+                allFields++;
+                if (kinds[j] != 0) allUsable++;
+            }
+        }
+        printf("every class: %zu of %zu fields convert (%zu do not)\n",
+               allUsable, allFields, allFields - allUsable);
         // Named by the library rather than by a list here. A hardcoded list
         // was wrong the moment a kind was inserted into the middle of the
         // enum: every label after it shifted, so the breakdown claimed 335
