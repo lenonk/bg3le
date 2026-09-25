@@ -16,7 +16,11 @@
 #include <new>
 
 #include <GameDefinitions/Stats/Functors.h>
+#include <GameDefinitions/Stats/Stats.h>
 #include <GameDefinitions/Hit.h>
+
+#include <cstdio>
+#include <unordered_map>
 
 #include "../hook.h"
 #include "../log.h"
@@ -175,4 +179,160 @@ extern "C" bool bg3le_functor_execute(void* functor, void* context, void* world,
     }
     list->Values.clear();
     return ok;
+}
+
+// ---- Functors:AddNew and Functors:Remove ----
+//
+// Upstream's AddNew constructs the functor with bg3se's own class; here the
+// object is bg3se's but its vtable is the engine's for that type, taken from
+// a functor of the same type in RPGStats::StatsFunctors, so the engine's own
+// Clone, ParseParams and destructor run on it. A type whose engine size
+// (what its Clone allocates) differs from bg3se's is refused.
+
+extern "C" void* bg3le_rpgstats();
+extern "C" bool bg3le_game_allocator_ready();
+
+namespace {
+
+struct SetNode {
+    SetNode* Next;
+    std::uint32_t Key;
+    Functors* Value;
+};
+
+std::uint64_t engine_vtable(FunctorId type) {
+    static std::unordered_map<int, std::uint64_t> byType;
+    static bool scanned = false;
+    if (!scanned) {
+        auto* stats = static_cast<RPGStats*>(bg3le_rpgstats());
+        auto* raw = stats != nullptr ? reinterpret_cast<unsigned char*>(&stats->StatsFunctors) : nullptr;
+        std::uint32_t hashSize = 0;
+        SetNode** table = nullptr;
+        if (raw != nullptr) {
+            std::memcpy(&hashSize, raw, 4);
+            std::memcpy(&table, raw + 8, 8);
+            scanned = true;
+        }
+        for (std::uint32_t b = 0; table != nullptr && b < hashSize; ++b) {
+            for (auto* node = table[b]; node != nullptr; node = node->Next) {
+                auto* set = node->Value;
+                if (set == nullptr) continue;
+                for (auto* f : set->Values) {
+                    std::uint64_t vmt = 0;
+                    if (f != nullptr && bg3le::safe_read(f, &vmt, sizeof(vmt))) {
+                        byType.emplace((int)f->TypeId, vmt);
+                    }
+                }
+            }
+        }
+    }
+    auto it = byType.find((int)type);
+    return it != byType.end() ? it->second : 0;
+}
+
+// What the type's Clone allocates: mov edi, imm32 ahead of the call to the
+// engine's operator new.
+std::uint32_t engine_size(std::uint64_t vtable) {
+    std::uint64_t clone = 0;
+    unsigned char code[32] = {};
+    if (!bg3le::safe_read((void const*)(vtable + 3 * 8), &clone, sizeof(clone))
+        || !bg3le::safe_read((void const*)clone, code, sizeof(code))) {
+        return 0;
+    }
+    for (std::size_t i = 0; i + 5 <= sizeof(code); ++i) {
+        if (code[i] == 0xbf) {
+            std::uint32_t size = 0;
+            std::memcpy(&size, code + i + 1, 4);
+            return size;
+        }
+    }
+    return 0;
+}
+
+std::size_t bg3se_size(FunctorId type) {
+    switch (type) {
+#define V(ty) case ty::FunctorType: return sizeof(ty);
+    V(CustomDescriptionFunctor) V(ApplyStatusFunctor) V(SurfaceChangeFunctor) V(ResurrectFunctor)
+    V(SabotageFunctor) V(SummonFunctor) V(ForceFunctor) V(DouseFunctor) V(SwapPlacesFunctor)
+    V(PickupFunctor) V(CreateSurfaceFunctor) V(CreateConeSurfaceFunctor) V(RemoveStatusFunctor)
+    V(DealDamageFunctor) V(ExecuteWeaponFunctorsFunctor) V(RegainHitPointsFunctor)
+    V(TeleportSourceFunctor) V(SetStatusDurationFunctor) V(UseSpellFunctor)
+    V(UseActionResourceFunctor) V(UseAttackFunctor) V(CreateExplosionFunctor)
+    V(BreakConcentrationFunctor) V(ApplyEquipmentStatusFunctor) V(RestoreResourceFunctor)
+    V(SpawnFunctor) V(StabilizeFunctor) V(UnlockFunctor) V(ResetCombatTurnFunctor)
+    V(RemoveAuraByChildStatusFunctor) V(SummonInInventoryFunctor) V(SpawnInInventoryFunctor)
+    V(RemoveUniqueStatusFunctor) V(DisarmWeaponFunctor) V(DisarmAndStealWeaponFunctor)
+    V(SwitchDeathTypeFunctor) V(TriggerRandomCastFunctor) V(GainTemporaryHitPointsFunctor)
+    V(FireProjectileFunctor) V(ShortRestFunctor) V(CreateZoneFunctor) V(DoTeleportFunctor)
+    V(RegainTemporaryHitPointsFunctor) V(RemoveStatusByLevelFunctor) V(SurfaceClearLayerFunctor)
+    V(UnsummonFunctor) V(CreateWallFunctor) V(CounterspellFunctor) V(AdjustRollFunctor)
+    V(SpawnExtraProjectilesFunctor) V(KillFunctor) V(TutorialEventFunctor) V(DropFunctor)
+    V(ResetCooldownsFunctor) V(SetRollFunctor) V(SetDamageResistanceFunctor) V(SetRerollFunctor)
+    V(SetAdvantageFunctor) V(SetDisadvantageFunctor) V(MaximizeRollFunctor) V(CameraWaitFunctor)
+    V(ModifySpellCameraFocusFunctor)
+#undef V
+    default: return 0;
+    }
+}
+
+}  // namespace
+
+// Upstream's Functors::AddNew: the new functor, or null with why.
+extern "C" void* bg3le_functors_add(void* functors, int type, char const** why) {
+    auto* set = static_cast<Functors*>(functors);
+    auto* stats = static_cast<RPGStats*>(bg3le_rpgstats());
+    if (set == nullptr || stats == nullptr || !bg3le_game_allocator_ready()) {
+        *why = "the stats are not up";
+        return nullptr;
+    }
+    const auto id = (FunctorId)type;
+    const std::uint64_t vtable = engine_vtable(id);
+    if (vtable == 0) {
+        *why = "no functor of that type exists in the game's stats to take the engine's class from";
+        return nullptr;
+    }
+    const std::uint32_t size = engine_size(vtable);
+    if (size == 0 || size != bg3se_size(id)) {
+        *why = "bg3se's layout of that functor type is not this build's";
+        return nullptr;
+    }
+    auto* functor = stats->ConstructFunctor(id);
+    if (functor == nullptr) {
+        *why = "not a functor type";
+        return nullptr;
+    }
+    std::memcpy((void*)functor, &vtable, sizeof(vtable));
+    char name[50];
+    std::snprintf(name, sizeof(name), "_%u", (unsigned)set->Values.size());
+    functor->UniqueName = bg3se::FixedString(name);
+    // The set's own Insert, through its (engine) vtable.
+    std::uint64_t svmt = 0, insert = 0;
+    if (!bg3le::safe_read(set, &svmt, sizeof(svmt))
+        || !bg3le::safe_read((void const*)(svmt + 3 * 8), &insert, sizeof(insert))) {
+        *why = "not a functor set";
+        return nullptr;
+    }
+    reinterpret_cast<int (*)(Functors*, Functor*)>(insert)(set, functor);
+    return functor;
+}
+
+// Upstream's Functors::Remove (CNamedElementManager::Remove): out of Values,
+// handles past it moved down; the name keeps its entry and the functor is
+// not destroyed, as there.
+extern "C" bool bg3le_functors_remove(void* functors, void* functor) {
+    auto* set = static_cast<Functors*>(functors);
+    if (set == nullptr || functor == nullptr) return false;
+    auto& values = set->Values;
+    std::uint32_t idx = 0;
+    while (idx < values.size() && values[idx] != functor) ++idx;
+    if (idx >= values.size()) return false;
+    for (std::uint32_t i = idx + 1; i < values.size(); ++i) values[i - 1] = values[i];
+    auto* header = reinterpret_cast<unsigned char*>(&values);
+    std::uint32_t size = values.size() - 1;
+    std::memcpy(header + 12, &size, 4);
+    for (auto& h : set->NameToHandle.values()) {
+        if (h >= (std::int32_t)idx) h--;
+    }
+    set->NextHandle--;
+    return true;
 }

@@ -346,8 +346,12 @@ component's declared size with the size the engine recorded, and
   `ExecuteFunctor` clones the functor into a container of its own, on the
   engine's `Functors` vtable, since the executors call through it. Fire
   Bolt's `DealDamage`, run on a spawned rat, took it from 5 HP to 1.
-  `Functors` views now have upstream's `FunctorList`, each functor as its own
-  class
+  `Functors` views have upstream's `FunctorList`, each functor as its own
+  class, and its `AddNew` and `Remove`. `AddNew` builds the functor on the
+  engine's vtable for its type, taken from a compiled functor of that type
+  and checked against the size the engine's own `Clone` allocates. An
+  `ApplyStatus` made that way, given `BURNING` and `TARGET`, burns a spawned
+  rat golem when executed
 - **`Ext.StaticData.Create`, `ClearResourceBank` and `SyncResourceBank`.**
   `Create` adds the GUID to the bank's map under bg3se's Guid hash (checked
   against a sample of the bank's own keys first), default-constructs the
@@ -570,9 +574,19 @@ component's declared size with the size the engine recorded, and
   next value, into the bucket the engine's own nodes say it belongs in, and
   `AddAttribute` extends a modifier list -- refusing, as upstream does, once
   stats objects exist. `LoadStatsFile` is upstream's own Lua
-  (`builtin://Libs/Stats.lua`) over those; a functor-list attribute in the
-  file still stops it, because `SetRawAttribute` on one needs the engine's
-  `Object::SetPropertyString`, which is not located yet. `Ext.IO.LoadFile`
+  (`builtin://Libs/Stats.lua`) over those. `SetRawAttribute` takes
+  stats-file text as the engine's loader does: numbers as strings, flags
+  joined by `;`, `""` resetting an attribute to its default, requirements
+  such as `!Immobile`, a `ComboCategory` line appended to the stat's set,
+  and roll conditions and functor lists split into `[TextKey]` groups by the
+  engine's own splitter. Functor text is compiled by the engine's per-functor
+  parser into sets registered as the loader registers them, after
+  upstream's `ClearStatsFunctors`. Like upstream's, it reports a bad value
+  rather than throwing, so a file loads past it. Reloading seven of the
+  game's own stats files over the loaded game changes 634 of 404,093
+  values: 340 are armour combo categories appended a second time, as the engine's
+  loader appends them, and the rest are the files' own values coming back
+  over later mods and patches. `Ext.IO.LoadFile`
   in the `data` context reads the game's own archives now, after loose files
   and mod archives, as the engine's file system layers them
 - `Ext.Stats`: 15,754 stats, enumerable and readable by name, through a
@@ -643,7 +657,9 @@ component's declared size with the size the engine recorded, and
 - **A 65-98s level load reduced to ~1s.** The native build spends almost all
   of it in `physx::Sn::ConvX` converting PhysX data whose `TempAllocator`
   serialises on one global mutex; `src/fast_alloc.cpp` replaces it with a
-  lock-free thread-local pool. See
+  lock-free thread-local pool. Its free call sites are patched before its
+  allocate ones, and it stays off unless both are, since the engine cannot
+  free a block it did not allocate. See
   [reference/SLOW-LOAD-DIAGNOSIS.md](reference/SLOW-LOAD-DIAGNOSIS.md).
 
 - **A 30fps endgame save brought to 71fps.** BG3's Vulkan backend streams
@@ -679,12 +695,14 @@ component's declared size with the size the engine recorded, and
   with the old one left in place. Re-assigning every attribute of a
   sample of 105 stats across seven modifier lists to itself changes none
   of 8,310 values, and bg3se's `TestStatAttributes` fails only on a
-  hash-order and a stale functor expectation. (Functor lists are not
-  written; upstream's own setter for them is commented out.) An earlier
+  hash-order and a stale functor expectation. (Assigning a functor list
+  fails as upstream's does; `SetRawAttribute` writes one.) An earlier
   version skipped a pool slot per write, one more each time; see
-  `pool_slot` in `src/vendor/stats.cpp`. `CopyFrom` works — it is
-  upstream's own loop over the indexed properties, and it refuses across
-  modifier lists exactly as upstream does. `Sync` rebuilds a spell, status
+  `pool_slot` in `src/vendor/stats.cpp`. `CopyFrom` is upstream's: the
+  indexed properties, then the functor and roll-condition maps,
+  requirements and both combo sets, and it refuses across modifier lists
+  exactly as upstream does. `ComboProperties` and `ComboCategories` read
+  and assign the stat's own sets. `Sync` rebuilds a spell, status
   or interrupt prototype the way upstream's does, through the engine's own
   `Init` functions — found from the relocations the executable kept
   (`tools/relocs-xref.py`) and checked before every call — so an edited
@@ -874,7 +892,9 @@ function. Four primitives, in `src/hook.cpp`, `src/preload.cpp` and
 2. vtable-slot patching — one aligned store, and it verifies the slot's
    current contents first, so a shifted binary is refused rather than corrupted
 3. call-site patching — rewrites `call rel32` displacements to a nearby
-   trampoline, since rel32 cannot reach a shared library from the executable
+   trampoline, since rel32 cannot reach a shared library from the executable.
+   Trampolines share pages: with one page each, the free space in range ran
+   out on some address layouts
 4. `DetourAttachEx`, for the vendored code that expects Microsoft Detours. It
    records the target and the replacement rather than patching either, and
    one exported forwarder per hooked function lets the dynamic linker do what

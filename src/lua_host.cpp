@@ -3875,6 +3875,7 @@ int l_global_switches(lua_State* L) {
 }
 
 // Ext._Internal.StatsCopyFrom(destAddr, sourceName) -> carried, total
+extern "C" bool bg3le_stats_copy_rest(void* dest, void const* source);
 int l_stats_copy_from(lua_State* L) {
     auto const* dest = (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
     const char* from = luaL_checkstring(L, 2);
@@ -3888,7 +3889,15 @@ int l_stats_copy_from(lua_State* L) {
 
     std::size_t carried = 0;
     std::size_t total = 0;
-    if (!bg3le_stats_copy_from(dest, source, &carried, &total)) {
+    const bool copied = bg3le_stats_copy_from(dest, source, &carried, &total);
+    // Upstream copies the maps, requirements and combo sets after the
+    // properties; a refusal across modifier lists stops before them.
+    if (copied && !bg3le_stats_copy_rest(const_cast<void*>(dest), source)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "copied the properties, but not the functor or roll condition maps");
+        return 2;
+    }
+    if (!copied) {
         lua_pushnil(L);
         lua_pushfstring(L,
             "copied %d of %d properties; the two stats are probably of "
@@ -4517,6 +4526,30 @@ int l_stats_functor_groups(lua_State* L) {
 
         lua_rawseti(L, -2, g + 1);
     }
+    return 1;
+}
+
+// Ext._Internal.FunctorsAdd(set, type) -> address, class; or nil and why
+extern "C" void* bg3le_functors_add(void* functors, int type, char const** why);
+extern "C" bool bg3le_functors_remove(void* functors, void* functor);
+int l_functors_add(lua_State* L) {
+    char const* why = nullptr;
+    void* at = bg3le_functors_add((void*)(std::uintptr_t)luaL_checkinteger(L, 1),
+                                  (int)luaL_checkinteger(L, 2), &why);
+    if (at == nullptr) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    char const* className = bg3le_stats_functor_class(at);
+    if (className == nullptr) return 1;
+    lua_pushstring(L, className);
+    return 2;
+}
+int l_functors_remove(lua_State* L) {
+    lua_pushboolean(L, bg3le_functors_remove((void*)(std::uintptr_t)luaL_checkinteger(L, 1),
+                                             (void*)(std::uintptr_t)luaL_checkinteger(L, 2)));
     return 1;
 }
 
@@ -5175,6 +5208,74 @@ int l_trace_get(lua_State* L) {
 int l_trace_clear(lua_State* L) {
     bg3le_trace_clear(world_container());
     return 0;
+}
+
+// Ext._Internal.StatsSetFunctors(address, attribute, text) -> true, or nil and why
+extern "C" bool bg3le_stats_set_functors(void* object, char const* attribute, char const* value,
+                                         char const** why);
+int l_stats_set_functors(lua_State* L) {
+    char const* why = nullptr;
+    if (!bg3le_stats_set_functors((void*)(std::uintptr_t)luaL_checkinteger(L, 1),
+                                  luaL_checkstring(L, 2), luaL_checkstring(L, 3), &why)) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// Ext._Internal.StatsComboGet(address, which) -> {names}; which 0 is
+// ComboProperties, 1 ComboCategories
+extern "C" int bg3le_stats_combo_get(void const* object, int which,
+                                     void (*each)(void*, char const*), void* user);
+int l_stats_combo_get(lua_State* L) {
+    auto const* object = (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    lua_newtable(L);
+    bg3le_stats_combo_get(object, (int)luaL_checkinteger(L, 2),
+                          [](void* user, char const* name) {
+                              auto* S = static_cast<lua_State*>(user);
+                              lua_pushstring(S, name != nullptr ? name : "");
+                              lua_rawseti(S, -2, luaL_len(S, -2) + 1);
+                          },
+                          L);
+    return 1;
+}
+
+// Ext._Internal.StatsComboSet(address, which, {names}) -> bool
+extern "C" bool bg3le_stats_combo_set(void* object, int which, char const* const* names, int count);
+int l_stats_combo_set(lua_State* L) {
+    auto* object = (void*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    const int which = (int)luaL_checkinteger(L, 2);
+    luaL_checktype(L, 3, LUA_TTABLE);
+    const lua_Integer n = luaL_len(L, 3);
+    std::vector<char const*> names;
+    for (lua_Integer i = 1; i <= n; ++i) {
+        lua_rawgeti(L, 3, i);
+        names.push_back(luaL_checkstring(L, -1));
+        lua_pop(L, 1);
+    }
+    lua_pushboolean(L, bg3le_stats_combo_set(object, which, names.data(), (int)names.size()));
+    return 1;
+}
+
+// Ext._Internal.StatsSplitGroups(text) -> {TextKey = text}, or nil
+extern "C" bool bg3le_stats_split_groups(char const* value,
+                                         void (*each)(void*, char const*, char const*, std::size_t),
+                                         void* user);
+int l_stats_split_groups(lua_State* L) {
+    char const* text = luaL_checkstring(L, 1);
+    lua_newtable(L);
+    const bool ok = bg3le_stats_split_groups(
+        text,
+        [](void* user, char const* key, char const* group, std::size_t size) {
+            auto* S = static_cast<lua_State*>(user);
+            lua_pushlstring(S, group, size);
+            lua_setfield(S, -2, key != nullptr ? key : "");
+        },
+        L);
+    if (!ok) lua_pushnil(L);
+    return 1;
 }
 
 // Ext._Internal.StatSync(name) -> true, or nil and why
@@ -6854,6 +6955,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "FunctorParams");
     lua_pushcfunction(g_lua, l_functors_list);
     lua_setfield(g_lua, -2, "FunctorsList");
+    lua_pushcfunction(g_lua, l_functors_add);
+    lua_setfield(g_lua, -2, "FunctorsAdd");
+    lua_pushcfunction(g_lua, l_functors_remove);
+    lua_setfield(g_lua, -2, "FunctorsRemove");
     lua_pushcfunction(g_lua, l_static_data_create);
     lua_setfield(g_lua, -2, "StaticDataCreate");
     lua_pushcfunction(g_lua, l_static_data_bank_call);
@@ -6890,6 +6995,12 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsTranslatedIntern");
     lua_pushcfunction(g_lua, l_stats_ai_flags_set);
     lua_setfield(g_lua, -2, "StatsAIFlagsSet");
+    lua_pushcfunction(g_lua, l_stats_combo_get);
+    lua_setfield(g_lua, -2, "StatsComboGet");
+    lua_pushcfunction(g_lua, l_stats_combo_set);
+    lua_setfield(g_lua, -2, "StatsComboSet");
+    lua_pushcfunction(g_lua, l_stats_split_groups);
+    lua_setfield(g_lua, -2, "StatsSplitGroups");
     lua_pushcfunction(g_lua, l_stats_roll_set);
     lua_setfield(g_lua, -2, "StatsRollSet");
     lua_pushcfunction(g_lua, l_stats_requirements);
@@ -6934,6 +7045,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsCreate");
     lua_pushcfunction(g_lua, l_entity_create);
     lua_setfield(g_lua, -2, "EntityCreate");
+    lua_pushcfunction(g_lua, l_stats_set_functors);
+    lua_setfield(g_lua, -2, "StatsSetFunctors");
     lua_pushcfunction(g_lua, l_trace_setup);
     lua_setfield(g_lua, -2, "TraceSetup");
     lua_pushcfunction(g_lua, l_trace_enable);
@@ -11399,13 +11512,12 @@ if Ext._Internal.Env("BG3LE_STAT_WRITES") == "0" then
 end
 
 local STAT_KIND_UNWRITABLE = {
-  [7] = "a functor list, which the engine holds compiled",
   [11] = "deprecated upstream and reported as nil",
 }
 
 local sync_warning_shown = false
 
-local function stat_write(self, key, value)
+local function stat_write(self, key, value, raw)
   if not Ext._Internal.StatsModuleLoad and not sync_warning_shown then
     sync_warning_shown = true
     Ext.Log.PrintWarning("Stats edited after ModuleLoad must be synced "
@@ -11416,6 +11528,23 @@ local function stat_write(self, key, value)
   if addr == nil then
     error("bg3le: this stat was not read from the engine, so there is "
           .. "nothing to write to", 3)
+  end
+
+  -- The engine loader appends a ComboCategory line to the set; "" adds nothing.
+  if raw and key == "ComboCategory" then
+    local set = Ext._Internal.StatsComboGet(addr, 1)
+    for name in tostring(value or ""):gmatch("[^;]+") do
+      local trimmed = name:match("^%s*(.-)%s*$")
+      if trimmed ~= "" then set[#set + 1] = trimmed end
+    end
+    return Ext._Internal.StatsComboSet(addr, 1, set)
+  end
+
+  if key == "ComboProperties" or key == "ComboCategories" then
+    if type(value) ~= "table" then
+      error(string.format("%s is a set; assign a table of names", key), 3)
+    end
+    return Ext._Internal.StatsComboSet(addr, key == "ComboProperties" and 0 or 1, value)
   end
 
   local index, kind, typeName = Ext._Internal.StatsAttrFind(addr, key)
@@ -11435,11 +11564,65 @@ local function stat_write(self, key, value)
     return true
   end
 
+  -- Functor lists: SetRawAttribute parses them as the engine's loader does;
+  -- assigning one fails as upstream's TrySetValue does.
+  if slot.kind == 7 then
+    if raw then
+      local ok, why = Ext._Internal.StatsSetFunctors(addr, key, tostring(value or ""))
+      if not ok then error("bg3le: " .. tostring(why), 3) end
+      rawget(self, "__cache")[key] = nil
+      return true
+    end
+    local name = rawget(self, "__name") or "?"
+    if type(value) == "table" then
+      error(string.format("Cannot use table value for stat property %s of type StatsFunctors!", key), 3)
+    elseif value == nil then
+      Ext.Log.PrintError("Temporarily disabled until functors are mapped")
+    else
+      Ext.Log.PrintError(string.format("Couldn't set %s.%s to string value: Inappropriate type: StatsFunctors", name, key))
+    end
+    return false
+  end
+
   local writable = STAT_WRITABLE_KINDS[slot.kind]
   if writable == nil then
     error(string.format("bg3le cannot write %s: it is %s", key,
                         STAT_KIND_UNWRITABLE[slot.kind]
                         or "of a kind bg3le does not write"), 3)
+  end
+
+  -- SetRawAttribute takes stats-file text: numbers as strings, flags joined
+  -- by ';', and "" resetting the attribute, as the engine's loader does.
+  if raw and value == "" and (writable == "int" or writable == "enum") then
+    value = 0
+  elseif raw and value == "" and (writable == "float" or writable == "guid") then
+    value = nil
+  elseif raw and type(value) == "string" then
+    if writable == "int" or writable == "float" then
+      value = tonumber(value) or value
+    elseif writable == "roll" then
+      value = Ext._Internal.StatsSplitGroups(value) or value
+    elseif writable == "requirements" then
+      -- "!Immobile;Level 3": each is [!]Name[ Param].
+      local list = {}
+      for part in value:gmatch("[^;]+") do
+        local negate, name, param = part:match("^%s*(!?)%s*([%w_]+)%s*(%S*)%s*$")
+        if name == nil then
+          error(string.format("Couldn't set %s.%s: \"%s\" is not a requirement",
+                              rawget(self, "__name"), key, part), 3)
+        end
+        list[#list + 1] = {Requirement = name, Not = negate == "!",
+                           Param = param ~= "" and (tonumber(param) or param) or -1}
+      end
+      value = list
+    elseif writable == "flags" then
+      local labels = {}
+      for label in value:gmatch("[^;]+") do
+        local trimmed = label:match("^%s*(.-)%s*$")
+        if trimmed ~= "" then labels[#labels + 1] = trimmed end
+      end
+      value = labels
+    end
   end
 
   local raw
@@ -11472,6 +11655,8 @@ local function stat_write(self, key, value)
                             .. "extender log", key), 3)
       end
     end
+  elseif writable == "guid" and value == nil then
+    raw = -1
   elseif writable == "guid" then
     local why
     raw, why = Ext._Internal.StatsGuidIntern(tostring(value))
@@ -11592,46 +11777,46 @@ local STAT_METHODS = {
     Ext._Internal.WarnOnce("Ext.Stats.SetPersistence() is deprecated")
   end,
 
-  -- Upstream's Object::CopyFrom: it refuses across modifier lists, then
-  -- assigns AIFlags and every IndexedProperties entry. Those properties are
-  -- the whole of a stat's scalar surface, so this is the same assignment
-  -- rather than an approximation of it.
-  --
-  -- What it does not carry is Object::Functors and Object::RollConditions,
-  -- the two hash maps of compiled objects upstream copies after the property
-  -- loop -- with a "TODO - is reusing property list objects allowed?" against
-  -- both. Said once rather than left implied, because a caller expecting a
-  -- complete copy should hear about it.
+  -- Upstream's ObjectHelpers::CopyFrom and Object::CopyFrom: nothing to do
+  -- from itself; otherwise refused across modifier lists, then AIFlags, every
+  -- IndexedProperties entry, the Functors and RollConditions maps (sharing the
+  -- compiled sets, as upstream does), Requirements and the combo sets.
   CopyFrom = function(self, from)
     if type(from) ~= "string" then
       error("stat:CopyFrom(name) takes a stat name", 2)
     end
+    if from == rawget(self, "__name") then return true end
 
     local carried, total = Ext._Internal.StatsCopyFrom(
       rawget(self, "__addr"), from)
     if carried == nil then
-      error("bg3le: " .. tostring(total), 2)
+      local source = Ext.Stats.Get(from)
+      if source == nil then
+        Ext.Log.PrintError("Cannot copy stats from nonexistent object: " .. from)
+      elseif source.ModifierList ~= self.ModifierList then
+        Ext.Log.PrintError(string.format("Cannot copy stats from object '%s' (a %s) to an object of type %s",
+          from, tostring(source.ModifierList), tostring(self.ModifierList)))
+      else
+        Ext.Log.PrintError("bg3le: Cannot copy stats from " .. from .. ": " .. tostring(total))
+      end
+      return false
     end
 
     -- The proxy's cache holds what it read before the copy.
     for k in pairs(rawget(self, "__cache")) do
       rawget(self, "__cache")[k] = nil
     end
-
-    if not rawget(self, "__copySaid") then
-      rawset(self, "__copySaid", true)
-      Ext.Log.Print(string.format(
-        "bg3le: stat:CopyFrom copied %d of %d indexed properties and "
-        .. "AIFlags. Object::Functors and Object::RollConditions are not "
-        .. "carried -- writing those needs a HashMap writer bg3le does not "
-        .. "have -- so a functor a stat defines by name rather than by "
-        .. "attribute stays with the original", carried, total))
-    end
     return true
   end,
 
+  -- Upstream's never throws: a stats file loads past a bad line.
   SetRawAttribute = function(self, name, value)
-    return stat_write(self, name, value)
+    local ok, result = pcall(stat_write, self, name, value, true)
+    if not ok then
+      Ext.Log.PrintError((tostring(result):gsub("^bg3le prelude:%d+: ", "")))
+      return false
+    end
+    return result
   end,
 
   -- Rebuilds the spell, status or interrupt prototype from the stat.
@@ -11667,8 +11852,12 @@ local STAT_EXTRAS = {
   Using = function(self)
     return Ext._Internal.StatsUsing(rawget(self, "__addr")) or ""
   end,
-  ComboCategories = function() return {} end,
-  ComboProperties = function() return {} end,
+  ComboProperties = function(self)
+    return Ext._Internal.StatsComboGet(rawget(self, "__addr"), 0)
+  end,
+  ComboCategories = function(self)
+    return Ext._Internal.StatsComboGet(rawget(self, "__addr"), 1)
+  end,
 
   -- An empty attribute set means the discovery did not land, which is
   -- worth saying rather than handing back a name that looks complete.
@@ -12165,8 +12354,10 @@ end
 function Ext._Internal.PointedObject(target, class)
   if class == nil then return "<unsupported>" end
   local loaded
+  -- A functor set changes under AddNew and Remove, so it is read afresh.
+  local live = class == "stats::Functors"
   local function get()
-    if loaded == nil then
+    if loaded == nil or live then
       loaded = read_object(target, class, "", {})
       -- A pooled stats expression's Code and RefCount are getters upstream,
       -- not fields; read_functor supplies them the same way.
@@ -12177,13 +12368,37 @@ function Ext._Internal.PointedObject(target, class)
           Ext._Internal.AmendObject(loaded, "RefCount", refCount)
         end
       end
-      -- Upstream's FunctorList getter: each functor as its own class.
+      -- Upstream's FunctorList getter and its AddNew and Remove methods.
       if class == "stats::Functors" then
         local raw, list = Ext._Internal.FunctorsList(target), {}
         for i = 1, #raw, 2 do
           list[#list + 1] = Ext._Internal.PointedObject(raw[i], raw[i + 1])
         end
         Ext._Internal.AmendObject(loaded, "FunctorList", list)
+        Ext._Internal.AmendObject(loaded, "AddNew", function(_, functorType)
+          local value = functorType
+          if type(functorType) == "string" then
+            value = nil
+            for k, label in pairs(Ext.Enums.StatsFunctorId) do
+              if type(k) == "number" and label == functorType then value = k end
+            end
+          end
+          value = math.tointeger(value)
+          if value == nil then error("bg3le: " .. tostring(functorType) .. " is not a StatsFunctorId", 2) end
+          local at, cls = Ext._Internal.FunctorsAdd(target, value)
+          if at == nil then
+            Ext.Log.PrintError("bg3le: Functors:AddNew(" .. tostring(functorType) .. "): " .. tostring(cls))
+            return nil
+          end
+          return Ext._Internal.PointedObject(at, cls or "stats::Functor")
+        end)
+        Ext._Internal.AmendObject(loaded, "Remove", function(_, functor)
+          local meta = getmetatable(functor)
+          local id = type(meta) == "table" and meta.__bg3leIdentity or nil
+          local hex = type(id) == "string" and id:match("^p:(%x+)$") or nil
+          if hex == nil then error("bg3le: Functors:Remove expects a functor", 2) end
+          return Ext._Internal.FunctorsRemove(target, tonumber(hex, 16))
+        end)
       end
     end
     return loaded
