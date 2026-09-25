@@ -33,7 +33,8 @@ public:
 
     void BindRenderer(RenderingBackend*);
     void Update();
-    std::optional<TextureLoadResult> IncTextureRef(FixedString const& textureGuid);
+    std::optional<TextureLoadResult> IncTextureRef(FixedString const& textureGuid,
+        TextureDescriptor* resident = nullptr);
     bool DecTextureRef(TextureOpaqueHandle id, FixedString const& textureGuid);
 
 private:
@@ -42,12 +43,14 @@ private:
         TextureDescriptor* Descriptor{ nullptr };
         TextureLoadResult LoadResult;
         uint32_t RefCount{ 0 };
+        bool Resident{ false };
     };
     
     struct TextureUnloadRequest
     {
         TextureOpaqueHandle Id{ 0 };
         uint32_t WaitForFrames{ 0 };
+        bool Resident{ false };
     };
 
     RenderingBackend* renderer_{ nullptr };
@@ -81,7 +84,8 @@ public:
     void DestroyUI();
     void EnableUI(bool enabled);
     void SetObjects(IMGUIObjectManager* objects);
-    std::optional<TextureLoadResult> RegisterTexture(FixedString const& textureGuid);
+    std::optional<TextureLoadResult> RegisterTexture(FixedString const& textureGuid,
+        TextureDescriptor* resident = nullptr);
     void UnregisterTexture(TextureOpaqueHandle id, FixedString const& textureGuid);
     std::optional<ImTextureID> BindTexture(TextureOpaqueHandle opaqueHandle);
     bool LoadFont(FixedString const& name, char const* path, float size);

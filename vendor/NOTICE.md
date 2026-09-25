@@ -359,6 +359,15 @@ resource manager is not located, as it is not yet in bg3le, and upstream
 called through it regardless. A texture then fails to load instead of
 crashing the game.
 
+**`Extender/Client/IMGUI/IMGUI.{h,cpp}` — icon atlases register their
+resident texture.** On this build `TextureAtlas::Texture` holds the atlas
+texture's `TextureDescriptor` (a Vulkan image with one view), not a
+`TextureResource`; a live atlas reads that way field for field. `BindIcon`
+hands it to the texture loader, which registers it with the renderer
+without looking it up or loading it, and marks it resident so the engine's
+`UnloadTexture` is never called for a texture bg3le did not load. The
+upstream path is unchanged for textures that are not in an atlas.
+
 ## vendor/compat — bg3le's own code
 
 Shims that let the upstream sources compile unmodified. They are force-included

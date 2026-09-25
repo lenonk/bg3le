@@ -134,6 +134,9 @@ CHECKS = [
      lambda: "ls__gTextureAtlasMap == nullptr" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")),
     ("IncTextureRef tolerates a missing resource bank",
      lambda: "auto bank = GetStaticSymbols().GetCurrentResourceBank();" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")),
+    ("icon atlases register their resident texture",
+     lambda: "reinterpret_cast<TextureDescriptor*>(atlas->Texture)" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")
+             and "bool Resident{ false };" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.h")),
 ]
 
 

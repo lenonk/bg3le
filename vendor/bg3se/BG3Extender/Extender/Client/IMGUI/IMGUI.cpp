@@ -78,7 +78,10 @@ bool ImageReference::BindIcon(FixedString const& iconName)
         return false;
     }
 
-    auto texture = gExtender->IMGUI().RegisterTexture(atlas->TextureUuid);
+    // bg3le: on this build Texture holds the resident texture's descriptor,
+    // not a TextureResource -- verified against a live atlas (NOTICE.md).
+    auto texture = gExtender->IMGUI().RegisterTexture(atlas->TextureUuid,
+        reinterpret_cast<TextureDescriptor*>(atlas->Texture));
     if (!texture) {
         WARN("Failed to load texture '%s' for icon '%s'", atlas->TextureUuid.GetString(), iconName.GetString());
         return false;
@@ -2216,8 +2219,11 @@ void IMGUITextureLoader::Update()
         if (--it.Value().WaitForFrames == 0) {
             renderer_->UnregisterTexture(it.Value().Id);
 
-            auto textureManager = (*GetStaticSymbols().ls__gGlobalResourceManager)->TextureManager;
-            (*GetStaticSymbols().ls__TextureManager__UnloadTexture)(textureManager, it.Key());
+            // bg3le: an atlas's resident texture was never loaded here.
+            if (!it.Value().Resident && GetStaticSymbols().ls__gGlobalResourceManager) {
+                auto textureManager = (*GetStaticSymbols().ls__gGlobalResourceManager)->TextureManager;
+                (*GetStaticSymbols().ls__TextureManager__UnloadTexture)(textureManager, it.Key());
+            }
 
             unloaded.push_back(it.Key());
         }
@@ -2228,7 +2234,8 @@ void IMGUITextureLoader::Update()
     }
 }
 
-std::optional<TextureLoadResult> IMGUITextureLoader::IncTextureRef(FixedString const& textureGuid)
+std::optional<TextureLoadResult> IMGUITextureLoader::IncTextureRef(FixedString const& textureGuid,
+    TextureDescriptor* resident)
 {
     if (!renderer_) {
         ERR("Loading texture with no rendering backend?");
@@ -2239,6 +2246,16 @@ std::optional<TextureLoadResult> IMGUITextureLoader::IncTextureRef(FixedString c
     if (refs) {
         refs->RefCount++;
         return refs->LoadResult;
+    }
+
+    // bg3le: a texture the engine already holds (an icon atlas's) is
+    // registered as it is, with nothing loaded and nothing to unload.
+    if (resident) {
+        auto loadResult = renderer_->RegisterTexture(resident);
+        if (!loadResult) return {};
+        refCounts_.set(textureGuid, TextureRefCount{ resident, *loadResult, 1, true });
+        pendingUnloads_.remove(textureGuid);
+        return *loadResult;
     }
 
     auto bank = GetStaticSymbols().GetCurrentResourceBank();
@@ -2288,16 +2305,18 @@ bool IMGUITextureLoader::DecTextureRef(TextureOpaqueHandle id, FixedString const
     }
     
     if (--refs->RefCount == 0) {
+        const bool resident = refs->Resident;
         refCounts_.remove(textureGuid);
-        pendingUnloads_.set(textureGuid, TextureUnloadRequest{ id, DeleteAfterFrames });
+        pendingUnloads_.set(textureGuid, TextureUnloadRequest{ id, DeleteAfterFrames, resident });
     }
 
     return true;
 }
 
-std::optional<TextureLoadResult> IMGUIManager::RegisterTexture(FixedString const& textureGuid)
+std::optional<TextureLoadResult> IMGUIManager::RegisterTexture(FixedString const& textureGuid,
+    TextureDescriptor* resident)
 {
-    return textureLoader_.IncTextureRef(textureGuid);
+    return textureLoader_.IncTextureRef(textureGuid, resident);
 }
 
 void IMGUIManager::UnregisterTexture(TextureOpaqueHandle id, FixedString const& textureGuid)
