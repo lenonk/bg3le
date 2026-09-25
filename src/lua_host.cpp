@@ -5552,6 +5552,64 @@ int l_hook_system(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.ClassConstructible(name) -> boolean
+extern "C" bool bg3le_meta_class_constructible(void const* handle);
+int l_class_constructible(lua_State* L) {
+    void const* meta = bg3le_meta_class(luaL_checkstring(L, 1));
+    if (meta == nullptr) meta = bg3le_meta_component(luaL_checkstring(L, 1));
+    lua_pushboolean(L, bg3le_meta_class_constructible(meta));
+    return 1;
+}
+
+// Ext._Internal.DialogManager() -> address, or nil
+//
+// Upstream's GetDialogManager: esv::DialogSystem's GameInterface.DialogManager,
+// server only. On this build the pointer is at +0x1e8 of the system (bg3se's
+// declared layout puts it 16 bytes later), so it is checked before it is
+// trusted: a DialogManager's FlagDescriptions (+0x30) maps each flag kind's
+// name to a description that carries the same name.
+int l_dialog_manager(lua_State* L) {
+    if (in_client_state()) return 0;
+    const auto index = system_index("esv::DialogSystem");
+    void* system = nullptr;
+    void* update = nullptr;
+    std::int32_t own = -1;
+    std::uint32_t count = 0;
+    if (!index.has_value()
+        || !bg3le_system_probe(world_container(), *index, &system, &own, &update, &count)
+        || system == nullptr) {
+        return 0;
+    }
+    char* manager = nullptr;
+    if (!safe_read((char const*)system + 0x1e8, &manager, sizeof(manager)) || manager == nullptr) {
+        return 0;
+    }
+    struct RefMap { std::uint32_t ItemCount, HashSize; void** HashTable; } flags{};
+    if (!safe_read(manager + 0x30, &flags, sizeof(flags)) || flags.HashSize == 0
+        || flags.HashSize > 4096 || flags.ItemCount == 0 || flags.HashTable == nullptr) {
+        return 0;
+    }
+    std::uint32_t agreeing = 0;
+    for (std::uint32_t b = 0; b < flags.HashSize; ++b) {
+        char* node = nullptr;
+        if (!safe_read(flags.HashTable + b, &node, sizeof(node))) return 0;
+        for (int guard = 0; node != nullptr && guard < 64; ++guard) {
+            std::uint32_t key = 0, name = 0;
+            char* value = nullptr;
+            if (!safe_read(node + 8, &key, sizeof(key))
+                || !safe_read(node + 16, &value, sizeof(value)) || value == nullptr
+                || !safe_read(value, &name, sizeof(name)) || name != key) {
+                return 0;
+            }
+            ++agreeing;
+            if (!safe_read(node, &node, sizeof(node))) return 0;
+        }
+    }
+    if (agreeing != flags.ItemCount) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)manager);
+    return 1;
+}
+
 // Ext._Internal.SystemProbe(name) -> { Index, System, OwnIndex, Update, Count }
 int l_system_probe(lua_State* L) {
     const auto index = system_index(luaL_checkstring(L, 1));
@@ -6127,6 +6185,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "HookSystem");
     lua_pushcfunction(g_lua, l_system_probe);
     lua_setfield(g_lua, -2, "SystemProbe");
+    lua_pushcfunction(g_lua, l_dialog_manager);
+    lua_setfield(g_lua, -2, "DialogManager");
+    lua_pushcfunction(g_lua, l_class_constructible);
+    lua_setfield(g_lua, -2, "ClassConstructible");
     lua_pushcfunction(g_lua, l_take_component_events);
     lua_setfield(g_lua, -2, "TakeComponentEvents");
     lua_pushcfunction(g_lua, l_component_short_name);
@@ -7756,12 +7818,24 @@ function Ext.Types.Unserialize(object, values)
   return object
 end
 
+-- Upstream's Construct checks the type and stops there -- its body is a
+-- TODO -- so a constructible type returns nothing, and the rest raise its
+-- messages.
 function Ext.Types.Construct(typeName)
-  -- Making an engine object means allocating with the game's allocator and
-  -- running its constructor, neither of which bg3le reaches. Saying so
-  -- beats handing back an empty table that looks like one.
-  error("bg3le: Ext.Types.Construct cannot build engine objects yet ("
-        .. tostring(typeName) .. ")", 2)
+  typeName = tostring(typeName)
+  local info = Ext.Types.GetTypeInfo(typeName)
+  if info == nil then
+    if Ext.Enums[typeName] ~= nil then
+      error("Unable to construct non-object type '" .. typeName .. "'", 0)
+    end
+    error("Unknown type name '" .. typeName .. "'", 0)
+  end
+  if info.Kind ~= "Object" then
+    error("Unable to construct non-object type '" .. typeName .. "'", 0)
+  end
+  if not Ext._Internal.ClassConstructible(typeName) then
+    error("Type '" .. typeName .. "' is not constructible", 0)
+  end
 end
 
 function Ext.Types.GetHashSetValueAt(object, index)
@@ -9271,9 +9345,11 @@ if Ext._Internal.IsClientState() then
   end
 end
 
+-- Upstream's: the server's dlg::DialogManager, nil on the client.
 function Ext.Utils.GetDialogManager()
-  error("bg3le: Ext.Utils.GetDialogManager needs the engine's dialog "
-        .. "manager, which is not located yet", 2)
+  local addr = Ext._Internal.DialogManager()
+  if addr == nil then return nil end
+  return Ext._Internal.PointedObject(addr, "dlg::DialogManager")
 end
 
 
@@ -11624,6 +11700,8 @@ function Ext._Internal.PointedObject(target, class)
     __pairs = function() return pairs(get()) end,
     __len = function() return #get() end,
     __bg3leIdentity = string.format("p:%x", target),
+    -- Its type, as Ext.Types.GetObjectType reports upstream's.
+    __name = Ext._Internal.ViewTypeName(class, ""),
   })
 end
 

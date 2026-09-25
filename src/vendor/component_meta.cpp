@@ -1392,7 +1392,16 @@ struct ClassFields {
     bool IsComponent;
     // A static data resource's ExtResourceManagerType, or -1.
     std::int32_t ResourceType;
+    // Whether upstream's property map has a Construct: default-constructible
+    // and not a Noesis object (LuaObjectProxies.cpp's GetConstructor).
+    bool IsConstructible;
 };
+
+template <class T>
+constexpr bool constructible() {
+    return std::is_default_constructible_v<T> && !std::is_base_of_v<Noesis::BaseObject, T>
+           && !std::is_base_of_v<Noesis::Interface, T>;
+}
 
 template <class T>
 constexpr std::int32_t resource_type_of() {
@@ -1634,6 +1643,7 @@ inline constexpr ClassFields kClassFields{
     is_one_frame_component<T>(),
     is_component_class<T>(),
     resource_type_of<T>(),
+    constructible<T>(),
 };
 
 // Every class table, collected the way upstream collects its own.
@@ -2068,6 +2078,10 @@ extern "C" std::size_t bg3le_meta_component_stride(void const* handle) {
 extern "C" bool bg3le_meta_component_is_proxy(void const* handle) {
     if (handle == nullptr) return false;
     return static_cast<ClassFields const*>(handle)->IsProxy;
+}
+
+extern "C" bool bg3le_meta_class_constructible(void const* handle) {
+    return handle != nullptr && static_cast<ClassFields const*>(handle)->IsConstructible;
 }
 
 extern "C" bool bg3le_meta_component_is_one_frame(void const* handle) {

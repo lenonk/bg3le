@@ -369,6 +369,14 @@ component's declared size with the size the engine recorded, and
   the moment it does. The key functions read and write the engine's
   `TranslatedStringKeyManager` (11,128 keys), found by upstream's own
   anchor through the executable's relocations
+- **`Ext.Utils.GetDialogManager`** hands back the server's
+  `dlg::DialogManager` from `esv::DialogSystem`, as upstream's does (nil on
+  the client). The pointer sits 16 bytes before where bg3se's declared layout
+  puts it, so it is only trusted when the manager's `FlagDescriptions` name
+  each flag kind the way their keys do. `Ext.Types.Construct` checks the
+  type exactly as upstream's does -- unknown, not an object, not
+  constructible -- and then, like upstream's, whose body is a TODO, returns
+  nothing
 - **A line on the main menu**, as upstream has: the copyright string gets
   bg3le's line through the repository as the game leaves `LoadModule`
 - **`PersistentVars` in the savegame**, as upstream writes them: a
@@ -528,15 +536,15 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **46 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **44 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 46 are
+  the source, because this one was stale at 86 for a while: 24 of the 44 are
   `Ext.Level`'s physics and pathfinding, 3 `Ext.StaticData`'s bank writes,
   6 `Ext.Stats`' creation and functor execution, 6
   `Ext.Template`'s local and cache managers, and the rest are singles —
-  `Entity.Create`/`Destroy`, `Types.Construct`, and `GlobalSwitches`, whose
+  `Entity.Create`/`Destroy`, and `GlobalSwitches`, whose
   object is findable by its own language string and whose declared layout is
   not this build's. The evidence for that is now a string test rather than a
   boolean one — one of Larian's strings is 128 bits with a length that has to
