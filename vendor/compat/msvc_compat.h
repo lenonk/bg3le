@@ -57,8 +57,10 @@ typedef struct _RTL_SRWLOCK { pthread_rwlock_t Lock; } SRWLOCK, *PSRWLOCK;
 
 typedef void* HANDLE;
 
-// A recursive mutex, since that is what a Win32 critical section is. Nothing
-// here should end up in a structure whose layout must match the engine.
+// A recursive mutex, since that is what a Win32 critical section is. 48
+// bytes, as the engine's are: ResourceManager's next member starts 48 past
+// its lock, which holds a mutex and then a spin count. Never enter one of
+// the engine's, though -- Initialized overlaps that spin count.
 #include <pthread.h>
 typedef struct _RTL_CRITICAL_SECTION {
     pthread_mutex_t Mutex;
