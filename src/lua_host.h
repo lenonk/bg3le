@@ -63,6 +63,12 @@ bool lua_client_input(InputKind kind, long long a, long long b, long long c,
 // otherwise LoadMods does it after the bootstraps.
 void lua_restore_persistent_vars();
 
+// Ext.Vars and persistent timers, the rest of the save region
+// (src/savegame.cpp): what the server context holds, and a read handed back.
+struct SaveExtras;
+bool lua_extras_to_save(SaveExtras* out);
+void lua_restore_save_extras();
+
 // (mod UUID, JSON) for every mod whose PersistentVars a save should carry.
 // False if the server context could not be asked.
 bool lua_persistent_vars_to_save(

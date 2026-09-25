@@ -321,7 +321,11 @@ component's declared size with the size the engine recorded, and
   engine's `OsirisVariableHelper::SavegameVisit`. A save loaded at launch is
   read before any mod exists, so the values are held and restored after the
   bootstraps and before `SessionLoaded`, which is upstream's order. The saves
-  read and write in bg3se's format, deprecation warnings included
+  read and write in bg3se's format, deprecation warnings included. Persistent
+  user and mod variables and persistent timers go into the same region, node
+  for node as upstream writes them, so a save moves between bg3se and bg3le:
+  tables are written as JSON text, which bg3se reads, and bg3se's binary form
+  is read through its own decoder. `Ext.Json` has upstream's binary mode
 - `Ext.Entity` against the live ECS: `Ext.Entity.Get(uuid)`, component reads
   and writes, and `entity:Replicate(name)` that reaches the client. The engine
   names every ECS type index in its symbol table, so the component and
@@ -504,9 +508,6 @@ component's declared size with the size the engine recorded, and
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
-- **Saving `Ext.Vars` and persistent timers.** They go in the same save
-  region as `PersistentVars`, which is in place; their nodes are not written
-  yet.
 - **Osiris user queries (`QRY_*`).** Not callable yet: upstream evaluates
   them through the Rete node's `IsValid` with an identity adapter, and
   neither is located in this build.

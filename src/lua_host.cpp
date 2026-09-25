@@ -95,6 +95,62 @@ int l_saved_persistent_vars(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.TakeSavedExtras() -- {user = {{owner, name, type, value}},
+// mod = ..., timers = {{frozen, repeat, paused, handler, args}}}, once per
+// save read, else nil.
+void push_saved_variables(lua_State* L, std::vector<SavedVariable> const& vars) {
+    lua_createtable(L, (int)vars.size(), 0);
+    for (std::size_t i = 0; i < vars.size(); ++i) {
+        SavedVariable const& v = vars[i];
+        lua_createtable(L, 4, 0);
+        lua_pushstring(L, v.Owner.c_str());
+        lua_rawseti(L, -2, 1);
+        lua_pushstring(L, v.Name.c_str());
+        lua_rawseti(L, -2, 2);
+        lua_pushinteger(L, v.Type);
+        lua_rawseti(L, -2, 3);
+        switch (v.Type) {
+        case 5: lua_pushboolean(L, v.Bool ? 1 : 0); break;
+        case 1: lua_pushinteger(L, (lua_Integer)v.Int); break;
+        case 2: lua_pushnumber(L, v.Num); break;
+        default: lua_pushlstring(L, v.Str.data(), v.Str.size()); break;
+        }
+        lua_rawseti(L, -2, 4);
+        lua_rawseti(L, -2, (lua_Integer)i + 1);
+    }
+}
+
+int l_take_saved_extras(lua_State* L) {
+    SaveExtras extras;
+    if (!take_saved_extras(&extras)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_createtable(L, 0, 3);
+    push_saved_variables(L, extras.User);
+    lua_setfield(L, -2, "user");
+    push_saved_variables(L, extras.Mod);
+    lua_setfield(L, -2, "mod");
+    lua_createtable(L, (int)extras.Timers.size(), 0);
+    for (std::size_t i = 0; i < extras.Timers.size(); ++i) {
+        SavedTimer const& t = extras.Timers[i];
+        lua_createtable(L, 5, 0);
+        lua_pushnumber(L, t.Frozen);
+        lua_rawseti(L, -2, 1);
+        lua_pushnumber(L, t.Repeat);
+        lua_rawseti(L, -2, 2);
+        lua_pushboolean(L, t.Paused ? 1 : 0);
+        lua_rawseti(L, -2, 3);
+        lua_pushstring(L, t.Handler.c_str());
+        lua_rawseti(L, -2, 4);
+        lua_pushlstring(L, t.Args.data(), t.Args.size());
+        lua_rawseti(L, -2, 5);
+        lua_rawseti(L, -2, (lua_Integer)i + 1);
+    }
+    lua_setfield(L, -2, "timers");
+    return 1;
+}
+
 int l_take_saved_persistent_vars(lua_State* L) {
     std::vector<std::pair<std::string, std::string>> vars;
     if (!take_saved_persistent_vars(&vars)) {
@@ -1130,6 +1186,9 @@ extern "C" std::uint32_t bg3le_imgui_set_callback(std::uint64_t handle,
                                                   void* state);
 extern "C" bool bg3le_imgui_clear_callback(std::uint64_t handle,
                                            char const* name);
+// Upstream's binary JSON reader and writer, src/vendor/json_binary.cpp.
+extern "C" int bg3le_json_binary_encode(lua_State* L);
+extern "C" int bg3le_json_binary_decode(lua_State* L);
 // Ext.UI's C side, src/vendor/bg3le_noesis_lua.inl.
 extern "C" void bg3le_ui_register(lua_State* L);
 extern "C" bool bg3le_imgui_take_event(void* state, std::uint32_t* id,
@@ -5477,6 +5536,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "GameState");
     lua_pushcfunction(g_lua, l_saved_persistent_vars);
     lua_setfield(g_lua, -2, "SavedPersistentVars");
+    lua_pushcfunction(g_lua, l_take_saved_extras);
+    lua_setfield(g_lua, -2, "TakeSavedExtras");
     lua_pushcfunction(g_lua, l_take_saved_persistent_vars);
     lua_setfield(g_lua, -2, "TakeSavedPersistentVars");
     lua_pushcfunction(g_lua, l_component_index);
@@ -5638,6 +5699,10 @@ void build_state(bool client) {
     lua_pushcfunction(g_lua, l_imgui_take_event);
     lua_setfield(g_lua, -2, "ImguiTakeEvent");
     bg3le_ui_register(g_lua);
+    lua_pushcfunction(g_lua, bg3le_json_binary_encode);
+    lua_setfield(g_lua, -2, "JsonBinaryEncode");
+    lua_pushcfunction(g_lua, bg3le_json_binary_decode);
+    lua_setfield(g_lua, -2, "JsonBinaryDecode");
     lua_pushcfunction(g_lua, l_imgui_input_state);
     lua_setfield(g_lua, -2, "ImguiInputState");
     lua_pushcfunction(g_lua, l_imgui_window_geometry);
@@ -6232,6 +6297,18 @@ function Ext.Json.Stringify(...)
     if nargs >= 4 then ctx.IterateUserdata = iterate == true end
   end
 
+  -- Upstream's binary form, through its own writer. A value it cannot walk
+  -- (one of bg3le's object proxies) goes through the text form first.
+  if type(opts) == "table" and opts.Binary == true then
+    local ok, blob = pcall(Ext._Internal.JsonBinaryEncode, v)
+    if ok then return blob end
+    ctx.Beautify = false
+    local out = {}
+    local done, err = pcall(stringify, v, "", 0, ctx, out)
+    if not done then error(err, 2) end
+    return Ext._Internal.JsonBinaryEncode(Ext.Json.Parse(table.concat(out)))
+  end
+
   local out = {}
   local ok, err = pcall(stringify, v, "", 0, ctx, out)
   if not ok then error(err, 2) end
@@ -6287,10 +6364,11 @@ table.find = Ext.Table.Find
 -- produces: objects become tables keyed by string, arrays tables keyed by
 -- integer from one, and null becomes nil, which means a null in an array
 -- leaves a hole exactly as it does upstream.
-function Ext.Json.Parse(text)
+function Ext.Json.Parse(text, binary)
   if type(text) ~= "string" then
     error("Ext.Json.Parse expects a string", 2)
   end
+  if binary == true then return Ext._Internal.JsonBinaryDecode(text) end
 
   local pos = 1
 
@@ -7396,9 +7474,9 @@ end
 -- ---- Ext.Vars ----
 --
 -- Mod and user variables. The registry, the storage and the dirty
--- tracking are real; what is missing is the two things that need the
--- engine -- replication to clients and savegame persistence -- so Sync
--- records the intent and says once that nothing leaves the process.
+-- tracking are real, and persistent ones are written into saves (see
+-- CollectSaveExtras); replication to clients is not, so Sync records the
+-- intent and says once that nothing leaves the process.
 Ext.Vars = {}
 
 local mod_variable_defs = {}
@@ -7413,7 +7491,7 @@ local function warn_sync(what)
   if warned_sync then return end
   warned_sync = true
   Ext.Log.PrintWarning("bg3le: " .. what .. " is local to this process; "
-    .. "variable replication and savegame persistence are not implemented")
+    .. "variable replication is not implemented")
 end
 
 function Ext.Vars.RegisterModVariable(moduleUuid, name, options)
@@ -8790,30 +8868,136 @@ function Ext.Timer.IsPaused(handle)
   return t ~= nil and t.paused
 end
 
--- Persistent timers survive a save upstream, by name and with serialised
--- arguments. bg3le has no savegame serialisation, so one behaves like an
--- ordinary timer; the handler registry is real so the calling shape is the
--- same, and the limitation is logged once rather than silently dropped on
--- load.
+-- Persistent timers, as upstream's: a handler name and JSON arguments, so
+-- they can be written into a save and fired after a load. The handler is
+-- looked up when the timer fires, not when it is started.
 local persistent_handlers = {}
-local warned_persistent = false
 
 function Ext.Timer.RegisterPersistentHandler(name, fn)
   persistent_handlers[name] = fn
 end
 
+local function persistent_timer(name, args_json)
+  return function(handle)
+    local fn = persistent_handlers[name]
+    if fn == nil then
+      Ext.Log.PrintWarning("Tried to fire persistent timer '" .. tostring(name)
+                           .. "' but it has no callback registered!")
+      return
+    end
+    fn(Ext.Json.Parse(args_json), handle)
+  end
+end
+
 function Ext.Timer.WaitForPersistent(ms, callbackName, args, repeat_ms)
-  local fn = persistent_handlers[callbackName]
-  if fn == nil then
-    error("Ext.Timer.WaitForPersistent: no handler registered as "
-          .. tostring(callbackName), 2)
+  if Ext.IsClient() then
+    error("Persistent timers are only supported on the server", 2)
   end
-  if not warned_persistent then
-    warned_persistent = true
-    Ext.Log.PrintWarning("bg3le: persistent timers do not survive a save "
-                         .. "yet; this one behaves as an ordinary timer")
+  local args_json = Ext.Json.Stringify(args, {Beautify = false})
+  local handle = add_timer(ms, persistent_timer(callbackName, args_json),
+                           repeat_ms, false)
+  timers[handle].persistent = {handler = callbackName, args = args_json}
+  return handle
+end
+
+-- ---- Ext.Vars and persistent timers in the savegame ----
+--
+-- Upstream's UserVariableManager, ModVariableManager and TimerManager
+-- SavegameVisit; src/savegame.cpp does the visiting. Values carry
+-- upstream's UserVariableType: 1 Int64, 2 Double, 3 String, 4 Composite
+-- (JSON), 5 Boolean, 6 CompositeBinary (read only).
+local function saved_value(value)
+  local t = type(value)
+  if t == "boolean" then return 5, value end
+  if t == "number" then
+    if math.type(value) == "integer" then return 1, value end
+    return 2, value
   end
-  return add_timer(ms, function(handle) fn(args, handle) end, repeat_ms, false)
+  if t == "string" then return 3, value end
+  if t == "table" or t == "userdata" then
+    return 4, Ext.Json.Stringify(value, {Beautify = false})
+  end
+  return nil
+end
+
+local function restored_value(kind, value)
+  if kind == 4 then return Ext.Json.Parse(value) end
+  if kind == 6 then return Ext.Json.Parse(value, true) end
+  return value
+end
+
+local function persistent_var(defs, name)
+  local def = defs ~= nil and defs[name] or nil
+  -- Upstream's Persistent defaults to true, and an unregistered variable
+  -- has no prototype, so it is not written.
+  return def ~= nil and def.Persistent ~= false
+end
+
+function Ext._Internal.CollectSaveExtras()
+  local out = {user = {}, mod = {}, timers = {}}
+  for guid, vars in pairs(user_variables) do
+    for name, value in pairs(vars) do
+      if persistent_var(user_variable_defs, name) then
+        local kind, v = saved_value(value)
+        if kind then out.user[#out.user + 1] = {guid, name, kind, v} end
+      end
+    end
+  end
+  for uuid, vars in pairs(mod_variables) do
+    for name, value in pairs(vars) do
+      if persistent_var(mod_variable_defs[uuid], name) then
+        local kind, v = saved_value(value)
+        if kind then out.mod[#out.mod + 1] = {uuid, name, kind, v} end
+      end
+    end
+  end
+  local now = Ext.Timer.MonotonicTime()
+  for _, t in pairs(timers) do
+    if t.persistent ~= nil then
+      local remaining = t.paused and (t.remaining or 0) or math.max(0, t.due - now)
+      out.timers[#out.timers + 1] = {remaining / 1000.0, (t.every or 0) / 1000.0,
+                                     t.paused == true, t.persistent.handler,
+                                     t.persistent.args}
+    end
+  end
+  return out
+end
+
+-- On a save read: what upstream's managers clear, cleared, then restored.
+function Ext._Internal.RestoreSaveExtras()
+  if Ext.IsClient() then return end
+  local saved = Ext._Internal.TakeSavedExtras()
+  if saved == nil then return end
+
+  for guid in pairs(user_variables) do user_variables[guid] = nil end
+  for uuid in pairs(mod_variables) do mod_variables[uuid] = {} end
+  for handle, t in pairs(timers) do
+    if t.persistent ~= nil then timers[handle] = nil end
+  end
+
+  for _, e in ipairs(saved.user) do
+    local ok, value = pcall(restored_value, e[3], e[4])
+    if ok then
+      user_variables[e[1]] = user_variables[e[1]] or {}
+      user_variables[e[1]][e[2]] = value
+    end
+  end
+  for _, e in ipairs(saved.mod) do
+    local ok, value = pcall(restored_value, e[3], e[4])
+    if ok then
+      mod_variables[e[1]] = mod_variables[e[1]] or {}
+      mod_variables[e[1]][e[2]] = value
+    end
+  end
+  for _, e in ipairs(saved.timers) do
+    local handle = add_timer(e[1] * 1000.0, persistent_timer(e[4], e[5]),
+                             e[2] > 0 and e[2] * 1000.0 or nil, false)
+    timers[handle].persistent = {handler = e[4], args = e[5]}
+    if e[3] then
+      timers[handle].paused = true
+      timers[handle].remaining = e[1] * 1000.0
+    end
+  end
 end
 
 -- Upstream reports the engine's game clock. bg3le counts from the first
@@ -11250,6 +11434,7 @@ function Ext._Internal.LoadMods()
   Ext._Internal.LoadModScripts()
   Ext._Internal.FireEvent("SessionLoading")
   Ext._Internal.RestorePersistentVars()
+  Ext._Internal.RestoreSaveExtras()
 
   -- After every mod's bootstrap, as upstream does: a mod subscribes in
   -- its bootstrap and expects to be called once everything is up.
@@ -12086,6 +12271,96 @@ void lua_restore_persistent_vars() {
     if (g_server_lua == nullptr) return;
     InContext server(g_server_lua);
     call_internal("RestorePersistentVars");
+}
+
+void lua_restore_save_extras() {
+    if (g_server_lua == nullptr) return;
+    InContext server(g_server_lua);
+    call_internal("RestoreSaveExtras");
+}
+
+namespace {
+
+void read_saved_variables(lua_State* L, int table, std::vector<SavedVariable>* out) {
+    const lua_Integer n = luaL_len(L, table);
+    for (lua_Integer i = 1; i <= n; ++i) {
+        lua_geti(L, table, i);
+        SavedVariable v;
+        lua_geti(L, -1, 1);
+        lua_geti(L, -2, 2);
+        lua_geti(L, -3, 3);
+        lua_geti(L, -4, 4);
+        if (lua_isstring(L, -4) && lua_isstring(L, -3)) {
+            v.Owner = lua_tostring(L, -4);
+            v.Name = lua_tostring(L, -3);
+            v.Type = (std::uint8_t)lua_tointeger(L, -2);
+            switch (v.Type) {
+            case 5: v.Bool = lua_toboolean(L, -1) != 0; break;
+            case 1: v.Int = (std::int64_t)lua_tointeger(L, -1); break;
+            case 2: v.Num = lua_tonumber(L, -1); break;
+            default: {
+                std::size_t len = 0;
+                char const* text = lua_tolstring(L, -1, &len);
+                if (text != nullptr) v.Str.assign(text, len);
+                break;
+            }
+            }
+            out->push_back(std::move(v));
+        }
+        lua_pop(L, 5);
+    }
+}
+
+}  // namespace
+
+bool lua_extras_to_save(SaveExtras* out) {
+    if (g_server_lua == nullptr) return false;
+    InContext server(g_server_lua);
+    lua_State* L = g_lua;
+    const int top = lua_gettop(L);
+    lua_getglobal(L, "Ext");
+    if (lua_istable(L, -1)) lua_getfield(L, -1, "_Internal");
+    if (lua_istable(L, -1)) lua_getfield(L, -1, "CollectSaveExtras");
+    if (!lua_isfunction(L, -1)) {
+        lua_settop(L, top);
+        return false;
+    }
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK || !lua_istable(L, -1)) {
+        logf("lua: Ext._Internal.CollectSaveExtras failed: %s",
+             lua_isstring(L, -1) ? lua_tostring(L, -1) : "no table");
+        lua_settop(L, top);
+        return false;
+    }
+    const int result = lua_gettop(L);
+    lua_getfield(L, result, "user");
+    if (lua_istable(L, -1)) read_saved_variables(L, lua_gettop(L), &out->User);
+    lua_pop(L, 1);
+    lua_getfield(L, result, "mod");
+    if (lua_istable(L, -1)) read_saved_variables(L, lua_gettop(L), &out->Mod);
+    lua_pop(L, 1);
+    lua_getfield(L, result, "timers");
+    if (lua_istable(L, -1)) {
+        const int timers = lua_gettop(L);
+        const lua_Integer n = luaL_len(L, timers);
+        for (lua_Integer i = 1; i <= n; ++i) {
+            lua_geti(L, timers, i);
+            SavedTimer t;
+            lua_geti(L, -1, 1);
+            t.Frozen = (float)lua_tonumber(L, -1);
+            lua_geti(L, -2, 2);
+            t.Repeat = (float)lua_tonumber(L, -1);
+            lua_geti(L, -3, 3);
+            t.Paused = lua_toboolean(L, -1) != 0;
+            lua_geti(L, -4, 4);
+            if (lua_isstring(L, -1)) t.Handler = lua_tostring(L, -1);
+            lua_geti(L, -5, 5);
+            if (lua_isstring(L, -1)) t.Args = lua_tostring(L, -1);
+            lua_pop(L, 6);
+            out->Timers.push_back(std::move(t));
+        }
+    }
+    lua_settop(L, top);
+    return true;
 }
 
 bool lua_persistent_vars_to_save(
