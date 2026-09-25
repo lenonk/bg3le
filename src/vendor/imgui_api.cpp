@@ -86,6 +86,22 @@ void imgui_api_init() {
     logf("imgui: widget tree created and handed to the manager");
 }
 
+std::mutex& imgui_frame_mutex();
+
+// A fresh widget tree, when the Lua states are rebuilt: upstream's belongs to
+// the client state and goes with it, so a mod building its window again does
+// not find the old one still there.
+void imgui_api_reset() {
+    const std::lock_guard<std::mutex> frame(imgui_frame_mutex());
+    const std::lock_guard<std::mutex> held(lock());
+    auto* manager = ui();
+    if (manager == nullptr || objects() == nullptr) return;
+    manager->SetObjects(nullptr);
+    objects() = std::make_unique<bg3se::extui::IMGUIObjectManager>();
+    manager->SetObjects(objects().get());
+    logf("imgui: widget tree replaced for the new Lua states");
+}
+
 // Hands the queued callbacks to bg3le's own delivery.
 //
 // Upstream flushes this from IMGUIObjectManager::ClientUpdate, but only

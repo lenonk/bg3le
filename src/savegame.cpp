@@ -33,6 +33,7 @@ extern "C" bool bg3le_meta_format_guid(void const* bytes, char* out,
 extern "C" bool bg3le_meta_parse_guid(const char* text, void* out);
 
 namespace bg3le {
+
 namespace {
 
 // esv::OsirisVariableHelper::SavegameVisit(helper, SavegameVisitor*, ?).

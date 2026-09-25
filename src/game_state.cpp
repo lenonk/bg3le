@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 #include "hook.h"
@@ -24,6 +25,7 @@
 namespace bg3le {
 
 void translated_string_show_version(char const* suffix);
+bool note_session_ended();
 
 namespace {
 
@@ -108,6 +110,17 @@ std::uint64_t machine_update_hook(void* machine, void* a, void* b, void* c) {
     char const* now = client_game_state();
     if (now != nullptr && last != nullptr && now != last) {
         logf("gamestate: client %s -> %s", last, now);
+        // Upstream's client resets on UnloadSession and loads again leaving
+        // LoadMenu; its server resets there too and loads at the next
+        // LoadSession, which is the story work here.
+        if (std::strcmp(now, "UnloadSession") == 0 && note_session_ended()) {
+            logf("gamestate: session unloaded; rebuilding the Lua states");
+            lua_reset(false);
+        }
+        if (std::strcmp(last, "LoadMenu") == 0) {
+            show_version_number();
+            lua_load_client_scripts();
+        }
         char const* from = last;
         last = now;
         lua_client_tick(from, now);

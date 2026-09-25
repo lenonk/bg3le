@@ -51,7 +51,6 @@ namespace {
 
 SymbolTable g_symbols;
 std::once_flag g_symbols_once;
-std::once_flag g_story_once;
 std::once_flag g_init_struct_once;
 
 void ensure_symbols();
@@ -838,8 +837,17 @@ void dump_osiris_api(void* self);
 
 std::atomic<bool> g_story_ready{false};
 
+// The story work runs once per session, not once per process: when the
+// client unloads a session (src/game_state.cpp) the Lua states are rebuilt
+// and the next story's work binds Osi and loads the mods again.
+std::mutex g_story_mutex;
+std::atomic<bool> g_story_done{false};
+
 void dump_once(void* self) {
-    std::call_once(g_story_once, [self] {
+    if (g_story_done.load(std::memory_order_acquire)) return;
+    const std::lock_guard<std::mutex> held(g_story_mutex);
+    if (g_story_done.load(std::memory_order_relaxed)) return;
+    {
         ensure_symbols();
         fast_alloc_report("level load");
         if (g_story_ready_at > 0.0) {
@@ -850,8 +858,26 @@ void dump_once(void* self) {
         dump_osiris_api(self);
         test_integer_sum();
         g_story_ready.store(true);
-    });
+    }
+    g_story_done.store(true, std::memory_order_release);
 }
+
+}  // namespace
+
+// Whether a session's story has been worked (Osi bound, mods loaded).
+bool story_ready() { return g_story_ready.load(); }
+
+// The client is unloading a session (src/game_state.cpp). True if one had
+// got as far as its story, in which case the story work is re-armed for the
+// next one and the caller rebuilds the Lua states.
+bool note_session_ended() {
+    if (!g_story_ready.exchange(false)) return false;
+    const std::lock_guard<std::mutex> held(g_story_mutex);
+    g_story_done.store(false, std::memory_order_release);
+    return true;
+}
+
+namespace {
 
 void dump_osiris_api(void* self) {
     // Every phase here runs on the story thread between Osiris finishing
@@ -1159,13 +1185,9 @@ extern "C" long _ZN7COsiris4LoadER12COsiSmartBuf(void* self, void* buf) {
     const int which = ++loads;
     double t0 = now_s();
     long rc = real != nullptr ? real(self, buf) : 0;
-    // A story loading after the first session is up means a new session:
-    // the player went back to the menu and loaded something else. Upstream
-    // resets its Lua state and reloads every mod for that; bg3le keeps
-    // what it has, because it cannot yet tell a new session from the
-    // several story loads that make up one, and resetting at the wrong
-    // moment is worse than not resetting. Said once, so the player knows
-    // to restart rather than wondering why a mod is behaving oddly.
+    // A new session's story arrives after the client unloaded the last one,
+    // which rebuilt the Lua states. One arriving without that is not
+    // expected; it keeps the old state and says so once.
     if (g_story_ready.load()) {
         static std::once_flag told;
         std::call_once(told, [] {

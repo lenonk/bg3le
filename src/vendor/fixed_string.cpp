@@ -1015,4 +1015,44 @@ extern "C" void bg3le_fixed_string_dump() {
     }
 }
 
+// FixedString::IncRef for the vendored code, which copies FixedStrings into
+// its own maps -- a texture's GUID, a font's name -- and upstream counts each
+// copy with the engine. Without that the engine freed entries still in use:
+// an icon atlas's texture GUID came back as a different GUID at release, and
+// every widget holding it failed to find its texture. The entry is pinned
+// instead of counted -- raised to the interning refcount the first time, so
+// it is never freed -- because decrementing correctly would mean freeing
+// entries the way the engine does. The number of distinct strings the
+// vendored code holds bounds what that keeps.
+extern "C" void bg3le_fixed_string_pin(std::uint32_t index) {
+    if (index == bg3se::FixedStringBase::NullIndex) return;
+    static std::atomic<void const*> cached{nullptr};
+    void const* table = cached.load(std::memory_order_acquire);
+    if (table == nullptr) {
+        table = bg3le_string_table();
+        if (table == nullptr) return;
+        cached.store(table, std::memory_order_release);
+    }
+
+    // The engine's own table, read directly: this runs on every copy.
+    const std::size_t sub = index & 0x0F;
+    if (sub >= kSubTableCount) return;
+    void const* st = sub_table(table, sub);
+    const std::size_t bucket = (index >> 4) & 0xffff;
+    const std::size_t entry = index >> 20;
+    const auto perBucket = read_at<std::uint32_t>(st, offsetof(SubTable, EntriesPerBucket));
+    const auto numBuckets = read_at<std::uint32_t>(st, offsetof(SubTable, NumBuckets));
+    const auto entrySize = read_at<std::uint64_t>(st, offsetof(SubTable, EntrySize));
+    auto** buckets = read_at<std::uint8_t**>(st, offsetof(SubTable, Buckets));
+    if (bucket >= numBuckets || entry >= perBucket || buckets == nullptr) return;
+    std::uint8_t* base = buckets[bucket];
+    if (base == nullptr) return;
+
+    auto* header = reinterpret_cast<Header*>(base + entry * entrySize);
+    auto* refs = reinterpret_cast<std::atomic<std::uint32_t>*>(&header->RefCount);
+    if (refs->load(std::memory_order_relaxed) < kInternRefCount) {
+        refs->fetch_add(kInternRefCount, std::memory_order_relaxed);
+    }
+}
+
 }  // namespace bg3le

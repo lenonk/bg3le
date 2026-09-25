@@ -35,6 +35,7 @@
 extern "C" bool bg3le_game_allocator_ready();
 
 extern "C" bool bg3le_fixed_string_create(char const* text, std::uint32_t* out);
+extern "C" void bg3le_fixed_string_pin(std::uint32_t index);
 extern "C" char const* bg3le_fixed_string(std::uint32_t index,
                                           std::uint32_t* length);
 
@@ -227,11 +228,18 @@ bool lookup(void* repo, std::uint32_t id, std::uint32_t hash, View* out) {
 // module's localisation is loaded it does not, and this says so quietly.
 void* repository() {
     static std::atomic<void*> verified{nullptr};
-    if (void* repo = verified.load()) return repo;
-
     void* repo = nullptr;
     auto* global = reinterpret_cast<void* const*>(load_bias() + kRepositoryGlobal);
     if (!safe_read(global, &repo, sizeof(repo)) || repo == nullptr) return nullptr;
+
+    // The engine replaces it when it reloads localisation -- returning to
+    // the main menu does -- so the one verified earlier only counts while
+    // the global still names it.
+    if (void* known = verified.load()) {
+        if (known == repo) return repo;
+        verified.store(nullptr);
+        logf("loca: the repository was replaced; verifying the new one");
+    }
 
     void* pool = nullptr;
     if (!safe_read(static_cast<char*>(repo) + kTranslatedStrings, &pool,
@@ -320,6 +328,8 @@ extern "C" void bg3le_corelib_strings_install() {
     if (g_create != nullptr) {
         bg3se::gCoreLibPlatformInterface.ls__FixedString__CreateFromString =
             &corelib_create;
+        // Pinned rather than counted; see bg3le_fixed_string_pin.
+        bg3se::gCoreLibPlatformInterface.ls__FixedString__IncRef = &bg3le_fixed_string_pin;
     }
     bg3se::GFS.Initialize();
     logf("strings: vendored FixedString hooks installed; GFS built");
@@ -435,6 +445,9 @@ void apply_pending(void* repo) {
     }
 }
 
+// Runs until what was queued is applied, and can run again: localisation
+// reloads when the game returns to the menu, and writes made then wait for
+// it the same way the first ones did.
 void start_monitor() {
     if (g_monitor_started.exchange(true)) return;
     std::thread([] {
@@ -443,11 +456,20 @@ void start_monitor() {
                 logf("loca: repository populated after %d ms of waiting "
                      "(client state %s)", i * 5, client_state_name());
                 apply_pending(repo);
+                g_monitor_started.store(false);
+                // Anything queued while this was applying gets its own run.
+                bool more = false;
+                {
+                    const std::lock_guard<std::mutex> lock(g_pending_mutex);
+                    more = !g_pending.empty() || !g_version_suffix.empty();
+                }
+                if (more) start_monitor();
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         logf("loca: the repository never loaded; queued strings dropped");
+        g_monitor_started.store(false);
     }).detach();
 }
 

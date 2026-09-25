@@ -872,6 +872,17 @@ void bg3le_ui_command_fired(void* command, void* parameter)
         {} });
 }
 
+// Forgets what the old Lua states bound: their handler ids mean nothing to
+// the new ones. Subscriptions stay on their elements but no longer deliver.
+extern "C" void bg3le_ui_reset()
+{
+    std::lock_guard<std::mutex> held(Noesis::bg3le_ui::g_lock);
+    Noesis::bg3le_ui::g_handlers.clear();
+    Noesis::bg3le_ui::g_commands.clear();
+    Noesis::bg3le_ui::g_events.clear();
+    for (auto& sub : Noesis::bg3le_ui::g_subscriptions) sub.Active = false;
+}
+
 // Adds Ext.UI's C side to the table on top of the stack.
 extern "C" void bg3le_ui_register(lua_State* L)
 {

@@ -302,6 +302,12 @@ component's declared size with the size the engine recorded, and
   are delivered on the client tick, so a handler cannot set `Handled` on its
   event; `WriteCallback`, `GetStateMachine` and the picking, cursor and
   drag-and-drop managers are not there yet
+- **Sessions, as upstream has them**: when the client unloads a session --
+  back to the main menu, or loading another save -- both Lua states are
+  rebuilt; the client's mods reload as the menu finishes loading, and the
+  server's with the next story, which binds `Osi` again. A new save's
+  `PersistentVars`, variables and timers reach the new states.
+  `Ext.Debug.Reset()` works at the menu as well as in a session
 - **Input events**: `KeyInput`, `MouseButtonInput`, `MouseWheelInput`, the
   controller events and `ViewportResized`, thrown from the game's own
   `SDL_PollEvent` after the overlay has seen the event, as upstream does,
@@ -454,14 +460,6 @@ component's declared size with the size the engine recorded, and
   test with that much freedom does.
   [reference/GLOBAL-SWITCHES.md](reference/GLOBAL-SWITCHES.md).
   `reference/ext-api-surface.txt` lists them with their shapes
-- **One session per process, unless asked.** `Ext.Debug.Reset()` works —
-  both contexts are torn down and built again and every mod reloads, which is
-  what a mod author editing a script wants — but it has to be asked for. The
-  story-load work still runs once, so loading a second save without
-  restarting leaves Osiris bound to the first story's mappings. Doing it
-  automatically means telling a new session from the two or three story loads
-  that make up one, which needs the game state machine bg3le does not read
-  yet, so it waits to be told rather than resetting at the wrong moment
 - **Stat `Sync` and `SetPersistence`.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
   enumerations in place; conditions, strings, floats, GUIDs, flag sets and

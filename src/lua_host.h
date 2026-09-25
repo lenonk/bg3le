@@ -63,6 +63,10 @@ bool lua_client_input(InputKind kind, long long a, long long b, long long c,
 // otherwise LoadMods does it after the bootstraps.
 void lua_restore_persistent_vars();
 
+// Both Lua states torn down and built again, as upstream's reset does; with
+// load_mods false the caller loads them (a new session's story work).
+void lua_reset(bool load_mods);
+
 // Ext.Vars and persistent timers, the rest of the save region
 // (src/savegame.cpp): what the server context holds, and a read handed back.
 struct SaveExtras;

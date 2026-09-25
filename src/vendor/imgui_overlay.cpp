@@ -76,6 +76,9 @@ std::mutex& frame_lock() {
 
 }  // namespace
 
+// For src/vendor/imgui_api.cpp, which replaces the widget tree on a reset.
+std::mutex& imgui_frame_mutex() { return frame_lock(); }
+
 bool imgui_overlay_wanted();
 void extender_globals_init();
 void imgui_api_init();

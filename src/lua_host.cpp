@@ -1191,6 +1191,7 @@ extern "C" int bg3le_json_binary_encode(lua_State* L);
 extern "C" int bg3le_json_binary_decode(lua_State* L);
 // Ext.UI's C side, src/vendor/bg3le_noesis_lua.inl.
 extern "C" void bg3le_ui_register(lua_State* L);
+extern "C" void bg3le_ui_reset();
 extern "C" bool bg3le_imgui_take_event(void* state, std::uint32_t* id,
                                        std::uint64_t* widget,
                                        std::uint8_t* argKind, bool* argBool,
@@ -9741,26 +9742,39 @@ end
 -- in it: the 14 it never saw had no settings registered, and every later
 -- lookup for one of them warned that the mod "was not found by MCM" and
 -- asked the player to contact its author.
+-- The engine's list is missing some loaded mods (see IsModLoaded below), so
+-- the player's modsettings.lsx supplies them -- and its order, which is the
+-- one the engine follows for the mods it does list. Appending the missing
+-- ones after the engine's put Mod Configuration Menu behind every mod that
+-- depends on it, so its own load-order check complained, and bootstraps ran
+-- in that order. Modules modsettings does not name (the base game's) keep
+-- the engine's order, ahead of the player's mods.
 function Ext.Mod.GetLoadOrder()
   local out = {}
   local seen = {}
+  local settings = Ext._Internal.ModSettingsOrder() or {}
+  local listed = {}
+  for _, uuid in ipairs(settings) do listed[uuid] = true end
 
+  local engine = {}
   local n = Ext._Internal.ModCount()
   for i = 0, n - 1 do
     local uuid = Ext._Internal.ModUuidAt(i)
-    if uuid ~= nil and not seen[uuid] then
+    if uuid ~= nil then engine[#engine + 1] = uuid end
+  end
+
+  for _, uuid in ipairs(engine) do
+    if not listed[uuid] and not seen[uuid] then
       seen[uuid] = true
       out[#out + 1] = uuid
     end
   end
-
-  for _, uuid in ipairs(Ext._Internal.ModSettingsOrder() or {}) do
+  for _, uuid in ipairs(settings) do
     if not seen[uuid] then
       seen[uuid] = true
       out[#out + 1] = uuid
     end
   end
-
   return out
 end
 
@@ -12223,9 +12237,13 @@ void lua_bind_osi(const std::vector<osi::Function>& functions);
 // from the function list bg3le already has -- resetting the Lua is the whole
 // of it. What a mod put in the engine before the reset stays there, which is
 // the same bargain upstream offers.
-void lua_reset() {
+void imgui_api_reset();
+
+void lua_reset(bool load_mods) {
     // Both locks, so neither context is mid-call on another thread.
     std::scoped_lock both(g_server_lock, g_client_lock);
+    imgui_api_reset();
+    bg3le_ui_reset();
     lua_State* oldServer = g_server_lua;
     lua_State* oldClient = g_client_lua;
 
@@ -12253,16 +12271,21 @@ void lua_reset() {
         lua_bind_osi(functions);
     }
 
+    if (!load_mods) {
+        logf("lua: both contexts rebuilt for a new session");
+        return;
+    }
     lua_load_mods();
 
     g_reset_events_pending = true;
     logf("lua: reset -- both contexts rebuilt and every mod reloaded");
 }
 
+// Once per client state: LoadModScripts guards itself, and a rebuilt state
+// (a new session, or back at the menu) loads them again.
 void lua_load_client_scripts() {
-    static std::atomic<bool> done{false};
-    if (g_client_lua == nullptr || done.exchange(true)) return;
-    logf("lua: loading client mods as the module finishes loading");
+    if (g_client_lua == nullptr) return;
+    logf("lua: loading client mods");
     InContext client(g_client_lua);
     call_internal("LoadModScripts");
 }
@@ -12401,7 +12424,7 @@ std::atomic<bool> g_client_ticks_itself{false};
 void lua_tick() {
     if (g_reset_pending) {
         g_reset_pending = false;
-        lua_reset();
+        lua_reset(true);
     }
     if (g_server_lua == nullptr) return;
 
@@ -12427,7 +12450,20 @@ void lua_tick() {
     }
 }
 
+bool story_ready();  // src/preload.cpp
+
 void lua_client_tick(char const* from, char const* to) {
+    // Ext.Debug.Reset at the menu, where there is no server tick to do it:
+    // the client's mods reload now, the server's with the next story.
+    if (g_reset_pending && !story_ready()) {
+        g_reset_pending = false;
+        lua_reset(false);
+        lua_load_client_scripts();
+        if (g_client_lua != nullptr) {
+            InContext client(g_client_lua);
+            call_internal("AfterReset");
+        }
+    }
     if (g_client_lua == nullptr) return;
     g_client_ticks_itself.store(true);
     InContext client(g_client_lua);
