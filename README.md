@@ -685,7 +685,7 @@ component's declared size with the size the engine recorded, and
   present — `tools/api-coverage.lua` reports 715 of 715 — and
   `tools/count-refusals.py`, which counts the ones that raise instead of
   answering, now finds none. What is left is in the smaller gaps below
-- **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
+- **Stat writes and `Sync`.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
   enumerations in place; conditions, strings, floats, GUIDs, flag sets and
   translated-string handles into the matching `RPGStats` pool; roll
@@ -707,10 +707,15 @@ component's declared size with the size the engine recorded, and
   `Init` functions — found from the relocations the executable kept
   (`tools/relocs-xref.py`) and checked before every call — so an edited
   stat reaches the game; syncing 400 unchanged spells leaves every
-  prototype exactly as the loader built it. Passives are parsed inside
-  their loader on this build, with no per-passive rebuild to call, so
-  syncing one says so once; `Ext.Stats.GetCachedPassive`'s fields are
-  writable. `SetPersistence` warns that it is deprecated, as upstream's
+  prototype exactly as the loader built it. Passives have no Init on this
+  build -- their loader (image+0x2fc1b00) builds each one inline, and only
+  the ones missing from the manager's map -- so a passive's node leaves the
+  map, the loader builds it again, and the result moves into the old node,
+  which keeps its address as upstream's in-place Init does. 415 of 417
+  unchanged passives sync back identical; the two others pick up edits a
+  mod made to their stats. A passive made with `Create`, given `AC(5)` and
+  synced, raises the host's AC from 13 to 18 when added; changed to `AC(2)`
+  and synced again, 15. `SetPersistence` warns that it is deprecated, as upstream's
   does. [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the
   layout, the Init hunt and the three theories that were tested and
   eliminated

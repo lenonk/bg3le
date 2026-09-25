@@ -158,10 +158,12 @@ would look like it worked and do nothing.
 resets the fields bg3se's `SyncStat` resets and calls the engine's own
 `SpellPrototype::Init`, `StatusPrototype::Init` (then the status loader's
 boost parse) or `InterruptPrototype::Init`. See "Finding the Init
-functions" below. A passive is the exception: this build parses passives
-inline in their loader, so there is no per-passive rebuild to call, and
-Sync says so once rather than raising -- the write to the stat has already
-happened. `SetPersistence`, and Sync's `persist` argument, are deprecated
+functions" below. A passive has no Init: its loader builds each passive
+inline, skipping any already in the manager's map and returning at once
+if the manager's `Initialized` byte (+0x18) is set. Sync takes the node out
+of its bucket, clears the byte and calls the loader, which builds just that
+one; the fresh prototype is then copied into the old node and the old node
+relinked, so its address holds. `SetPersistence`, and Sync's `persist` argument, are deprecated
 upstream and warn once there; they do here.
 
 ## Copying a stat
@@ -194,8 +196,7 @@ put back. So an attribute the engine has already compiled can be changed
 after all — not by syncing the stat, but by writing the prototype the stat
 was compiled into.
 
-For a passive, that is the only way: its loader has no per-passive
-function to call again.
+For a passive, Sync goes through its loader instead; see above.
 
 ## Finding the Init functions
 
@@ -222,7 +223,11 @@ None has a symbol, but the executable kept its relocations (`.rela.text`,
 - The loaders run in sequence from one function; `0x2fb8e20` is the
   interrupt loader, and its loop calls `0x2fc33d0(proto, stats object)`
   with a 0x1f0-byte stride.
-- The passive loader, `0x2fc1b00`, reads the passive table's names itself.
+- The passive loader, `0x2fc1b00(manager)`, reads the passive table's names
+  itself. It walks every stats object of the passive list, looks its name
+  up in the manager's chained map (bucket `key % HashSize`), and for a miss
+  allocates a 0x220-byte node (next, key, 0x210-byte prototype), links it
+  at the bucket head and fills it inline. It ends by setting `+0x18`.
 
 Every one is pinned by offset and checked before use: its opening bytes,
 and where it loads the global at `0x7bbd418`, that the object there holds

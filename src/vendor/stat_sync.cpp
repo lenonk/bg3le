@@ -57,6 +57,9 @@ static_assert(offsetof(StatusPrototype, Boosts) == 0xc0);
 static_assert(sizeof(InterruptPrototype) == 0x1f0);
 static_assert(offsetof(InterruptPrototype, Name) == 0);
 static_assert(offsetof(Object, Name) == 0x20);
+// The passive loader allocates 0x220-byte nodes: next, key, prototype.
+static_assert(sizeof(PassivePrototype) == 0x210);
+static_assert(offsetof(PassivePrototypeManager, Initialized) == 0x18);
 static_assert(sizeof(Array<int>) == 16);
 
 // The global every Init reads first: RPGStats, whose Objects array buffer
@@ -67,7 +70,7 @@ constexpr std::size_t kStatsInHolder = 0xc8;
 struct InitFn {
     char const* Name;
     std::uintptr_t Offset;
-    unsigned char Bytes[28];
+    unsigned char Bytes[36];
     std::size_t Length;
     std::size_t StatsDisp;   // offset of a disp32 that loads kStatsGlobal, or 0
 };
@@ -88,6 +91,16 @@ const InitFn kInterruptInit = {
      0x48, 0x83, 0xec, 0x18, 0x8b, 0x07, 0x8b, 0x6e, 0x20, 0x49,
      0x89, 0xf6, 0x48, 0x89, 0xfb, 0x39, 0xe8},
     27, 0};
+
+// The passive loader, which builds every passive missing from the manager's
+// map inline; there is no PassivePrototype::Init on this build.
+const InitFn kPassiveLoader = {
+    "the passive loader", 0x2fc1b00,
+    {0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+     0x48, 0x81, 0xec, 0xb8, 0x00, 0x00, 0x00, 0x80, 0x7f, 0x18,
+     0x00, 0x48, 0x89, 0xfb, 0x0f, 0x85, 0x1a, 0x14, 0x00, 0x00,
+     0x4c, 0x8b, 0x3d},
+    33, 33};
 
 // The status loader's boost parse, which upstream calls ParseStaticBoosts:
 // the parser, then the three functions of the callback it is handed.
@@ -369,6 +382,94 @@ char const* add_interrupt(Object* object, char const* name) {
     return nullptr;
 }
 
+// A passive's node in the manager's chained map.
+struct PassiveNode {
+    PassiveNode* Next;
+    std::uint32_t Key;
+    std::uint32_t Pad;
+    PassivePrototype Value;
+};
+static_assert(sizeof(PassiveNode) == 0x220);
+
+// RefMapInternals, whose members LegacyRefMap inherits privately.
+struct RawRefMap {
+    std::uint32_t ItemCount;
+    std::uint32_t HashSize;
+    PassiveNode** HashTable;
+};
+static_assert(sizeof(RawRefMap) == sizeof(PassivePrototypeManager::Passives));
+
+RawRefMap& raw_map(PassivePrototypeManager* mgr) {
+    return *reinterpret_cast<RawRefMap*>(&mgr->Passives);
+}
+
+PassiveNode** passive_bucket(PassivePrototypeManager* mgr, std::uint32_t key) {
+    RawRefMap& map = raw_map(mgr);
+    if (map.HashSize == 0 || map.HashTable == nullptr) return nullptr;
+    return &map.HashTable[key % map.HashSize];
+}
+
+bool passive_unlink(PassivePrototypeManager* mgr, PassiveNode* node) {
+    PassiveNode** link = passive_bucket(mgr, node->Key);
+    for (; link != nullptr && *link != nullptr; link = &(*link)->Next) {
+        if (*link == node) {
+            *link = node->Next;
+            --raw_map(mgr).ItemCount;
+            return true;
+        }
+    }
+    return false;
+}
+
+PassiveNode* passive_node(PassivePrototypeManager* mgr, std::uint32_t key) {
+    PassiveNode** link = passive_bucket(mgr, key);
+    PassiveNode* node = link != nullptr ? *link : nullptr;
+    while (node != nullptr && node->Key != key) node = node->Next;
+    return node;
+}
+
+// Upstream resets a passive and calls PassivePrototype::Init. Here the
+// loader builds it again: the old node leaves the map, the loader adds a
+// fresh one, and its prototype moves into the old node so the address holds.
+char const* sync_passive(Object* object, char const* name) {
+    auto* loader = (void (*)(PassivePrototypeManager*))verified(kPassiveLoader);
+    if (loader == nullptr) return "the engine's passive loader is not where this build has it";
+    auto* map = (char*)bg3le_prototype_map(3);
+    if (map == nullptr) return "the passive prototype manager is not located";
+    auto* mgr = (PassivePrototypeManager*)(map - offsetof(PassivePrototypeManager, Passives));
+
+    std::uint32_t key = 0;
+    std::memcpy(&key, &object->Name, sizeof(key));
+    PassiveNode* old = passive_node(mgr, key);
+    if (old != nullptr && !passive_unlink(mgr, old)) return "the passive map does not chain the way bg3le reads it";
+
+    mgr->Initialized = false;
+    loader(mgr);
+    PassiveNode* fresh = passive_node(mgr, key);
+    if (fresh == nullptr) {
+        if (old != nullptr) {
+            PassiveNode** link = passive_bucket(mgr, key);
+            old->Next = *link;
+            *link = old;
+            ++raw_map(mgr).ItemCount;
+        }
+        return "the passive loader did not rebuild the passive";
+    }
+    if (old == nullptr) {
+        bg3le_prototype_added(3, name, &fresh->Value);
+        return nullptr;
+    }
+
+    // What the old prototype held is left, not freed.
+    passive_unlink(mgr, fresh);
+    std::memcpy((void*)&old->Value, (void const*)&fresh->Value, sizeof(PassivePrototype));
+    PassiveNode** link = passive_bucket(mgr, key);
+    old->Next = *link;
+    *link = old;
+    ++raw_map(mgr).ItemCount;
+    return nullptr;
+}
+
 }  // namespace
 }  // namespace bg3le
 
@@ -398,9 +499,7 @@ extern "C" char const* bg3le_stats_sync(char const* name) {
         return sync_interrupt(object, proto);
     }
     if (std::strcmp(type, "PassiveData") == 0) {
-        return "this build parses passives inside their loader, so there is no "
-               "per-passive rebuild to call; Ext.Stats.GetCachedPassive's fields "
-               "are writable";
+        return sync_passive(object, name);
     }
     return nullptr;
 }

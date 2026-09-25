@@ -437,6 +437,7 @@ bool harvest_map(unsigned long long at, std::size_t k, Table* into) {
             || kind_of_names(keys.data(), keys.size()) != (int)k) {
             return false;
         }
+        into->MapAt = at;
         return harvest_refmap(at, kKinds[k].NameOffset, into) > 0;
     }
 
@@ -757,6 +758,7 @@ bool build() {
             harvest_refmap(refmap, kKinds[k].NameOffset, &found.Kinds[k]);
         if (added > 0) {
             at[k] = refmap;
+            found.Kinds[k].MapAt = refmap;
             logf("prototypes: %zu %s prototypes at %#llx", added,
                  kKinds[k].Name, refmap);
         }
