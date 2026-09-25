@@ -304,6 +304,54 @@ extern "C" std::size_t bg3le_resource_bank_count() {
         ->Definitions.keys().size();
 }
 
+// The bank's ResourceGuidsByMod, a HashMap<Guid, Array<Guid>>: each mod and
+// the resources it defines, handed to `each` one mod at a time. Returns the
+// number of mods, or -1 without a bank.
+extern "C" long bg3le_resource_sources(std::int32_t typeIndex,
+                                       void (*each)(void* context, void const* mod,
+                                                    void const* guids, std::uint32_t count),
+                                       void* context) {
+    const CacheLock lock(resource_cache_lock());
+    void* bank = bg3le_resource_bank(typeIndex);
+    if (bank == nullptr) return -1;
+
+    constexpr std::size_t kSources = offsetof(
+        bg3se::resource::GuidResourceBank<OffsetProbe>, ResourceGuidsByMod);
+    auto const* map = (char const*)bank + kSources;
+    void* keyBuf = nullptr;
+    void* valueBuf = nullptr;
+    std::uint32_t keyCount = 0;
+    if (!read_as(map + kKeysOffset + kArrayBuffer, &keyBuf)
+        || !read_as(map + kKeysOffset + kArraySize, &keyCount)
+        || !read_as(map + kValuesOffset + kArrayBuffer, &valueBuf)) {
+        return -1;
+    }
+    if (keyCount == 0) return 0;
+    if (keyBuf == nullptr || valueBuf == nullptr || keyCount > 4096) return -1;
+
+    struct GuidArray {
+        void* Buffer;
+        std::uint32_t Capacity;
+        std::uint32_t Size;
+    };
+    std::vector<bg3se::Guid> mods(keyCount);
+    std::vector<GuidArray> lists(keyCount);
+    if (!safe_read(keyBuf, mods.data(), keyCount * sizeof(bg3se::Guid))
+        || !safe_read(valueBuf, lists.data(), keyCount * sizeof(GuidArray))) {
+        return -1;
+    }
+    std::vector<bg3se::Guid> guids;
+    for (std::uint32_t i = 0; i < keyCount; ++i) {
+        const std::uint32_t n = lists[i].Size <= (1u << 20) ? lists[i].Size : 0;
+        guids.resize(n);
+        if (n > 0 && !safe_read(lists[i].Buffer, guids.data(), n * sizeof(bg3se::Guid))) {
+            continue;
+        }
+        each(context, &mods[i], guids.data(), n);
+    }
+    return (long)keyCount;
+}
+
 // A resource by type index and GUID, or null. resourceSize is the size of one
 // resource of that type, which the caller takes from the field metadata.
 extern "C" void* bg3le_resource_get(std::int32_t typeIndex, void const* guid,

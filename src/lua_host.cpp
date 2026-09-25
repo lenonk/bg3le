@@ -5371,6 +5371,43 @@ int l_icon_uvs(lua_State* L) {
     return push_address_or_nothing(L, bg3le_icon_uvs(luaL_checkstring(L, 1)));
 }
 
+extern "C" long bg3le_resource_sources(std::int32_t typeIndex,
+                                       void (*each)(void* context, void const* mod,
+                                                    void const* guids, std::uint32_t count),
+                                       void* context);
+extern "C" bool bg3le_meta_format_guid(void const* bytes, char* out, std::size_t size);
+
+// Ext._Internal.ResourceSources(type) -> { [modGuid] = { guid, ... } }, or nil
+int l_resource_sources(lua_State* L) {
+    const char* className = luaL_checkstring(L, 1);
+    void const* meta = bg3le_meta_class(className);
+    const char* engineClass = meta != nullptr ? bg3le_meta_engine_class(meta) : nullptr;
+    const auto typeIndex = engineClass != nullptr
+        ? ecs::index_of(ecs::Context::ImmutableData, engineClass) : std::nullopt;
+    if (!typeIndex.has_value()) return 0;
+
+    lua_newtable(L);
+    const long mods = bg3le_resource_sources(*typeIndex,
+        [](void* context, void const* mod, void const* guids, std::uint32_t count) {
+            auto* L = static_cast<lua_State*>(context);
+            char text[64];
+            if (!bg3le_meta_format_guid(mod, text, sizeof(text))) return;
+            lua_createtable(L, (int)count, 0);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                char id[64];
+                if (!bg3le_meta_format_guid((char const*)guids + i * 16, id, sizeof(id))) continue;
+                lua_pushstring(L, id);
+                lua_rawseti(L, -2, (int)i + 1);
+            }
+            lua_setfield(L, -2, text);
+        }, L);
+    if (mods < 0) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    return 1;
+}
+
 // Ext._Internal.TakeComponentEvents()
 //   -> { { handle, component short name, "create" | "destroy" }, ... }
 int l_take_component_events(lua_State* L) {
@@ -5782,6 +5819,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ComponentCallbacksProbe");
     lua_pushcfunction(g_lua, l_watch_component_events);
     lua_setfield(g_lua, -2, "WatchComponentEvents");
+    lua_pushcfunction(g_lua, l_resource_sources);
+    lua_setfield(g_lua, -2, "ResourceSources");
     lua_pushcfunction(g_lua, l_texture_atlas_map);
     lua_setfield(g_lua, -2, "TextureAtlasMap");
     lua_pushcfunction(g_lua, l_icon_atlas);
@@ -12161,11 +12200,16 @@ function Ext.StaticData.GetIconUVs(icon)
   return at and Ext._Internal.ReadObject(at, "UVValues", "", {}) or nil
 end
 
-Ext.StaticData.GetByModId = needs(
-  "Ext.StaticData.GetByModId needs the resource-to-mod mapping the engine "
-  .. "keeps per bank, which bg3le has not located")
-Ext.StaticData.GetSources = needs(
-  "Ext.StaticData.GetSources needs the resource bank's source list")
+-- Upstream's reads of a bank's ResourceGuidsByMod: each mod and the
+-- resources it defines.
+function Ext.StaticData.GetSources(resourceType)
+  return Ext._Internal.ResourceSources(tostring(resourceType))
+end
+
+function Ext.StaticData.GetByModId(resourceType, modGuid)
+  local sources = Ext._Internal.ResourceSources(tostring(resourceType))
+  return sources and sources[string.lower(tostring(modGuid))] or nil
+end
 
 -- Upstream's Ext.Definition is Ext.StaticData under another name. It was
 -- aliased further up, before Ext.StaticData existed, so it picked up the
