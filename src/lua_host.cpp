@@ -4108,6 +4108,64 @@ int l_ai_heights_at(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.AiPathCreate(client) -> address, or nil and why
+extern "C" void* bg3le_ai_path_create(bool client, char const** why);
+int l_ai_path_create(lua_State* L) {
+    char const* why = nullptr;
+    void* at = bg3le_ai_path_create(lua_toboolean(L, 1) != 0, &why);
+    if (at == nullptr) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.AiPathFree(client, address)
+extern "C" void bg3le_ai_path_free(bool client, void* at);
+int l_ai_path_free(lua_State* L) {
+    bg3le_ai_path_free(lua_toboolean(L, 1) != 0, (void*)(std::uintptr_t)luaL_checkinteger(L, 2));
+    return 0;
+}
+
+// Ext._Internal.AiPathById(client, id) -> address, or nothing
+extern "C" void* bg3le_ai_path_by_id(bool client, std::uint32_t id);
+int l_ai_path_by_id(lua_State* L) {
+    void* at = bg3le_ai_path_by_id(lua_toboolean(L, 1) != 0, (std::uint32_t)luaL_checkinteger(L, 2));
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.AiPathSearch(client, address) -> goal found, or nil and why
+extern "C" int bg3le_ai_path_search(bool client, void* at, char const** why);
+int l_ai_path_search(lua_State* L) {
+    char const* why = nullptr;
+    const int found = bg3le_ai_path_search(lua_toboolean(L, 1) != 0,
+                                           (void*)(std::uintptr_t)luaL_checkinteger(L, 2), &why);
+    if (found < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushboolean(L, found);
+    return 1;
+}
+
+// Ext._Internal.AiPathsActive(client) -> {address...}
+extern "C" std::size_t bg3le_ai_paths_active(bool client, void** out, std::size_t cap);
+int l_ai_paths_active(lua_State* L) {
+    void* paths[256];
+    const std::size_t n = bg3le_ai_paths_active(lua_toboolean(L, 1) != 0, paths, 256);
+    lua_createtable(L, (int)n, 0);
+    for (std::size_t i = 0; i < n && i < 256; ++i) {
+        lua_pushinteger(L, (lua_Integer)(std::uintptr_t)paths[i]);
+        lua_rawseti(L, -2, (int)i + 1);
+    }
+    return 1;
+}
+
 // Ext._Internal.TemplateIds() -> every template id
 int l_template_ids(lua_State* L) {
     const std::size_t count = bg3le_templates_count();
@@ -6595,6 +6653,16 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "AiTileInfo");
     lua_pushcfunction(g_lua, l_ai_heights_at);
     lua_setfield(g_lua, -2, "AiHeightsAt");
+    lua_pushcfunction(g_lua, l_ai_path_create);
+    lua_setfield(g_lua, -2, "AiPathCreate");
+    lua_pushcfunction(g_lua, l_ai_path_free);
+    lua_setfield(g_lua, -2, "AiPathFree");
+    lua_pushcfunction(g_lua, l_ai_path_by_id);
+    lua_setfield(g_lua, -2, "AiPathById");
+    lua_pushcfunction(g_lua, l_ai_paths_active);
+    lua_setfield(g_lua, -2, "AiPathsActive");
+    lua_pushcfunction(g_lua, l_ai_path_search);
+    lua_setfield(g_lua, -2, "AiPathSearch");
     lua_pushcfunction(g_lua, l_level_add_persistent_template);
     lua_setfield(g_lua, -2, "LevelAddPersistentTemplate");
     lua_pushcfunction(g_lua, l_loca_get);
@@ -9882,6 +9950,9 @@ function Ext._Internal.RunTimers()
   if Ext._Internal.DeliverComponentEvents then
     Ext._Internal.DeliverComponentEvents()
   end
+
+  -- And the pathfinding requests the engine has finished.
+  if Ext._Internal.PathfindingUpdate then Ext._Internal.PathfindingUpdate() end
 
   local now = Ext.Utils.MonotonicTime() / 1000.0
   local delta = last_tick ~= nil and (now - last_tick) or 0.0
@@ -13319,6 +13390,8 @@ end
 --
 -- Raycasts, sweeps and pathfinding all go through the level's physics
 -- scene and pathfinder.
+-- In a block of its own: the prelude's main chunk is at Lua's local limit.
+do
 -- The physics scene's queries, as upstream's: through the current level's
 -- scene, whose virtuals src/vendor/level.cpp calls as bg3se declares them.
 -- A hit is upstream's thread-local result, overwritten by the next query.
@@ -13395,11 +13468,196 @@ function Ext.Level.GetHeightsAt(x, z)
   return Ext._Internal.AiHeightsAt(Ext._Internal.IsClientState(), x, z)
 end
 
-for _, name in ipairs({"FindPath", "BeginPathfinding",
-                       "BeginPathfindingImmediate", "GetPathById",
-                       "ReleasePath", "GetActivePathfindingRequests"}) do
-  Ext.Level[name] = needs(
-    "Ext.Level." .. name .. " needs the engine's pathfinder")
+-- Paths, as upstream's PathfindingSystem and AiPath helpers. A request's
+-- path goes onto the grid's Paths list, where the engine searches it; each
+-- tick the finished ones are handed to their callbacks and released.
+local path_requests = {}
+
+-- A live view: every access reads the path again, as upstream's proxy does.
+local function path_view(at)
+  if at == nil then return nil end
+  return Ext._Internal.NewObjectProxy({
+    __index = function(_, k) return Ext._Internal.PointedObject(at, "AiPath")[k] end,
+    __newindex = function(_, k, v) Ext._Internal.PointedObject(at, "AiPath")[k] = v end,
+    __pairs = function() return pairs(Ext._Internal.PointedObject(at, "AiPath")) end,
+    __bg3leIdentity = string.format("p:%x", at),
+    __name = Ext._Internal.ViewTypeName("AiPath", ""),
+  })
+end
+
+local function path_address(path)
+  local meta = getmetatable(path)
+  local id = type(meta) == "table" and meta.__bg3leIdentity or nil
+  if type(id) ~= "string" or id:sub(1, 2) ~= "p:" then
+    error("bg3le: expected an AiPath", 3)
+  end
+  return tonumber(id:sub(3), 16)
+end
+
+local function has_label(list, label)
+  for _, l in ipairs(list or {}) do
+    if l == label then return true end
+  end
+  return false
+end
+
+-- AiPath::SetBounds, SetSourceTemplate and SetSourceEntity.
+local function path_set_bounds(path, moving, standing)
+  path.MovingBound = moving
+  path.StandingBound = standing
+  path.MovingBound2 = moving
+  path.MovingBoundTiles = math.floor(2.0 * moving + 0.5 - 0.001)
+  path.StandingBoundTiles = math.floor(2.0 * standing + 0.5 - 0.001)
+  path.MovingBoundTiles2 = math.floor(2.0 * moving + 0.5 - 0.001)
+end
+
+local function path_set_source_template(path, entity, tmpl)
+  path.StepHeight = tmpl.MovementStepUpHeight
+  path.WorldClimbingHeight = 0.0
+  if tmpl.IsWorldClimbingEnabled then
+    local canMove = entity.CanMove
+    if canMove and has_label(canMove.Flags, "CanWorldClimb") then
+      path.WorldClimbingHeight = tmpl.WorldClimbingHeight
+    end
+  end
+  local radius = tmpl.WorldClimbingRadius
+  if radius < 0 then radius = path.MovingBound end
+  path.WorldClimbingRadius = radius
+  path.TurningNodeAngle = tmpl.TurningNodeAngle
+  path.TurningNodeOffset = tmpl.TurningNodeOffset
+  path.UseStandAtDestination = tmpl.UseStandAtDestination
+  path.WorldClimbType = 1
+  path.WorldDropType = 1
+  path.CheckLockedDoors = true
+  path.CloseEnoughMin = 0.5
+  path.CloseEnoughMax = 3.5
+end
+
+local function path_set_source_entity(path, entity)
+  if type(entity) == "string" then entity = Ext.Entity.Get(entity) end
+  if entity == nil then error("bg3le: the pathfinding source is not an entity", 3) end
+  path.Source = entity
+  local transform = entity.Transform
+  local bounds = entity.Bound
+  local moving, standing
+  if bounds then
+    moving = bounds.Bound.AIBounds.Move
+    standing = bounds.Bound.AIBounds.Stand
+  end
+  if transform then
+    local t = transform.Transform.Translate
+    path.SourceOriginal = t
+    path.SourceAdjusted = t
+  end
+  if transform and standing then
+    path.Height = transform.Transform.Scale[1] * standing.Height * 0.65
+  end
+  if moving and standing then
+    path_set_bounds(path, moving.Radius, standing.Radius)
+  else
+    path_set_bounds(path, 0.5, 0.5)
+  end
+  local character = entity.ServerCharacter or entity.ClientCharacter
+  if character then
+    path_set_source_template(path, entity, character.Template)
+    path.IsPlayer = has_label(character.Flags, "IsPlayer")
+  end
+end
+
+local function path_request(callback, immediate, source, target)
+  local client = Ext._Internal.IsClientState()
+  local at, why = Ext._Internal.AiPathCreate(client)
+  if at == nil then
+    if why ~= "no level loaded" then Ext.Utils.PrintError(why) end
+    return nil
+  end
+  path_requests[#path_requests + 1] = {at = at, callback = callback, immediate = immediate}
+  local path = path_view(at)
+  path_set_source_entity(path, source)
+  local x, y, z = query_vec(target, "the target")
+  path.TargetAdjusted = {x, y, z}
+  path.TargetPosition = {x, y, z}
+  return path
+end
+
+local function path_release(req)
+  if Ext._Internal.PointedObject(req.at, "AiPath").InUse then
+    Ext._Internal.AiPathFree(Ext._Internal.IsClientState(), req.at)
+  else
+    Ext.Utils.PrintError(string.format("Trying to release path %x that is no longer in use?", req.at))
+  end
+end
+
+-- PathfindingSystem::Update, from the tick.
+function Ext._Internal.PathfindingUpdate()
+  if #path_requests == 0 then return end
+  local pending, finished = {}, {}
+  for _, req in ipairs(path_requests) do
+    local complete = Ext._Internal.PointedObject(req.at, "AiPath").SearchComplete
+    if req.immediate then
+      if not complete then
+        Ext.Utils.PrintWarning(string.format("BeginPathfindingImmediate() was called on path %x, but no pathfinding was performed", req.at))
+      end
+      path_release(req)
+    elseif complete then
+      finished[#finished + 1] = req
+      path_release(req)
+    else
+      pending[#pending + 1] = req
+    end
+  end
+  path_requests = pending
+  for _, req in ipairs(finished) do
+    local ok, err = pcall(req.callback, path_view(req.at))
+    if not ok then Ext.Utils.PrintError("Pathfinding callback failed: " .. tostring(err)) end
+  end
+end
+
+function Ext.Level.BeginPathfinding(source, target, callback)
+  return path_request(callback, false, source, target)
+end
+
+function Ext.Level.BeginPathfindingImmediate(source, target)
+  return path_request(nil, true, source, target)
+end
+
+-- A search that has not finished runs now, through the engine's own.
+function Ext.Level.FindPath(path)
+  local at = path_address(path)
+  local p = Ext._Internal.PointedObject(at, "AiPath")
+  if not p.InUse then
+    Ext.Utils.PrintError(string.format("Trying to pathfind on released path %x?", at))
+    return false
+  end
+  if not p.SearchComplete then
+    local found, why = Ext._Internal.AiPathSearch(Ext._Internal.IsClientState(), at)
+    if found == nil then error("bg3le: Ext.Level.FindPath: " .. why, 2) end
+  end
+  return Ext._Internal.PointedObject(at, "AiPath").GoalFound
+end
+
+function Ext.Level.ReleasePath(path)
+  local at = path_address(path)
+  if not Ext._Internal.PointedObject(at, "AiPath").InUse then return end
+  for i = #path_requests, 1, -1 do
+    if path_requests[i].at == at then
+      path_release(path_requests[i])
+      table.remove(path_requests, i)
+    end
+  end
+end
+
+function Ext.Level.GetPathById(id)
+  return path_view(Ext._Internal.AiPathById(Ext._Internal.IsClientState(), math.tointeger(id) or 0))
+end
+
+function Ext.Level.GetActivePathfindingRequests()
+  local out = {}
+  for i, at in ipairs(Ext._Internal.AiPathsActive(Ext._Internal.IsClientState())) do
+    out[i] = path_view(at)
+  end
+  return out
+end
 end
 
 -- Upstream's server-only four; the last two through the level manager.

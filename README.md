@@ -310,6 +310,20 @@ component's declared size with the size the engine recorded, and
   vendored layout matches this build. Under the host they find the tile it
   stands on (its top 0.01m from the character's feet, flagged as blocked by a
   character) and the host as the one entity on it
+- **`Ext.Level`'s pathfinding**: `BeginPathfinding`, `BeginPathfindingImmediate`,
+  `FindPath`, `ReleasePath`, `GetPathById` and `GetActivePathfindingRequests`,
+  as upstream's `PathfindingSystem` and `AiPath` helpers. A request takes a
+  path from the grid's pool, fills it in from the source entity the way
+  upstream's `SetSourceEntity` does, and goes onto the grid's `Paths` list,
+  where the engine searches it; each tick the finished ones are released and
+  handed to their callbacks. `FindPath` runs an unfinished search at once
+  through the engine's own (`image+0x2646b30`, checked before use). From the
+  host to a point 4m away both routes find the goal in 2 nodes, and bg3le's
+  path fields match the engine's own path for the host. A path is a live
+  view, as upstream's proxy is. Two things are left out: a pooled path whose
+  Larian `Function` members are set is not taken, since resetting it would
+  mean destroying them, and `FindPath` refuses a path with `IgnoreEntities`
+  or `MovedEntities`, which the engine marks on the grid around the search
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -595,14 +609,14 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **16 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **10 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 8 of the 16 are
-  `Ext.Level`'s pathfinding and surface actions, 3 `Ext.StaticData`'s bank
-  writes, 2 `Ext.Stats`' functor execution, and 3 `Ext.Entity`'s `Create`,
-  `Destroy` and `SetupTracing`.
+  the source, because this one was stale at 86 for a while: 3 are
+  `Ext.Entity`'s `Create`, `Destroy` and `SetupTracing`, 3 `Ext.StaticData`'s
+  bank writes, 2 `Ext.Level`'s surface actions and 2 `Ext.Stats`' functor
+  execution.
   `reference/ext-api-surface.txt` lists them with their shapes
 - **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and

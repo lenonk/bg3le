@@ -1,6 +1,6 @@
 // Ext.Level's functions that go through a level manager, as upstream's
 // Lua/Libs/Level.inl writes them: the level data, persistent level templates,
-// the physics scene's queries, and the AI grid's tiles.
+// the physics scene's queries, and the AI grid's tiles and paths.
 //
 // The level, physics and hit types are bg3se's (by Norbyte and the bg3se
 // contributors); the server's manager is found in templates.cpp.
@@ -17,6 +17,7 @@
 
 #include <cmath>
 
+#include "engine_containers.h"
 #include "../hook.h"
 #include "../log.h"
 #include "../mem.h"
@@ -408,4 +409,193 @@ extern "C" std::size_t bg3le_ai_heights_at(bool client, float x, float z, float*
                   ++n;
               });
     return n;
+}
+
+// ---- paths ----
+//
+// Upstream's AiGrid::CreatePath, GetPathId and FreePath and AiPath::Reset
+// (Ai.inl). The engine runs the search itself for a path in the grid's Paths
+// list, which is what an asynchronous request needs.
+
+namespace {
+
+// A Function whose implementation pointer is set, which Reset would have to
+// destroy through Larian's own function object; such a path is not taken.
+bool has_function(void const* fn) {
+    void* impl = nullptr;
+    return bg3le::safe_read(fn, &impl, sizeof(impl)) && impl != nullptr;
+}
+
+// AiPath::Reset, but for its two Function members: a released path has
+// them empty already, and only such a path is taken.
+void reset_path(bg3se::AiPath& p) {
+    p.SearchStarted = false;
+    p.SearchComplete = false;
+    p.GoalFound = false;
+    p.DestinationReached = false;
+    p.CanUseLadders = false;
+    p.CanUsePortals = false;
+    p.CanUseCombatPortals = false;
+    p.UseSmoothing = true;
+    p.AddBoundsToMargin = true;
+    p.AddSourceBoundsToMargin = true;
+    p.StepHeight = 0;
+    p.WorldClimbingHeight = 0;
+    p.Nodes.clear();
+    p.Checkpoints.clear();
+    p.Source = bg3se::EntityHandle{};
+    p.Target = bg3se::EntityHandle{};
+    p.IgnoreEntities.clear();
+    p.MovedEntities.clear();
+    p.PathType = 3;
+    p.CoverFlags = 0;
+    p.InteractionRange = .0f;
+    p.SearchHorizon = 32000;
+    p.WorldClimbType = 0;
+    p.WorldDropType = 0;
+    p.DangerousAuras.Auras.clear();
+    p.DangerousAuras.Avoidance = 0;
+    p.CollisionMask.Flags = 0x40000000440094;
+    p.CollisionMaskMove.Flags = 0x40000000000084;
+    p.CollisionMaskStand.Flags = 0x10;
+    p.CloseEnoughMin = .0f;
+    p.CloseEnoughMax = .0f;
+    p.CloseEnoughFloor = .0f;
+    p.CloseEnoughPreference = 0;
+    p.PreciseItemInteraction = false;
+    p.UseSplines = true;
+    p.UseTurning = true;
+    p.IsPlayer = false;
+    p.Portal = bg3se::EntityHandle{};
+    p.Climbing = false;
+    p.field_154 = 0;
+    p.ClosestFullTileIndex = -1;
+    p.ClosestCollidingCount = 0x7fffffff;
+    p.ClosestCost = 1.0e30f;
+}
+
+std::optional<bg3se::AiPathId> path_id(bg3se::AiGrid& grid, bg3se::AiPath* path) {
+    for (auto it = grid.PathMap.begin(); it != grid.PathMap.end(); ++it) {
+        if (it.Value() == path) return it.Key();
+    }
+    return {};
+}
+
+}  // namespace
+
+// Upstream's CreatePath, and the request's push onto the grid's Paths.
+extern "C" void* bg3le_ai_path_create(bool client, char const** why) {
+    auto* grid = ai_grid(client);
+    if (grid == nullptr) {
+        *why = "no level loaded";
+        return nullptr;
+    }
+    if (!bg3le_game_allocator_ready()) {
+        *why = "the engine allocator is not up";
+        return nullptr;
+    }
+    bg3se::AiPath* path = nullptr;
+    for (auto* p : grid->PathPool) {
+        if (!p->InUse && !has_function(&p->DestinationFunc) && !has_function(&p->WeightFunc)) {
+            path = p;
+            break;
+        }
+    }
+    if (path == nullptr) {
+        *why = "No free AiPath available; make sure you released paths that are no longer in use";
+        return nullptr;
+    }
+    if (!bg3le::array_append<bg3se::AiPath*>(&grid->Paths, path)) {
+        *why = "the grid's path list could not grow";
+        return nullptr;
+    }
+    const auto handle = grid->NextPathHandle++;
+    reset_path(*path);
+    path->InUse = true;
+    grid->PathMap.insert(handle, path);
+    return path;
+}
+
+// Upstream's FreePath.
+extern "C" void bg3le_ai_path_free(bool client, void* at) {
+    auto* grid = ai_grid(client);
+    auto* path = static_cast<bg3se::AiPath*>(at);
+    if (grid == nullptr || path == nullptr || !path->InUse) return;
+    auto id = path_id(*grid, path);
+    if (!id) {
+        bg3le::logf("paths: trying to free a path that has no ID");
+        return;
+    }
+    for (std::uint32_t i = 0; i < grid->Paths.size(); i++) {
+        if (grid->Paths[i] == path) {
+            grid->Paths.ordered_remove_at(i);
+            break;
+        }
+    }
+    grid->PathMap.erase(grid->PathMap.find(*id));
+    path->InUse = false;
+}
+
+// Upstream's GetPathById, or null.
+extern "C" void* bg3le_ai_path_by_id(bool client, std::uint32_t id) {
+    auto* grid = ai_grid(client);
+    return grid != nullptr ? grid->PathMap.get_or_default(id) : nullptr;
+}
+
+// The pool's paths in use, as upstream's GetActivePathfindingRequests.
+extern "C" std::size_t bg3le_ai_paths_active(bool client, void** out, std::size_t cap) {
+    auto* grid = ai_grid(client);
+    if (grid == nullptr) return 0;
+    std::size_t n = 0;
+    for (auto* p : grid->PathPool) {
+        if (p->InUse) {
+            if (n < cap) out[n] = p;
+            ++n;
+        }
+    }
+    return n;
+}
+
+// The engine's search of one path, image+0x2646b30 (grid, path): what the
+// grid's own update runs on the head of its Paths list, between marking and
+// unmarking the path's ignored and moved entities. Checked by its opening,
+// which copies TargetAdjusted into TargetPosition.
+namespace {
+constexpr std::uintptr_t kPathSearch = 0x2646b30;
+constexpr unsigned char kPathSearchHead[] = {
+    0x8b, 0x86, 0x84, 0x00, 0x00, 0x00, 0x89, 0x86, 0x50, 0x01, 0x00, 0x00,
+    0x48, 0x8b, 0x46, 0x7c, 0x48, 0x89, 0x86, 0x48, 0x01, 0x00, 0x00};
+constexpr std::size_t kPathSearchHeadAt = 0x47;
+using PathSearchProc = bool (*)(bg3se::AiGrid*, bg3se::AiPath*);
+}  // namespace
+
+// Upstream's FindPathImmediate: 1 when the goal was found, 0 when not, and
+// -1 with why when the search cannot be run here.
+extern "C" int bg3le_ai_path_search(bool client, void* at, char const** why) {
+    static int usable = -1;
+    if (usable < 0) {
+        unsigned char held[sizeof(kPathSearchHead)] = {};
+        usable = bg3le::safe_read((void const*)(bg3le::load_bias() + kPathSearch + kPathSearchHeadAt),
+                                  held, sizeof(held))
+                 && std::memcmp(held, kPathSearchHead, sizeof(held)) == 0;
+        if (!usable) bg3le::logf("paths: the engine's path search is not where this build has it");
+    }
+    auto* grid = ai_grid(client);
+    auto* path = static_cast<bg3se::AiPath*>(at);
+    if (!usable) {
+        *why = "the engine's path search is not where this build has it";
+        return -1;
+    }
+    if (grid == nullptr || path == nullptr) {
+        *why = "no level loaded";
+        return -1;
+    }
+    // The grid's update marks these on the grid around the search; that
+    // part is not called, so a path that needs it is not searched.
+    if (path->IgnoreEntities.size() != 0 || path->MovedEntities.size() != 0) {
+        *why = "a path with IgnoreEntities or MovedEntities needs the grid's entity marking";
+        return -1;
+    }
+    reinterpret_cast<PathSearchProc>(bg3le::load_bias() + kPathSearch)(grid, path);
+    return path->GoalFound ? 1 : 0;
 }
