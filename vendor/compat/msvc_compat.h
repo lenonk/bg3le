@@ -46,11 +46,13 @@ typedef wchar_t* LPWSTR;
 typedef const wchar_t* LPCWSTR;
 typedef void (*FARPROC)();
 
-// A slim-reader-writer lock is one pointer wide. This is enough to compile
-// declarations; the Linux engine uses pthread primitives, so any *layout*
-// that embeds one is suspect and must be checked before it is trusted.
+// Where the Windows engine has an SRWLOCK the Linux one has a glibc
+// pthread_rwlock_t -- a resource Bank's BankTypeId sits 56 bytes past its
+// lock -- so that is what this is, and zero-initialised it is ready, as an
+// SRWLOCK is.
+#include <pthread.h>
 extern "C" {
-typedef struct _RTL_SRWLOCK { void* Ptr; } SRWLOCK, *PSRWLOCK;
+typedef struct _RTL_SRWLOCK { pthread_rwlock_t Lock; } SRWLOCK, *PSRWLOCK;
 }
 
 typedef void* HANDLE;

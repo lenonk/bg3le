@@ -405,7 +405,8 @@ or sit ahead of the vendored tree on the include path.
   `VirtualProtect` over `mprotect`, `QueryPerformanceCounter` over
   `CLOCK_MONOTONIC`, `GetCommandLineW` over `/proc/self/cmdline`,
   `GetProcAddress`/`GetModuleHandleW` over `dlsym`/`dlopen`, critical sections
-  over recursive `pthread_mutex`, and the byte-swap and Interlocked intrinsics
+  over recursive `pthread_mutex`, `SRWLOCK` as the engine's own
+  `pthread_rwlock_t`, and the byte-swap and Interlocked intrinsics
   over the compiler builtins. Basic Win32 typedefs are declared first, since
   the rest of the header uses them
 - `Shlwapi.h`, `shlwapi.h`, `combaseapi.h`, `WS2tcpip.h` — `PathFileExistsW`,

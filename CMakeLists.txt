@@ -313,6 +313,7 @@ add_library(bg3le SHARED
     src/noesis_ui.cpp
     src/noesis_forward.cpp
     src/osi.cpp
+    src/resources.cpp
     src/debug_server.cpp
     src/hook.cpp
     src/console.cpp

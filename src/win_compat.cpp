@@ -87,11 +87,10 @@ extern "C" long DetourUpdateThread(void*) { return 50; }
 
 // ---- slim reader/writer locks ----
 //
-// Declared in vendor/compat/msvc_compat.h. These guard state belonging to
-// bg3se rather than to the engine, so a pthread rwlock is fine -- but a
-// SRWLOCK is only one pointer wide, so the real lock is allocated on first
-// use and published with a compare-exchange. Upstream relies on a
-// zero-initialised SRWLOCK being usable, as Win32 does.
+// Declared in vendor/compat/msvc_compat.h, where SRWLOCK is the engine's own
+// pthread_rwlock_t, so these work on the engine's locks as well as bg3se's.
+// A zero-filled one is PTHREAD_RWLOCK_INITIALIZER, which is what upstream
+// relies on of a Win32 SRWLOCK.
 //
 // extern "C" means the declared parameter type does not affect linkage, so
 // taking void* here matches the PSRWLOCK declarations.
@@ -99,51 +98,20 @@ extern "C" long DetourUpdateThread(void*) { return 50; }
 #include <pthread.h>
 
 namespace {
-
-struct SrwLock { void* Ptr; };
-
-pthread_rwlock_t* srw_resolve(void* opaque) {
-    auto* slot = static_cast<SrwLock*>(opaque);
-    void* current = __atomic_load_n(&slot->Ptr, __ATOMIC_ACQUIRE);
-    if (current != nullptr) return static_cast<pthread_rwlock_t*>(current);
-
-    auto* fresh = new pthread_rwlock_t;
-    ::pthread_rwlock_init(fresh, nullptr);
-    void* expected = nullptr;
-    if (__atomic_compare_exchange_n(&slot->Ptr, &expected, static_cast<void*>(fresh),
-                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        return fresh;
-    }
-    // Lost the race; another thread published one first.
-    ::pthread_rwlock_destroy(fresh);
-    delete fresh;
-    return static_cast<pthread_rwlock_t*>(expected);
-}
-
+pthread_rwlock_t* srw(void* lock) { return static_cast<pthread_rwlock_t*>(lock); }
 }  // namespace
 
 extern "C" void InitializeSRWLock(void* lock) {
-    static_cast<SrwLock*>(lock)->Ptr = nullptr;
+    ::pthread_rwlock_init(srw(lock), nullptr);
 }
 
-extern "C" void AcquireSRWLockExclusive(void* lock) {
-    ::pthread_rwlock_wrlock(srw_resolve(lock));
-}
-
-extern "C" void ReleaseSRWLockExclusive(void* lock) {
-    ::pthread_rwlock_unlock(srw_resolve(lock));
-}
-
-extern "C" void AcquireSRWLockShared(void* lock) {
-    ::pthread_rwlock_rdlock(srw_resolve(lock));
-}
-
-extern "C" void ReleaseSRWLockShared(void* lock) {
-    ::pthread_rwlock_unlock(srw_resolve(lock));
-}
+extern "C" void AcquireSRWLockExclusive(void* lock) { ::pthread_rwlock_wrlock(srw(lock)); }
+extern "C" void ReleaseSRWLockExclusive(void* lock) { ::pthread_rwlock_unlock(srw(lock)); }
+extern "C" void AcquireSRWLockShared(void* lock) { ::pthread_rwlock_rdlock(srw(lock)); }
+extern "C" void ReleaseSRWLockShared(void* lock) { ::pthread_rwlock_unlock(srw(lock)); }
 
 extern "C" int TryAcquireSRWLockExclusive(void* lock) {
-    return ::pthread_rwlock_trywrlock(srw_resolve(lock)) == 0;
+    return ::pthread_rwlock_trywrlock(srw(lock)) == 0;
 }
 
 // ---- guarded regions ----

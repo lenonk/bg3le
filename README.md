@@ -364,6 +364,17 @@ component's declared size with the size the engine recorded, and
   Fields come from bg3se's own generated metadata rather than from accessors
   written per component, so every component it describes is reachable by name;
   see [What is left](#what-is-left) for the kinds that do not convert yet
+- `Ext.Resource.Get`/`GetAll` against the engine's `ls::ResourceManager`,
+  the other resource system — visuals, textures, materials, effects, sounds
+  and dialogs, 34 banks keyed by `ResourceBankType` — read from the current
+  bank as upstream's `GetResource` reads it. The manager's global is
+  recorded for this build and checked before use, and searched for by
+  fingerprint when it disagrees: a ResourceBank's 34 banks each hold their
+  own index as `BankTypeId`. The Visual bank's 60,559 ids list in a third
+  of a second, and a resource reads through bg3se's metadata like any other
+  object. Where Windows has an `SRWLOCK` the Linux engine has a glibc
+  `pthread_rwlock_t`, 48 bytes wider, which is what put every field after
+  one in the wrong place; bg3le's `SRWLOCK` is that type now
 - `Ext.StaticData.Get`/`GetAll` against the engine's GUID resource manager.
   It has no symbol, so it is found by fingerprint: the manager is one
   `HashMap<StaticDataTypeIndex, GuidResourceBankBase*>`, and a table whose
@@ -464,11 +475,11 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **59 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **57 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 59 are
+  the source, because this one was stale at 86 for a while: 24 of the 57 are
   `Ext.Level`'s physics and pathfinding, 8 each `Ext.Stats`' creation and
   functor execution and `Ext.StaticData`'s bank writes and atlas, 6
   `Ext.Template`'s local and cache managers, and the rest are singles —
@@ -530,8 +541,8 @@ component's declared size with the size the engine recorded, and
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
-- **`Ext.Resource` and `GetCachedBoost`**, each waiting on an engine
-  structure that has no anchor yet.
+- **`GetCachedBoost`**, waiting on an engine structure that has no anchor
+  yet.
 - **Launching.** See [Running](#running)
 
 ## Building

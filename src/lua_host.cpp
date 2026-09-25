@@ -5288,6 +5288,44 @@ int l_system_probe(lua_State* L) {
     return 1;
 }
 
+extern "C" void* bg3le_resource_bank_get(std::uint32_t type, std::uint32_t key);
+extern "C" long bg3le_resource_bank_keys(std::uint32_t type, std::uint32_t* out,
+                                         std::size_t max);
+extern "C" bool bg3le_fixed_string_index_of(char const* wanted, std::uint32_t* out);
+extern "C" char const* bg3le_fixed_string(std::uint32_t index, std::uint32_t* length);
+
+// Ext._Internal.ResourceBankGet(type, id) -> address, or nil
+int l_resource_bank_get(lua_State* L) {
+    const auto type = (std::uint32_t)luaL_checkinteger(L, 1);
+    std::uint32_t key = 0;
+    void* found = nullptr;
+    if (bg3le_fixed_string_index_of(luaL_checkstring(L, 2), &key)) {
+        found = bg3le_resource_bank_get(type, key);
+    }
+    if (found == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)found);
+    return 1;
+}
+
+// Ext._Internal.ResourceBankKeys(type) -> { id, ... }, or nil
+int l_resource_bank_keys(lua_State* L) {
+    const auto type = (std::uint32_t)luaL_checkinteger(L, 1);
+    const long count = bg3le_resource_bank_keys(type, nullptr, 0);
+    if (count < 0) return 0;
+    std::vector<std::uint32_t> keys((std::size_t)count);
+    bg3le_resource_bank_keys(type, keys.data(), keys.size());
+    lua_createtable(L, (int)keys.size(), 0);
+    int at = 0;
+    for (std::uint32_t key : keys) {
+        std::uint32_t length = 0;
+        char const* text = bg3le_fixed_string(key, &length);
+        if (text == nullptr) continue;
+        lua_pushlstring(L, text, length);
+        lua_rawseti(L, -2, ++at);
+    }
+    return 1;
+}
+
 // Ext._Internal.TakeComponentEvents()
 //   -> { { handle, component short name, "create" | "destroy" }, ... }
 int l_take_component_events(lua_State* L) {
@@ -5699,6 +5737,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ComponentCallbacksProbe");
     lua_pushcfunction(g_lua, l_watch_component_events);
     lua_setfield(g_lua, -2, "WatchComponentEvents");
+    lua_pushcfunction(g_lua, l_resource_bank_get);
+    lua_setfield(g_lua, -2, "ResourceBankGet");
+    lua_pushcfunction(g_lua, l_resource_bank_keys);
+    lua_setfield(g_lua, -2, "ResourceBankKeys");
     lua_pushcfunction(g_lua, l_hook_system);
     lua_setfield(g_lua, -2, "HookSystem");
     lua_pushcfunction(g_lua, l_system_probe);
@@ -12069,12 +12111,37 @@ Ext.Definition = Ext.StaticData
 -- ---- Ext.Resource ----
 --
 -- The other resource system: banks keyed by ResourceBankType, holding
--- visuals, animations and effects rather than GUID resources.
-for _, name in ipairs({"Get", "GetAll"}) do
-  Ext.Resource[name] = needs(
-    "Ext.Resource." .. name .. " needs the engine's ResourceManager, "
-    .. "which is a different manager from the GUID resource banks "
-    .. "Ext.StaticData reads and has not been located")
+-- visuals, animations and effects rather than GUID resources. Read from the
+-- engine's current ResourceBank, as upstream's GetResource; src/resources.cpp.
+local function resource_bank_type(bankType)
+  local label = type(bankType) == "number" and Ext.Enums.ResourceBankType[bankType]
+                or bankType
+  if type(label) ~= "string" then return nil end
+  for i = 0, 33 do
+    if Ext.Enums.ResourceBankType[i] == label then return i, label end
+  end
+  return nil
+end
+
+function Ext.Resource.Get(id, bankType)
+  local index, label = resource_bank_type(bankType)
+  if index == nil then
+    error("Ext.Resource.Get: unknown ResourceBankType " .. tostring(bankType), 2)
+  end
+  if type(id) ~= "string" then return nil end
+  local addr = Ext._Internal.ResourceBankGet(index, id)
+  if addr == nil then return nil end
+  return Ext._Internal.ReadObject(addr, "resource::" .. label .. "Resource", "", {})
+end
+
+function Ext.Resource.GetAll(bankType)
+  local index = resource_bank_type(bankType)
+  if index == nil then
+    error("Ext.Resource.GetAll: unknown ResourceBankType " .. tostring(bankType), 2)
+  end
+  local ids = Ext._Internal.ResourceBankKeys(index)
+  if ids == nil then error("Resource manager not available", 2) end
+  return ids
 end
 
 -- ---- Ext.Loca ----
