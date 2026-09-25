@@ -2205,6 +2205,78 @@ int l_set_field(lua_State* L) {
     return 1;
 }
 
+// Map edits: the key at `index` written as the map's key type, then added or
+// removed. Shared by MapEdit (a component) and ObjectMapEdit (an object).
+extern "C" bool bg3le_meta_map_key_info(void const* handle, char const* path,
+                                        std::uint8_t* kind, std::uint16_t* size,
+                                        char const** enumName, std::uint16_t* enumLength);
+extern "C" bool bg3le_meta_map_edit(void const* handle, char const* path, void* component,
+                                    void const* key, bool insert);
+extern "C" bool bg3le_meta_enum_label_value(char const* enumName, char const* label,
+                                           std::uint64_t* value);
+extern "C" void const* bg3le_meta_class(char const* className);
+int map_edit(lua_State* L, void const* meta, void* base, char const* path, int keyIndex,
+             bool insert) {
+    std::uint8_t kind = 0;
+    std::uint16_t size = 0;
+    char const* enumName = nullptr;
+    std::uint16_t enumLength = 0;
+    if (!bg3le_meta_map_key_info(meta, path, &kind, &size, &enumName, &enumLength)
+        || size > 32) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s is not a map bg3le can edit", path);
+        return 2;
+    }
+    alignas(16) unsigned char key[32] = {};
+    bool written = false;
+    if (enumName != nullptr && lua_type(L, keyIndex) == LUA_TSTRING) {
+        std::uint64_t value = 0;
+        if (bg3le_meta_enum_label_value(std::string(enumName, enumLength).c_str(),
+                                        lua_tostring(L, keyIndex), &value)) {
+            std::memcpy(key, &value, size);
+            written = true;
+        }
+    }
+    if (!written && !write_field(L, keyIndex, key, (FieldKind)kind, (FieldKind)0, 0)) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "the key is not a %s", field_kind_name((FieldKind)kind));
+        return 2;
+    }
+    if (!bg3le_meta_map_edit(meta, path, base, key, insert)) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s could not %s the key", path, insert ? "add" : "remove");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// Ext._Internal.MapEdit(handle, component, path, key, insert) -> true, or nil and why
+int l_map_edit(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    const char* name = luaL_checkstring(L, 2);
+    void const* meta = nullptr;
+    void* component = component_pointer(handle, name, &meta);
+    if (meta == nullptr || component == nullptr) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s is not available on this entity", name);
+        return 2;
+    }
+    return map_edit(L, meta, component, luaL_checkstring(L, 3), 4, lua_toboolean(L, 5) != 0);
+}
+
+// Ext._Internal.ObjectMapEdit(address, class, path, key, insert) -> true, or nil and why
+int l_object_map_edit(lua_State* L) {
+    auto* base = (void*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    void const* meta = bg3le_meta_class(luaL_checkstring(L, 2));
+    if (meta == nullptr || base == nullptr) {
+        lua_pushnil(L);
+        lua_pushstring(L, "no field metadata for this class");
+        return 2;
+    }
+    return map_edit(L, meta, base, luaL_checkstring(L, 3), 4, lua_toboolean(L, 5) != 0);
+}
+
 // Ext._Internal.FieldInfo(component, path) -> kind, elemKind, elemCount
 //
 // Type information only, so it needs no entity. A dynamic array's length is
@@ -7289,6 +7361,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "TypeInfoEach");
     lua_pushcfunction(g_lua, l_type_info_names);
     lua_setfield(g_lua, -2, "TypeInfoNames");
+    lua_pushcfunction(g_lua, l_map_edit);
+    lua_setfield(g_lua, -2, "MapEdit");
+    lua_pushcfunction(g_lua, l_object_map_edit);
+    lua_setfield(g_lua, -2, "ObjectMapEdit");
     lua_pushcfunction(g_lua, l_path_override_add);
     lua_setfield(g_lua, -2, "PathOverrideAdd");
     lua_pushcfunction(g_lua, l_path_override_get);
@@ -11025,11 +11101,21 @@ make_map = function(handle, comp, path)
       if i == nil then return nil end
       return value_at(i)
     end,
+    -- As upstream's map proxy: a new key is added, and nil removes one.
     __newindex = function(_, key, value)
       local i = slot_of(key)
+      if value == nil then
+        if i ~= nil then
+          local ok, err = Ext._Internal.MapEdit(handle, comp, path, key, false)
+          if not ok then error("bg3le: " .. tostring(err), 0) end
+        end
+        return
+      end
       if i == nil then
-        error("bg3le: " .. comp .. "." .. path .. " has no key "
-              .. tostring(key) .. "; adding one is not supported", 0)
+        local ok, err = Ext._Internal.MapEdit(handle, comp, path, key, true)
+        if not ok then error("bg3le: " .. tostring(err), 0) end
+        i = slot_of(key)
+        if i == nil then error("bg3le: " .. comp .. "." .. path .. " did not take the key", 0) end
       end
       local ok, err = Ext._Internal.SetField(
         handle, comp, path .. "[" .. i .. "]", value)
@@ -12577,29 +12663,46 @@ local function read_object_path(addr, class, path, kind)
   -- Keyed by the map's own keys; an unreadable key gets make_map's
   -- placeholder, with its slot so two of them cannot collide.
   if kind == "map" then
-    local count = Ext._Internal.ObjectArrayInfo(addr, class, path)
-    if count == nil then return "<unreadable>" end
+    if Ext._Internal.ObjectArrayInfo(addr, class, path) == nil then return "<unreadable>" end
     local items, slots = {}, {}
-    for i = 0, count - 1 do
-      local k, keyKind = Ext._Internal.ObjectMapKey(addr, class, path, i)
-      if keyKind == "entity" then k = Ext._Internal.EntityValue(k) end
-      if k == nil then
-        k = "<unreadable key " .. i .. ">"
-      elseif type(k) == "string" and k:sub(1, 1) == "<" and k:sub(-1) == ">" then
-        k = k:sub(1, -2) .. " at slot " .. i .. ">"
+    -- Refilled in place after a key is added or removed, so the snapshot
+    -- container keeps the same table.
+    local function scan()
+      for k in pairs(items) do items[k] = nil end
+      for k in pairs(slots) do slots[k] = nil end
+      for i = 0, (Ext._Internal.ObjectArrayInfo(addr, class, path) or 0) - 1 do
+        local k, keyKind = Ext._Internal.ObjectMapKey(addr, class, path, i)
+        if keyKind == "entity" then k = Ext._Internal.EntityValue(k) end
+        if k == nil then
+          k = "<unreadable key " .. i .. ">"
+        elseif type(k) == "string" and k:sub(1, 1) == "<" and k:sub(-1) == ">" then
+          k = k:sub(1, -2) .. " at slot " .. i .. ">"
+        end
+        local element = path .. "[" .. i .. "]"
+        items[k] = read_object_path(addr, class, element,
+                                    Ext._Internal.ObjectFieldInfo(class, element))
+        slots[k] = i
       end
-      local element = path .. "[" .. i .. "]"
-      items[k] = read_object_path(addr, class, element,
-                                  Ext._Internal.ObjectFieldInfo(class, element))
-      slots[k] = i
     end
-    -- As a component's map: an existing key's value writes through, and a
-    -- new key is refused rather than kept in the copy.
+    scan()
+    -- As a component's map, and upstream's map proxy: an existing key's value
+    -- writes through, a new key is added, and nil removes one.
     local function write(k, v)
       local i = slots[k]
+      if v == nil then
+        if i ~= nil then
+          local ok, err = Ext._Internal.ObjectMapEdit(addr, class, path, k, false)
+          if not ok then error("bg3le: " .. tostring(err), 0) end
+          scan()
+        end
+        return
+      end
       if i == nil then
-        error("bg3le: " .. class .. "." .. path .. " has no key "
-              .. tostring(k) .. "; adding one is not supported", 0)
+        local ok, err = Ext._Internal.ObjectMapEdit(addr, class, path, k, true)
+        if not ok then error("bg3le: " .. tostring(err), 0) end
+        scan()
+        i = slots[k]
+        if i == nil then error("bg3le: " .. class .. "." .. path .. " did not take the key", 0) end
       end
       local element = path .. "[" .. i .. "]"
       local ok, err = Ext._Internal.ObjectSetField(addr, class, element, v)

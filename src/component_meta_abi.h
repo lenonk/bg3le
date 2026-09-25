@@ -193,6 +193,10 @@ struct FieldDesc {
     // Text only: the text, and whether there is any (false for a null C
     // string or an empty buffer, which read as nil). Last, as above.
     bool (*ReadText)(void const* field, std::string* out);
+    // Map only: adds a key with a default value, or removes one (leaking its
+    // value rather than destroying it). Null where bg3le cannot. Last, as above.
+    bool (*MapInsert)(void* container, void const* key);
+    bool (*MapRemove)(void* container, void const* key);
 };
 
 }  // namespace bg3le

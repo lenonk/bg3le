@@ -568,7 +568,10 @@ component's declared size with the size the engine recorded, and
   already names is that manager rather than a coincidence. Resources are
   writable, which is what a mod that edits spell lists needs: a resource's
   fields, array elements and map values write through (an array also takes
-  upstream's `arr[#arr + 1] = v` and `arr[i] = nil`), and a hash set behaves
+  upstream's `arr[#arr + 1] = v` and `arr[i] = nil`; a map, as upstream's map
+  proxy, adds a key it lacks and removes one assigned `nil`, rebuilding a
+  `HashMap` into fresh buffers after checking the engine's buckets find its own
+  keys, and linking a `LegacyMap` node in), and a hash set behaves
   as upstream's set proxy — `list.Spells["Target_Light"]` is whether it holds
   that spell, assigning `true` or `nil` adds or removes it, `pairs` and
   `Ext.Types.GetHashSetValueAt` walk it — or is replaced whole by

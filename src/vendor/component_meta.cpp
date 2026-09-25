@@ -899,6 +899,128 @@ void* legacy_map_key_thunk(void const* container, std::size_t index) {
     return node != nullptr ? (char*)node + offsetof(typename M::Node, Key) : nullptr;
 }
 
+// A HashMap's contents rebuilt into fresh buffers with one key added or
+// taken out: bg3se's HashSet algorithm, our stores, the old buffers left
+// alone. The layout is the set's (checked in set_assign_thunk) plus the
+// values at +0x30, and the engine's table must reproduce under hash_of.
+template <class M>
+bool map_rebuild(void* container, void const* keyBytes, bool insert) {
+    using K = typename MapTraits<M>::Key;
+    using V = typename MapTraits<M>::Value;
+    if constexpr (!std::is_default_constructible_v<V> || sizeof(M) != 0x40) {
+        return false;
+    } else {
+        if (!bg3le_game_allocator_ready()) return false;
+        auto* base = static_cast<char*>(container);
+        struct Raw {
+            std::int32_t* Hash; std::uint32_t Buckets; std::uint32_t Pad;
+            std::int32_t* Next; std::uint32_t NextCap; std::uint32_t NextSize;
+            unsigned char* Keys; std::uint32_t KeysCap; std::uint32_t KeysSize;
+            unsigned char* Values; std::uint32_t ValuesCap; std::uint32_t ValuesSize;
+        } m{};
+        static_assert(sizeof(Raw) == 0x40);
+        if (!safe_read(base, &m, sizeof(m))) return false;
+        const std::uint32_t n = m.KeysSize;
+        if (n > (1u << 24) || m.NextSize != n || (m.ValuesSize != 0 && m.ValuesSize != n)
+            || (n > 0 && m.Buckets == 0)) {
+            return false;
+        }
+
+        alignas(K) unsigned char keyRaw[sizeof(K)];
+        std::memcpy(keyRaw, keyBytes, sizeof(K));
+        K const& key = *reinterpret_cast<K const*>(keyRaw);
+        std::uint64_t keyHash = 0;
+        if (!hash_of<K>(key, &keyHash)) return false;
+
+        std::vector<std::uint64_t> hashes(n);
+        std::int32_t found = -1;
+        for (std::uint32_t i = 0; i < n; ++i) {
+            K const& k = *reinterpret_cast<K const*>(m.Keys + (std::size_t)i * sizeof(K));
+            if (!hash_of<K>(k, &hashes[i])) return false;
+            // Every key reachable from its bucket, or the table is not ours.
+            bool reached = false;
+            std::int32_t at = m.Hash[(std::uint32_t)(hashes[i] % m.Buckets)];
+            for (std::uint32_t step = 0; at >= 0 && step <= n; ++step) {
+                if ((std::uint32_t)at == i) { reached = true; break; }
+                if ((std::uint32_t)at >= n) return false;
+                at = m.Next[at];
+            }
+            if (!reached) return false;
+            if (k == key) found = (std::int32_t)i;
+        }
+        if (insert ? found >= 0 : found < 0) return insert;
+
+        // bg3se's removeAt moves the last entry into the hole.
+        std::vector<std::uint32_t> order;
+        for (std::uint32_t i = 0; i < n; ++i) order.push_back(i);
+        if (!insert) {
+            order[(std::uint32_t)found] = n - 1;
+            order.pop_back();
+        }
+        const auto total = (std::uint32_t)(order.size() + (insert ? 1 : 0));
+        const std::uint32_t slots = total > 0 ? total : 1;
+        const std::uint32_t buckets = GetNearestSmallMultiHashMapPrime(total + 2);
+        auto* keysBuf = (unsigned char*)GameAllocRaw(sizeof(K) * slots);
+        auto* valuesBuf = (unsigned char*)GameAllocRaw(sizeof(V) * slots);
+        auto* nextBuf = (std::int32_t*)GameAllocRaw(sizeof(std::int32_t) * slots);
+        auto* hashBuf = (std::int32_t*)GameAllocRaw(sizeof(std::int32_t) * buckets);
+        if (!keysBuf || !valuesBuf || !nextBuf || !hashBuf) return false;
+
+        std::vector<std::uint64_t> newHashes;
+        for (std::uint32_t j = 0; j < order.size(); ++j) {
+            std::memcpy(keysBuf + (std::size_t)j * sizeof(K), m.Keys + (std::size_t)order[j] * sizeof(K), sizeof(K));
+            std::memcpy(valuesBuf + (std::size_t)j * sizeof(V), m.Values + (std::size_t)order[j] * sizeof(V), sizeof(V));
+            newHashes.push_back(hashes[order[j]]);
+        }
+        if (insert) {
+            std::memcpy(keysBuf + (std::size_t)(total - 1) * sizeof(K), keyRaw, sizeof(K));
+            new (valuesBuf + (std::size_t)(total - 1) * sizeof(V)) V();
+            newHashes.push_back(keyHash);
+        }
+        for (std::uint32_t b = 0; b < buckets; ++b) hashBuf[b] = -1;
+        for (std::uint32_t i = 0; i < total; ++i) {
+            const auto bucket = (std::uint32_t)(newHashes[i] % buckets);
+            std::int32_t prev = hashBuf[bucket];
+            if (prev < 0) prev = -2 - (std::int32_t)bucket;
+            nextBuf[i] = prev;
+            hashBuf[bucket] = (std::int32_t)i;
+        }
+
+        // Empty first, then filled, as set_assign_thunk does.
+        const std::uint32_t zero = 0;
+        std::memcpy(base + 0x2c, &zero, 4);
+        Raw grown{hashBuf, buckets, m.Pad, nextBuf, slots, total, keysBuf, slots, total,
+                  valuesBuf, slots, m.ValuesSize == 0 ? 0u : total};
+        std::memcpy(base, &grown, sizeof(grown));
+        return true;
+    }
+}
+
+template <class M>
+bool map_insert_thunk(void* container, void const* key) {
+    return map_rebuild<M>(container, key, true);
+}
+
+template <class M>
+bool map_remove_thunk(void* container, void const* key) {
+    return map_rebuild<M>(container, key, false);
+}
+
+// A LegacyMap only links a new node in, so bg3se's own get_or_insert will do.
+template <class M>
+bool legacy_map_insert_thunk(void* container, void const* keyBytes) {
+    using K = typename LegacyMapTraits<M>::Key;
+    using V = typename LegacyMapTraits<M>::Value;
+    if constexpr (!std::is_default_constructible_v<V>) {
+        return false;
+    } else {
+        if (!bg3le_game_allocator_ready()) return false;
+        alignas(K) unsigned char keyRaw[sizeof(K)];
+        std::memcpy(keyRaw, keyBytes, sizeof(K));
+        return static_cast<M*>(container)->get_or_insert(*reinterpret_cast<K const*>(keyRaw)) != nullptr;
+    }
+}
+
 template <class M>
 std::size_t map_count_thunk(void const* container) {
     return (std::size_t)static_cast<M const*>(container)->size();
@@ -1244,6 +1366,8 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         f.Count = &map_count_thunk<T>;
         f.Data = &map_values_thunk<T>;
         f.KeyData = &map_keys_thunk<T>;
+        f.MapInsert = &map_insert_thunk<T>;
+        f.MapRemove = &map_remove_thunk<T>;
         f.KeyKind = scalar_kind_of<K>();
         f.KeySize = (std::uint16_t)sizeof(K);
         if constexpr (std::is_enum_v<K>) {
@@ -1280,6 +1404,7 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         f.Count = &legacy_map_count_thunk<T>;
         f.ElemAt = &legacy_map_value_thunk<T>;
         f.KeyAt = &legacy_map_key_thunk<T>;
+        f.MapInsert = &legacy_map_insert_thunk<T>;
         f.KeyKind = scalar_kind_of<K>();
         f.KeySize = (std::uint16_t)sizeof(K);
         if constexpr (std::is_enum_v<K>) {
@@ -2551,6 +2676,30 @@ extern "C" bool bg3le_meta_map_key(void const* handle, char const* path,
     *kind = (std::uint8_t)r.Field.KeyKind;
     *size = r.Field.KeySize;
     return true;
+}
+
+// A map field's key: its kind, size and, for an enum, the enum's type name.
+extern "C" bool bg3le_meta_map_key_info(void const* handle, char const* path,
+                                        std::uint8_t* kind, std::uint16_t* size,
+                                        char const** enumName, std::uint16_t* enumLength) {
+    if (handle == nullptr || path == nullptr) return false;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path, nullptr);
+    if (!r.Ok || r.Field.Kind != FieldKind::Map || r.Field.KeySize == 0) return false;
+    *kind = (std::uint8_t)r.Field.KeyKind;
+    *size = r.Field.KeySize;
+    *enumName = r.Field.KeyTypeName;
+    *enumLength = r.Field.KeyTypeNameLength;
+    return true;
+}
+
+// Adds (insert) or removes a key of the map at path; false where bg3le cannot.
+extern "C" bool bg3le_meta_map_edit(void const* handle, char const* path, void* component,
+                                    void const* key, bool insert) {
+    if (handle == nullptr || path == nullptr || component == nullptr || key == nullptr) return false;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path, component);
+    if (!r.Ok || r.Address == nullptr || r.Field.Kind != FieldKind::Map) return false;
+    auto op = insert ? r.Field.MapInsert : r.Field.MapRemove;
+    return op != nullptr && op(r.Address, key);
 }
 
 // Whether the field at path is a hash set: the one container with Assign.
