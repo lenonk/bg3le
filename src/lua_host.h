@@ -47,6 +47,10 @@ void lua_eval(const char* code, std::string* result, std::string* error);
 // game leaves LoadModule, before the main menu is built.
 void lua_load_client_scripts();
 
+// One client frame, on the client's thread: GameStateChanged when the state
+// moved (from/to non-null), then timers and Tick.
+void lua_client_tick(char const* from, char const* to);
+
 // Hands the PersistentVars of a save just read to the mods, if they are up;
 // otherwise LoadMods does it after the bootstraps.
 void lua_restore_persistent_vars();

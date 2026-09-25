@@ -347,6 +347,18 @@ overlay starts, which is after the engine heap is up and never when running
 headless. Until then `xpcall(f, debug.traceback)` around any error killed
 the game.
 
+**`Extender/Client/IMGUI/IMGUI.cpp` — `ImageReference::BindIcon` returns
+false while `ls__gTextureAtlasMap` is unset.** Upstream dereferences it
+unconditionally; bg3le has not located the texture atlas map, so an
+`AddImageButton` with an icon crashed the game. It now fails the way an
+unknown icon does, and the button is drawn without its image.
+
+**`Extender/Client/IMGUI/IMGUI.cpp` — `IMGUITextureLoader::IncTextureRef`
+checks the resource bank.** `GetCurrentResourceBank()` returns null when the
+resource manager is not located, as it is not yet in bg3le, and upstream
+called through it regardless. A texture then fails to load instead of
+crashing the game.
+
 ## vendor/compat — bg3le's own code
 
 Shims that let the upstream sources compile unmodified. They are force-included

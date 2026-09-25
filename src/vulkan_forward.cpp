@@ -23,9 +23,8 @@
 // any hook is registered, and DetourAttachEx records and trampolines against
 // the real one.
 //
-// Off unless BG3LE_IMGUI=1. vkQueuePresentKHR runs every frame and the
-// overlay does real Vulkan work inside it, so the default is to leave the
-// engine's rendering exactly as it was.
+// On, as upstream's is; BG3LE_IMGUI=0 turns it off. vkQueuePresentKHR runs
+// every frame and the overlay does real Vulkan work inside it.
 //
 // The hooked functions are bg3se's, by Norbyte and the bg3se contributors
 // (https://github.com/Norbyte/bg3se); the forwarding is ours.
@@ -47,7 +46,7 @@ void vulkan_register_forwarders();
 bool imgui_overlay_wanted() {
     static const bool on = [] {
         const char* opt = std::getenv("BG3LE_IMGUI");
-        return opt != nullptr && opt[0] == '1';
+        return opt == nullptr || opt[0] != '0';
     }();
     return on;
 }

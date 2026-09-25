@@ -70,6 +70,7 @@ extern "C" bool bg3le_stats_attr_at(void const* object, std::size_t index,
 extern "C" bool bg3le_stats_attr_set(void const* object, std::size_t index,
                                      int raw);
 extern "C" bool bg3le_install_game_allocator(void* alloc, void* free);
+extern "C" void bg3le_corelib_strings_install();
 
 // Points bg3se's GameAllocRaw/GameFree at the engine's own heap, so any bg3se
 // container we grow allocates the way the engine does. Without this the two
@@ -476,6 +477,7 @@ void ensure_symbols() {
 
         // The engine names every ECS type index, so the whole registry comes
         // straight out of the symbol table.
+        bg3le_corelib_strings_install();
         lua_set_symbols(&g_symbols);
         const std::size_t types = ecs::load(g_symbols);
         statusf("ECS registry: %zu type indices (%zu components)", types,
@@ -1343,7 +1345,7 @@ __attribute__((constructor)) static void bg3le_init() {
     }
 
     // Before the game creates its Vulkan instance, which is what the
-    // overlay's first hook is on. Does nothing unless BG3LE_IMGUI=1.
+    // overlay's first hook is on. Off with BG3LE_IMGUI=0.
     bg3le::imgui_overlay_start();
 
     // Symbol loading is deferred to the first Osiris callback: allocating

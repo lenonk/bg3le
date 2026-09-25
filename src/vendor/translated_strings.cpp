@@ -16,6 +16,8 @@
 
 #include <stdafx.h>
 
+#include <GameDefinitions/GlobalFixedStrings.h>
+
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -33,6 +35,8 @@
 extern "C" bool bg3le_game_allocator_ready();
 
 extern "C" bool bg3le_fixed_string_create(char const* text, std::uint32_t* out);
+extern "C" char const* bg3le_fixed_string(std::uint32_t index,
+                                          std::uint32_t* length);
 
 namespace bg3le {
 char const* client_state_name();
@@ -286,6 +290,40 @@ extern "C" bool bg3le_fixed_string_create(char const* text, std::uint32_t* out) 
 }
 
 extern "C" bool bg3le_repository_ready() { return repository() != nullptr; }
+
+namespace {
+
+// The vendored FixedString's two platform hooks, which upstream points at the
+// engine: bg3le's string-table reader and the engine's CreateFromString.
+bg3se::LSStringView* corelib_get_string(bg3se::FixedStringBase const* fs,
+                                        bg3se::LSStringView& out) {
+    std::uint32_t length = 0;
+    char const* text = bg3le_fixed_string(fs->Index, &length);
+    out = text != nullptr ? bg3se::LSStringView(text, length)
+                          : bg3se::LSStringView();
+    return &out;
+}
+
+std::uint32_t corelib_create(bg3se::LSStringView const& view) {
+    const std::string text(view.data(), view.size());
+    std::uint32_t id = bg3se::FixedStringBase::NullIndex;
+    return bg3le_fixed_string_create(text.c_str(), &id)
+        ? id : bg3se::FixedStringBase::NullIndex;
+}
+
+}  // namespace
+
+// Upstream fills these at startup and then builds GFS; without them every
+// FixedString in the vendored code read as null.
+extern "C" void bg3le_corelib_strings_install() {
+    bg3se::gCoreLibPlatformInterface.ls__FixedString__GetString = &corelib_get_string;
+    if (g_create != nullptr) {
+        bg3se::gCoreLibPlatformInterface.ls__FixedString__CreateFromString =
+            &corelib_create;
+    }
+    bg3se::GFS.Initialize();
+    logf("strings: vendored FixedString hooks installed; GFS built");
+}
 
 // TranslatedStringRepository::GetTranslatedString.
 bool translated_string_get(char const* handle, std::string* out) {

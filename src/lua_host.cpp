@@ -1,6 +1,7 @@
 #include "lua_host.h"
 
 #include <atomic>
+#include <mutex>
 #include <cerrno>
 #include <cstdlib>
 #include <cmath>
@@ -44,9 +45,17 @@ namespace {
 // works on "the current state", so the context is switched at the few
 // entry points -- a tick, a mod load, an evaluation from the console --
 // rather than threaded through six hundred call sites.
-lua_State* g_lua = nullptr;
+//
+// The client context runs on the client's thread and the server's on the
+// story thread, as upstream's do, so "current" is per thread and falls back
+// to the server; each state has a lock, taken by InContext, as upstream's
+// LuaServerPin/LuaClientPin take theirs.
+thread_local lua_State* t_lua = nullptr;
 lua_State* g_server_lua = nullptr;
 lua_State* g_client_lua = nullptr;
+std::recursive_mutex g_server_lock;
+std::recursive_mutex g_client_lock;
+#define g_lua (t_lua != nullptr ? t_lua : g_server_lua)
 
 bool in_client_state() { return g_lua != nullptr && g_lua == g_client_lua; }
 
@@ -117,16 +126,19 @@ std::deque<std::vector<const osi::Function*>> g_overloads;
 // server context is the current one.
 class InContext {
 public:
-    explicit InContext(lua_State* want) : was_(g_lua) {
-        if (want != nullptr) g_lua = want;
+    explicit InContext(lua_State* want)
+        : was_(t_lua),
+          lock_(want == g_client_lua ? g_client_lock : g_server_lock) {
+        if (want != nullptr) t_lua = want;
     }
-    ~InContext() { g_lua = was_; }
+    ~InContext() { t_lua = was_; }
 
     InContext(InContext const&) = delete;
     InContext& operator=(InContext const&) = delete;
 
 private:
     lua_State* was_;
+    std::lock_guard<std::recursive_mutex> lock_;
 };
 
 bool to_value(lua_State* L, int idx, osi::Value* out) {
@@ -516,6 +528,19 @@ int l_has_other_context(lua_State* L) {
     return 1;
 }
 
+// Messages bound for the other context, taken on that context's own thread:
+// entering the other state from here would cross threads.
+struct NetMessage {
+    std::string channel;
+    std::string payload;
+    bool hasPayload;
+    lua_Integer user;
+    bool isChannel;
+};
+std::mutex g_net_mutex;
+std::vector<NetMessage> g_to_server;
+std::vector<NetMessage> g_to_client;
+
 int l_post_to_other_context(lua_State* L) {
     const char* channel = luaL_checkstring(L, 1);
     std::size_t length = 0;
@@ -526,53 +551,47 @@ int l_post_to_other_context(lua_State* L) {
     // channel name is the mod's to choose and nothing here should claim one.
     const bool isChannel = lua_toboolean(L, 4) != 0;
 
-    lua_State* other = (L == g_client_lua) ? g_server_lua : g_client_lua;
-    if (other == nullptr) {
+    const bool fromClient = (L == g_client_lua);
+    if ((fromClient ? g_server_lua : g_client_lua) == nullptr) {
         lua_pushboolean(L, 0);
         return 1;
     }
-
-    InContext there(other);
-
-    lua_getglobal(other, "Ext");
-    if (!lua_istable(other, -1)) {
-        lua_pop(other, 1);
-        lua_pushboolean(L, 0);
-        return 1;
+    {
+        const std::lock_guard<std::mutex> lock(g_net_mutex);
+        (fromClient ? g_to_server : g_to_client)
+            .push_back(NetMessage{channel,
+                                  payload ? std::string(payload, length) : "",
+                                  payload != nullptr, user, isChannel});
     }
-    lua_getfield(other, -1, "_Internal");
-    lua_remove(other, -2);
-    if (!lua_istable(other, -1)) {
-        lua_pop(other, 1);
-        lua_pushboolean(L, 0);
-        return 1;
-    }
-    lua_getfield(other, -1, "QueueNetMessage");
-    lua_remove(other, -2);
-    if (!lua_isfunction(other, -1)) {
-        lua_pop(other, 1);
-        lua_pushboolean(L, 0);
-        return 1;
-    }
-
-    lua_pushstring(other, channel);
-    if (payload != nullptr) {
-        lua_pushlstring(other, payload, length);
-    } else {
-        lua_pushnil(other);
-    }
-    lua_pushinteger(other, user);
-    lua_pushboolean(other, isChannel ? 1 : 0);
-
-    if (lua_pcall(other, 4, 0, 0) != LUA_OK) {
-        logf("lua: queueing a net message on the other context failed: %s",
-             lua_tostring(other, -1));
-        lua_pop(other, 1);
-        lua_pushboolean(L, 0);
-        return 1;
-    }
-
     lua_pushboolean(L, 1);
+    return 1;
+}
+
+// Ext._Internal.TakeNetMessages() -> {{channel, payload, user, isChannel}, ...}
+int l_take_net_messages(lua_State* L) {
+    std::vector<NetMessage> taken;
+    {
+        const std::lock_guard<std::mutex> lock(g_net_mutex);
+        taken.swap(L == g_client_lua ? g_to_client : g_to_server);
+    }
+    lua_createtable(L, static_cast<int>(taken.size()), 0);
+    int i = 0;
+    for (auto const& m : taken) {
+        lua_createtable(L, 4, 0);
+        lua_pushstring(L, m.channel.c_str());
+        lua_rawseti(L, -2, 1);
+        if (m.hasPayload) {
+            lua_pushlstring(L, m.payload.data(), m.payload.size());
+        } else {
+            lua_pushnil(L);
+        }
+        lua_rawseti(L, -2, 2);
+        lua_pushinteger(L, m.user);
+        lua_rawseti(L, -2, 3);
+        lua_pushboolean(L, m.isChannel ? 1 : 0);
+        lua_rawseti(L, -2, 4);
+        lua_rawseti(L, -2, ++i);
+    }
     return 1;
 }
 
@@ -1171,6 +1190,13 @@ extern "C" void* bg3le_string_table();
 extern "C" bool bg3le_meta_enum_label(void const* handle, const char* path,
                                       std::size_t index, const char** label,
                                       std::uint64_t* value, bool* isBitmask);
+extern "C" bool bg3le_meta_array_resize(void const* handle, char const* path,
+                                        void* component, std::size_t count,
+                                        void** data, std::uint16_t* elemSize,
+                                        std::uint8_t* elemKind);
+extern "C" bool bg3le_meta_bitflag(void const* handle, char const* name,
+                                   void* object, void** address,
+                                   std::uint16_t* size, std::uint64_t* mask);
 extern "C" std::size_t bg3le_meta_enum_count();
 extern "C" std::size_t bg3le_meta_class_count();
 extern "C" std::size_t bg3le_meta_component_count();
@@ -1611,6 +1637,76 @@ bool write_field(lua_State* L, int index, void* address, FieldKind kind,
     }
 }
 
+// A whole array assigned from a Lua list, as upstream's Array setter does:
+// the array becomes that many elements, each written as an element is.
+bool assign_array(lua_State* L, int index, void const* meta, const char* path,
+                  void* base, FieldKind kind) {
+    if (kind != FieldKind::DynArray || !lua_istable(L, index)) return false;
+    const lua_Integer n = luaL_len(L, index);
+    void* data = nullptr;
+    std::uint16_t elemSize = 0;
+    std::uint8_t elemKind = 0;
+    if (n < 0 || !bg3le_meta_array_resize(meta, path, base, (std::size_t)n,
+                                          &data, &elemSize, &elemKind)) {
+        return false;
+    }
+    for (lua_Integer i = 0; i < n; ++i) {
+        lua_geti(L, index, i + 1);
+        write_field(L, lua_gettop(L), static_cast<char*>(data) + i * elemSize,
+                    (FieldKind)elemKind);
+        lua_pop(L, 1);
+    }
+    return true;
+}
+
+// An enum field assigned by label, as upstream allows: the label, or for a
+// bitmask a list of labels, becomes its value in place. Anything else is left
+// for write_field to take or reject.
+void enum_arg_in_place(lua_State* L, int index, void const* meta,
+                       const char* path) {
+    const char* label = nullptr;
+    std::uint64_t value = 0;
+    bool isBitmask = false;
+    const int type = lua_type(L, index);
+    if ((type != LUA_TSTRING && type != LUA_TTABLE)
+        || !bg3le_meta_enum_label(meta, path, 0, &label, &value, &isBitmask)) {
+        return;
+    }
+    auto lookup = [&](const char* wanted, std::uint64_t* out) {
+        for (std::size_t i = 0;
+             bg3le_meta_enum_label(meta, path, i, &label, &value, &isBitmask);
+             ++i) {
+            if (std::strcmp(label, wanted) == 0) {
+                *out = value;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::uint64_t result = 0;
+    if (type == LUA_TSTRING) {
+        if (!lookup(lua_tostring(L, index), &result)) {
+            luaL_error(L, "'%s' is not a label of %s", lua_tostring(L, index), path);
+        }
+    } else {
+        if (!isBitmask) return;
+        const lua_Integer n = luaL_len(L, index);
+        for (lua_Integer i = 1; i <= n; ++i) {
+            lua_geti(L, index, i);
+            std::uint64_t bit = 0;
+            if (!lua_isstring(L, -1) || !lookup(lua_tostring(L, -1), &bit)) {
+                luaL_error(L, "'%s' is not a label of %s",
+                           luaL_tolstring(L, -1, nullptr), path);
+            }
+            result |= bit;
+            lua_pop(L, 1);
+        }
+    }
+    lua_pushinteger(L, (lua_Integer)result);
+    lua_replace(L, index);
+}
+
 // Pushes an enum-typed field as its label, or a bitmask as the list of set
 // flags -- which is how bg3se presents them, and scripts are written against
 // that. Returns false if the field is not an enum, leaving the caller to push
@@ -1864,6 +1960,11 @@ int l_set_field(lua_State* L) {
         return 1;
     }
 
+    if (assign_array(L, 4, meta, path, component, (FieldKind)kind)) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    enum_arg_in_place(L, 4, meta, path);
     if (!write_field(L, 4, address, (FieldKind)kind, (FieldKind)elemKind,
                      elemCount)) {
         lua_pushnil(L);
@@ -2254,6 +2355,15 @@ int l_object_get_field(lua_State* L) {
     bool readOnly = false;
     if (!bg3le_meta_resolve(subject.Meta, path, subject.Base, &address, &kind,
                             &size, &readOnly)) {
+        // P_BITMASK: a flag of a flags field reads as a boolean.
+        std::uint64_t mask = 0;
+        std::uint64_t raw = 0;
+        if (bg3le_meta_bitflag(subject.Meta, path, subject.Base, &address,
+                               &size, &mask)
+            && size <= 8 && safe_read(address, &raw, size)) {
+            lua_pushboolean(L, (raw & mask) == mask ? 1 : 0);
+            return 1;
+        }
         lua_pushnil(L);
         lua_pushfstring(L, "%s.%s does not resolve", className, path);
         return 2;
@@ -2408,6 +2518,17 @@ int l_object_set_field(lua_State* L) {
     bool readOnly = false;
     if (!bg3le_meta_resolve(subject.Meta, path, subject.Base, &address, &kind,
                             &size, &readOnly)) {
+        // P_BITMASK: assigning a flag sets or clears its bit.
+        std::uint64_t mask = 0;
+        std::uint64_t raw = 0;
+        if (bg3le_meta_bitflag(subject.Meta, path, subject.Base, &address,
+                               &size, &mask)
+            && size <= 8 && safe_read(address, &raw, size)) {
+            raw = lua_toboolean(L, 4) ? (raw | mask) : (raw & ~mask);
+            std::memcpy(address, &raw, size);
+            lua_pushboolean(L, 1);
+            return 1;
+        }
         lua_pushnil(L);
         lua_pushfstring(L, "%s.%s does not resolve", className, path);
         return 2;
@@ -2439,6 +2560,11 @@ int l_object_set_field(lua_State* L) {
         return 1;
     }
 
+    if (assign_array(L, 4, subject.Meta, path, subject.Base, (FieldKind)kind)) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    enum_arg_in_place(L, 4, subject.Meta, path);
     if (!write_field(L, 4, address, (FieldKind)kind, (FieldKind)elemKind,
                      elemCount)) {
         lua_pushnil(L);
@@ -5264,9 +5390,7 @@ void lua_init() {
     build_state(false);
     build_state(true);
 
-    // The server context is the one the game's own threads are in unless
-    // something says otherwise.
-    g_lua = g_server_lua;
+    t_lua = nullptr;
     logf("lua: server and client contexts built");
 }
 
@@ -5280,7 +5404,7 @@ void build_state(bool client) {
 
     // Recorded before the build, so anything the prelude asks about the
     // context during it gets the right answer.
-    g_lua = L;
+    t_lua = L;
     if (client) {
         g_client_lua = L;
     } else {
@@ -5388,6 +5512,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "OsiIdeHelpers");
     lua_pushcfunction(g_lua, l_post_to_other_context);
     lua_setfield(g_lua, -2, "PostToOtherContext");
+    lua_pushcfunction(g_lua, l_take_net_messages);
+    lua_setfield(g_lua, -2, "TakeNetMessages");
     lua_pushcfunction(g_lua, l_has_other_context);
     lua_setfield(g_lua, -2, "HasOtherContext");
     lua_pushcfunction(g_lua, l_request_reset);
@@ -6407,6 +6533,11 @@ end
 --
 -- StatsLoaded is deliberately not re-fired, as upstream does not: stats did
 -- not reload, and a mod's stats pass is not idempotent.
+-- ecl::ScriptExtender::OnGameStateChanged's event, on the client's thread.
+function Ext._Internal.ClientStateChanged(from, to)
+  Ext._Internal.FireEvent("GameStateChanged", { FromState = from, ToState = to })
+end
+
 function Ext._Internal.AfterReset()
   Ext._Internal.FireEvent("ModuleResume")
 
@@ -6602,6 +6733,8 @@ end
 -- at that moment: the arguments are queued and drained from this context's
 -- tick, below.
 local imgui_callbacks = {}
+-- Upstream's UserData holds any Lua value; it lives here, by widget handle.
+local imgui_userdata = {}
 
 -- Which widget table to hand a callback, so the same widget arrives as the
 -- same table each time and `self` behaves. Weak-valued, so a widget the mod
@@ -6616,6 +6749,7 @@ function imgui_methods:Destroy()
     imgui_callbacks[id] = nil
   end
   imgui_widgets[handle] = nil
+  imgui_userdata[handle] = nil
   return Ext._Internal.ImguiDestroy(handle)
 end
 
@@ -6624,6 +6758,7 @@ imgui_widget.__index = function(self, key)
   if method ~= nil then return method end
 
   local handle = rawget(self, "Handle")
+  if key == "UserData" then return imgui_userdata[handle] end
 
   -- An Add* call: make the child and hand back a widget for it.
   local kind = IMGUI_ADD[key]
@@ -6652,6 +6787,13 @@ imgui_widget.__index = function(self, key)
   -- Open property, and a flat method table made `window.Open` a function.
   -- Whether this class declares the property is what decides, which is the
   -- same thing upstream's per-class property maps decide.
+  -- Upstream's Children getter: the child widgets, not their raw handles.
+  if key == "Children" then
+    local children = Ext._Internal.ImguiChildren(handle) or {}
+    for i, child in ipairs(children) do children[i] = make_widget(child) end
+    return children
+  end
+
   if addr ~= nil then
     local value, err = Ext._Internal.ObjectGetField(addr, class, key)
     if err == nil then return value end
@@ -6683,6 +6825,10 @@ end
 
 imgui_widget.__newindex = function(self, key, value)
   local handle = rawget(self, "Handle")
+  if key == "UserData" then
+    imgui_userdata[handle] = value
+    return
+  end
 
   -- A function can only be an event handler: no other property of a widget
   -- takes one, and the C side refuses a name that is not a delegate.
@@ -6717,7 +6863,12 @@ imgui_widget.__newindex = function(self, key, value)
     error("bg3le: this widget no longer exists", 2)
   end
 
-  local ok, err = Ext._Internal.ObjectSetField(addr, class, key, value)
+  local called, ok, err = pcall(Ext._Internal.ObjectSetField, addr, class,
+                                key, value)
+  if not called then
+    error(string.format("bg3le: %s.%s = %s: %s", tostring(class), tostring(key),
+                        tostring(value), tostring(ok)), 2)
+  end
   if not ok then error("bg3le: " .. tostring(err), 2) end
 end
 
@@ -6741,7 +6892,7 @@ function Ext.IMGUI.NewWindow(name)
   if handle == nil then
     local wanted, started, ready = Ext._Internal.ImguiStatus()
     if not wanted then
-      error("bg3le: the ImGui overlay is off; set BG3LE_IMGUI=1 to turn it "
+      error("bg3le: the ImGui overlay is off (BG3LE_IMGUI=0); unset it to turn it "
             .. "on", 2)
     end
     error(string.format(
@@ -7344,7 +7495,7 @@ function Ext.Net.PlayerHasExtender(_)
   return true
 end
 
--- Called in the *receiving* context, from the sender's C++ side.
+-- Called in the *receiving* context, as its tick takes what the other posted.
 function Ext._Internal.QueueNetMessage(channel, payload, userId, isChannel)
   net_inbox[#net_inbox + 1] = {channel, payload, userId or kHostUserId,
                                isChannel == true}
@@ -7353,6 +7504,9 @@ end
 -- Drained by the tick, before timers, so a message posted on one tick is
 -- handled on the next rather than whenever a handler happens to run.
 function Ext._Internal.DrainNetMessages()
+  for _, m in ipairs(Ext._Internal.TakeNetMessages()) do
+    Ext._Internal.QueueNetMessage(m[1], m[2], m[3], m[4])
+  end
   if #net_inbox == 0 then return end
 
   -- Taken whole first: a handler may send, and that must land on the next
@@ -11556,6 +11710,8 @@ void lua_bind_osi(const std::vector<osi::Function>& functions);
 // of it. What a mod put in the engine before the reset stays there, which is
 // the same bargain upstream offers.
 void lua_reset() {
+    // Both locks, so neither context is mid-call on another thread.
+    std::scoped_lock both(g_server_lock, g_client_lock);
     lua_State* oldServer = g_server_lua;
     lua_State* oldClient = g_client_lua;
 
@@ -11563,14 +11719,14 @@ void lua_reset() {
     // rather than a closed one.
     g_server_lua = nullptr;
     g_client_lua = nullptr;
-    g_lua = nullptr;
+    t_lua = nullptr;
 
     if (oldClient != nullptr) lua_close(oldClient);
     if (oldServer != nullptr) lua_close(oldServer);
 
     build_state(false);
     build_state(true);
-    g_lua = g_server_lua;
+    t_lua = nullptr;
     if (g_server_lua == nullptr) {
         logf("lua: reset failed; the server context could not be rebuilt");
         return;
@@ -11636,6 +11792,8 @@ bool lua_persistent_vars_to_save(
     return true;
 }
 
+std::atomic<bool> g_client_ticks_itself{false};
+
 void lua_tick() {
     if (g_reset_pending) {
         g_reset_pending = false;
@@ -11658,10 +11816,34 @@ void lua_tick() {
         InContext server(g_server_lua);
         call_internal("RunTimers");
     }
-    if (g_client_lua != nullptr) {
+    // The client ticks on its own thread once src/game_state.cpp drives it.
+    if (g_client_lua != nullptr && !g_client_ticks_itself.load()) {
         InContext client(g_client_lua);
         call_internal("RunTimers");
     }
+}
+
+void lua_client_tick(char const* from, char const* to) {
+    if (g_client_lua == nullptr) return;
+    g_client_ticks_itself.store(true);
+    InContext client(g_client_lua);
+    if (from != nullptr && to != nullptr) {
+        lua_getglobal(g_lua, "Ext");
+        lua_getfield(g_lua, -1, "_Internal");
+        lua_getfield(g_lua, -1, "ClientStateChanged");
+        if (lua_isfunction(g_lua, -1)) {
+            lua_pushstring(g_lua, from);
+            lua_pushstring(g_lua, to);
+            if (lua_pcall(g_lua, 2, 0, 0) != LUA_OK) {
+                logf("lua: GameStateChanged failed: %s", lua_tostring(g_lua, -1));
+                lua_pop(g_lua, 1);
+            }
+        } else {
+            lua_pop(g_lua, 1);
+        }
+        lua_pop(g_lua, 2);
+    }
+    call_internal("RunTimers");
 }
 
 // Both contexts load mods, each running the bootstrap that belongs to it.

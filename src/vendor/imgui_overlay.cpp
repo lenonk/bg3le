@@ -7,12 +7,9 @@
 // see src/detour_interpose.cpp and src/vulkan_forward.cpp -- so this is the
 // part that was missing: something to construct the manager and turn it on.
 //
-// Off unless BG3LE_IMGUI=1, and deliberately so. The hooks sit on
-// vkCreateInstance and vkQueuePresentKHR, the overlay does real Vulkan work
-// inside the present call, and a mistake there is a crash or a hang in the
-// renderer rather than a message in the log. Until it has been through more
-// than one machine's driver stack, the default is to leave the engine's
-// rendering exactly as it was.
+// On by default, as upstream's is; BG3LE_IMGUI=0 turns it off. The hooks
+// sit on vkCreateInstance and vkQueuePresentKHR and the overlay does real
+// Vulkan work inside the present call.
 //
 // EnableHooks has to run before the game creates its Vulkan instance, and
 // IMGUIManager's own containers allocate through the engine's heap -- which is

@@ -161,6 +161,13 @@ struct FieldDesc {
     // A glm vector or matrix, which upstream pushes as a plain Lua table
     // rather than as an array proxy.
     bool IsVector;
+    // P_BITMASK: each label of this field's enum is also a boolean property
+    // of the object, reading and writing its own bit. Last, as above.
+    bool BitmaskFlags;
+    // DynArray only: rebuilds the container at count default elements in a
+    // fresh allocation, abandoning the old buffer rather than freeing it
+    // (bg3le cannot know who allocated it). Last, as above.
+    bool (*Resize)(void* container, std::size_t count);
 };
 
 }  // namespace bg3le

@@ -63,6 +63,10 @@ bool ImageReference::BindTexture(FixedString const& textureUuid)
 
 bool ImageReference::BindIcon(FixedString const& iconName)
 {
+    if (GetStaticSymbols().ls__gTextureAtlasMap == nullptr
+        || *GetStaticSymbols().ls__gTextureAtlasMap == nullptr) {
+        return false;
+    }
     auto atlas = (*GetStaticSymbols().ls__gTextureAtlasMap)->IconMap.get_or_default(iconName);
     if (!atlas) {
         return false;
@@ -2237,7 +2241,11 @@ std::optional<TextureLoadResult> IMGUITextureLoader::IncTextureRef(FixedString c
         return refs->LoadResult;
     }
 
-    auto tex = (resource::TextureResource*)GetStaticSymbols().GetCurrentResourceBank()->GetResource(ResourceBankType::Texture, textureGuid);
+    auto bank = GetStaticSymbols().GetCurrentResourceBank();
+    if (!bank) {
+        return {};
+    }
+    auto tex = (resource::TextureResource*)bank->GetResource(ResourceBankType::Texture, textureGuid);
     if (!tex) {
         return {};
     }

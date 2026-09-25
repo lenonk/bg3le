@@ -130,6 +130,10 @@ CHECKS = [
     ("handled-error hook tolerates a missing gExtender",
      lambda: "if (!bg3se::gExtender) return;"
              in text("BG3Extender/Lua/LuaBinding.cpp")),
+    ("BindIcon tolerates a missing texture atlas map",
+     lambda: "ls__gTextureAtlasMap == nullptr" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")),
+    ("IncTextureRef tolerates a missing resource bank",
+     lambda: "auto bank = GetStaticSymbols().GetCurrentResourceBank();" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")),
 ]
 
 

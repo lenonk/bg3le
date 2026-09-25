@@ -7,9 +7,8 @@
 // SDLManager what happened. That is what upstream gets from detouring them
 // on Windows -- see src/vendor/sdl_linux.cpp.
 //
-// Off unless BG3LE_IMGUI=1. SDL_PollEvent runs thousands of times a second
-// and the overlay is allowed to swallow events, so with the overlay off
-// every one of these is a straight call through.
+// With the overlay off (BG3LE_IMGUI=0) every one of these is a straight call
+// through; SDL_PollEvent runs thousands of times a second.
 
 #include <dlfcn.h>
 

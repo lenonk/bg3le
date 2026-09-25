@@ -144,7 +144,10 @@ component's declared size with the size the engine recorded, and
   state they are asked in. The console switches with `:client` / `:server` —
   the LuaDebug protocol has carried a context on every request all along.
   Osiris is server-side, as upstream has it, and says so in the client
-  context rather than blaming the save. The client context's bootstraps run
+  context rather than blaming the save. Each context runs on its own
+  thread, as upstream's do: the client ticks every client frame and gets
+  `GameStateChanged` as its state moves, and messages between the two are
+  queued. The client context's bootstraps run
   when the game leaves `LoadModule`, before the main menu is built, as
   upstream's do — so a UI mod's menu changes are in place when the menu
   appears. `Ext.Utils.GetGameState()` reports the client's real state there. The
@@ -257,17 +260,20 @@ component's declared size with the size the engine recorded, and
 - **`Ext.IMGUI` draws and its callbacks fire**, which is Mod Configuration
   Menu's menu and the only thing in a 57-mod set known to need it. Upstream's
   own widget tree is compiled into `libbg3le.so`, imgui and its Vulkan
-  backend with it, and `BG3LE_IMGUI=1` brings up the seven Vulkan hooks by
-  interposition rather than by Detours. All thirty `Add*` kinds, the window
+  backend with it, and the seven Vulkan hooks come up by interposition
+  rather than by Detours. All thirty `Add*` kinds, the window
   setters, the style and colour accessors and the per-type methods are bound;
   properties read and write through the same field machinery a component
   does; and `OnClick`, `OnChange` and the rest arrive in Lua with their
   arguments, delivered on the tick of the context that registered them
   because a widget fires on a thread that must not touch a Lua state. Fonts
   come out of the game's own archives, since the engine's file reader cannot
-  be called by name here. Off by default: the present hook does real Vulkan
-  work every frame, and the default is to leave the engine's rendering
-  exactly as it was. See
+  be called by name here. On by default, as upstream's is; `BG3LE_IMGUI=0`
+  turns it off. Enum properties take their labels, `P_BITMASK` flags such
+  as `Window.AlwaysAutoResize` are properties, whole arrays can be assigned,
+  and `UserData` and `Children` behave as upstream's. Icons do not draw yet:
+  the texture atlas and resource manager are not located, so an image
+  button is drawn without its image. See
   [reference/IMGUI-ASSESSMENT.md](reference/IMGUI-ASSESSMENT.md)
 - **`Ext.Loca` on the engine's own `TranslatedStringRepository`**, read and
   written as upstream does, so a string a mod sets is what the game's
@@ -473,6 +479,13 @@ component's declared size with the size the engine recorded, and
 - **Saving `Ext.Vars` and persistent timers.** They go in the same save
   region as `PersistentVars`, which is in place; their nodes are not written
   yet.
+- **`Ext.UI` (Noesis), and so Mod Configuration Menu's main-menu button.**
+  MCM builds its whole window, but hands its button a Noesis data context
+  through `Ext.UI.GetRoot`, `RegisterType` and `Instantiate`, and bg3le has
+  no Noesis bindings: upstream links Noesis as a DLL, and here it is inside
+  the executable, reachable only through its symbols. Until then the button
+  runs the vanilla command it is bound to, which opens the Larian account
+  prompt. `Ext.Input.GetInputManager` is not there either.
 - **Osiris user queries (`QRY_*`).** Not callable yet: upstream evaluates
   them through the Rete node's `IsValid` with an identity adapter, and
   neither is located in this build.

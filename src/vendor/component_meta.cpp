@@ -137,6 +137,18 @@ std::size_t array_count_thunk(void const* container) {
     return (std::size_t)static_cast<A const*>(container)->size();
 }
 
+// A fresh container of count default elements, its header copied over the
+// field's; the old buffer is left where it is.
+template <class A>
+bool array_resize_thunk(void* container, std::size_t count) {
+    if (!bg3le_game_allocator_ready() || count > (1u << 20)) return false;
+    alignas(A) unsigned char raw[sizeof(A)];
+    auto* fresh = new (raw) A();
+    fresh->resize((typename A::size_type)count);
+    std::memcpy(container, raw, sizeof(A));
+    return true;
+}
+
 template <class A>
 void* array_data_thunk(void const* container) {
     // const is dropped deliberately: the same descriptor serves reads and
@@ -780,6 +792,14 @@ constexpr FieldDesc make_field(char const* name, std::size_t offset) {
     }
 }
 
+// The field itself, marked so its enum's labels resolve as flag properties.
+template <class T>
+constexpr FieldDesc make_bitmask_field(char const* name, std::size_t offset) {
+    FieldDesc f = make_field<T>(name, offset);
+    f.BitmaskFlags = true;
+    return f;
+}
+
 template <class T>
 constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
     FieldDesc f{};
@@ -828,6 +848,10 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         describe_elements.template operator()<E>();
         f.Count = &array_count_thunk<T>;
         f.Data = &array_data_thunk<T>;
+        if constexpr (std::is_default_constructible_v<E>
+                      && std::is_move_constructible_v<E>) {
+            f.Resize = &array_resize_thunk<T>;
+        }
     } else if constexpr (SetTraits<T>::kIsSet) {
         using E = typename SetTraits<T>::Elem;
         describe_elements.template operator()<E>();
@@ -1073,7 +1097,9 @@ struct EnumTable;
 // stay compatible with.
 #define P_RENAMED(prop, oldName) PN(prop, prop)
 
-#define P_BITMASK(prop)
+#define P_BITMASK(prop)                                                       \
+        make_bitmask_field<decltype(ObjectType::prop)>(                       \
+            #prop, offsetof(ObjectType, prop)),
 #define P_BITMASK_GETTER_SETTER(prop, getter, setter)
 #define P_GETTER(name, fun)
 #define P_FREE_GETTER(name, fun)
@@ -1924,6 +1950,26 @@ extern "C" int bg3le_meta_array_length(void const* handle, char const* path,
     return 0;
 }
 
+// Resizes a DynArray field for a whole-array assignment and returns where
+// its elements now are; the caller writes them one by one.
+extern "C" bool bg3le_meta_array_resize(void const* handle, char const* path,
+                                        void* component, std::size_t count,
+                                        void** data, std::uint16_t* elemSize,
+                                        std::uint8_t* elemKind) {
+    if (handle == nullptr || path == nullptr || component == nullptr) return false;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
+                                component);
+    if (!r.Ok || r.Address == nullptr || r.Field.Kind != FieldKind::DynArray
+        || r.Field.Resize == nullptr || r.Field.ReadOnly) {
+        return false;
+    }
+    if (!r.Field.Resize(r.Address, count)) return false;
+    *data = r.Field.Data(r.Address);
+    *elemSize = r.Field.ElemSize;
+    *elemKind = (std::uint8_t)r.Field.ElemKind;
+    return true;
+}
+
 // Which alternative a variant currently holds, and how many it has.
 //
 // Needs the component, because the active one is a runtime fact. Returns false
@@ -2547,6 +2593,55 @@ extern "C" std::size_t bg3le_meta_component_count() {
 //
 // Returns false once index runs past the end, or immediately if the field is
 // not an enum.
+namespace {
+
+// A P_BITMASK field of cls or its bases with a label called name.
+bool find_bitflag(ClassFields const* cls, char const* name,
+                  FieldDesc const** field, std::uint64_t* mask,
+                  unsigned depth = 0) {
+    if (cls == nullptr || depth > 8) return false;
+    for (auto const* f = cls->Fields; f->Name != nullptr; ++f) {
+        if (f->Kind == FieldKind::Inherit) {
+            auto it = by_class_name().find(f->Name);
+            if (it != by_class_name().end()
+                && find_bitflag(it->second, name, field, mask, depth + 1)) {
+                return true;
+            }
+            continue;
+        }
+        if (!f->BitmaskFlags || f->TypeName == nullptr) continue;
+        auto it = by_enum_name().find(
+            std::string_view(f->TypeName, f->TypeNameLength));
+        if (it == by_enum_name().end()) continue;
+        for (auto const* l = it->second->Labels; l->Name != nullptr; ++l) {
+            if (std::strcmp(l->Name, name) == 0) {
+                *field = f;
+                *mask = l->Value;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+// P_BITMASK's flag properties: name is a label of a flags field's enum, and
+// the property is that bit. Address and size are the flags field's.
+extern "C" bool bg3le_meta_bitflag(void const* handle, char const* name,
+                                   void* object, void** address,
+                                   std::uint16_t* size, std::uint64_t* mask) {
+    if (handle == nullptr || name == nullptr || object == nullptr) return false;
+    FieldDesc const* field = nullptr;
+    if (!find_bitflag(static_cast<ClassFields const*>(handle), name, &field,
+                      mask)) {
+        return false;
+    }
+    *address = static_cast<char*>(object) + field->Offset;
+    *size = field->Size;
+    return true;
+}
+
 extern "C" bool bg3le_meta_enum_label(void const* handle, char const* path,
                                       std::size_t index, char const** label,
                                       std::uint64_t* value, bool* isBitmask) {
