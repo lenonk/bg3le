@@ -570,7 +570,8 @@ component's declared size with the size the engine recorded, and
   string — read as what it points at; one that could not be an object or
   cannot be read is refused rather than followed), fixed and dynamic arrays
   including `LegacyArray`, `StaticArray` and `std::vector` (read-only),
-  `CompactSet` (read-only), hash sets, hash maps and the node-chained
+  `CompactSet` and the sets built on it (read-only), hash sets, hash maps and
+  the node-chained
   `LegacyMap`/`LegacyRefMap`, glm vectors and matrices (a matrix as its
   floats, as upstream pushes one), `std::optional`, `std::variant`,
   `FixedString`, `OverrideableProperty`, `ecs::EntityRef`, and the types
@@ -578,17 +579,17 @@ component's declared size with the size the engine recorded, and
   views, byte buffers and Noesis strings as strings, `Version` as its four
   numbers, `EntityOrVec3Variant` as a position or an entity, `NetId` and
   `UserId` as integers, a component handle as an integer or nil, and a
-  `stats::ConditionId` as its condition's text, refusing a write with
+  `stats::ConditionId` as its condition's text, a `StatsExpressionRef` as
+  its pooled expression with `Code` and `RefCount`, refusing a write with
   upstream's message. An `std::optional` is written as well as read, through
   the container's own `emplace()` and `reset()`, and a `std::variant` is read
   by the engine's layout rather than this compiler's — the game is libc++ ABI
   2, see [reference/LIBCXX-ABI.md](reference/LIBCXX-ABI.md). Across every
-  class the metadata describes, 481 of 21,514 fields do not convert; 447 of
+  class the metadata describes, 467 of 21,514 fields do not convert; 447 of
   them are the ImGui widgets' Lua delegates and registry entries, which
-  `Ext.IMGUI`'s own callbacks handle. The other 34 are `StatsExpressionRef`
-  (11, which the stats functor reader decodes itself), `TypeInformationRef`
-  (6), Noesis's observable collections (7), four pointer-to-pointer ranges,
-  three `ObjectSet`s, a `Queue` and a `BitArray`;
+  `Ext.IMGUI`'s own callbacks handle. The other 20 are `TypeInformationRef`
+  (6, reflection objects), Noesis's observable collections (7), four
+  pointer-to-pointer ranges, a `Queue` and a `BitArray`;
   `meta-check <lib> --unsupported` lists them. Naming an unsupported field
   raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value

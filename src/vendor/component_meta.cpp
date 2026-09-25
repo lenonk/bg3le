@@ -254,6 +254,27 @@ struct CompactSetTraits<CompactSet<T, Allocator, StoreSize, TSize>> {
     static constexpr bool kIsCompactSet = true;
     using Elem = T;
 };
+// And the sets built on it, which add no members.
+template <class T, class Allocator, bool StoreSize>
+struct CompactSetTraits<Set<T, Allocator, StoreSize>> {
+    static constexpr bool kIsCompactSet = true;
+    using Elem = T;
+};
+template <class T, class Allocator, bool StoreSize>
+struct CompactSetTraits<ObjectSet<T, Allocator, StoreSize>> {
+    static constexpr bool kIsCompactSet = true;
+    using Elem = T;
+};
+template <class T, class Allocator>
+struct CompactSetTraits<PrimitiveSet<T, Allocator>> {
+    static constexpr bool kIsCompactSet = true;
+    using Elem = T;
+};
+template <class T, class Allocator>
+struct CompactSetTraits<PrimitiveSmallSet<T, Allocator>> {
+    static constexpr bool kIsCompactSet = true;
+    using Elem = T;
+};
 
 template <class A>
 std::size_t array_count_thunk(void const* container) {
@@ -920,6 +941,8 @@ constexpr FieldKind kind_of() {
         return FieldKind::Variant;
     } else if constexpr (scalar_kind_of<T>() != FieldKind::Unsupported) {
         return scalar_kind_of<T>();
+    } else if constexpr (std::is_same_v<T, StatsExpressionRef>) {
+        return FieldKind::Pointer;
     } else if constexpr (std::is_pointer_v<T>) {
         // To a described class, or to anything else that converts: a set, a
         // map, a string. A pointer to a pointer does not.
@@ -1143,6 +1166,12 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         f.Count = &array_count_thunk<T>;
         f.Data = &array_data_thunk<T>;
         f.ReadOnly = true;
+    } else if constexpr (std::is_same_v<T, StatsExpressionRef>) {
+        // A StatsExpressionRef is its StatsExpressionPooled*, and upstream
+        // pushes the pooled expression.
+        static_assert(sizeof(StatsExpressionRef) == sizeof(void*));
+        f.TypeName = type_name<StatsExpressionPooled>().data();
+        f.TypeNameLength = (std::uint16_t)type_name<StatsExpressionPooled>().size();
     } else if constexpr (std::is_pointer_v<T>) {
         // A described class is read as an object of its own (TypeName); the
         // rest through [0], with the pointee's own descriptor.

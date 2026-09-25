@@ -3799,6 +3799,17 @@ int l_object_expression(lua_State* L) {
     return 3;
 }
 
+// Ext._Internal.ExpressionAt(pooled) -> code, refCount
+int l_expression_at(lua_State* L) {
+    auto* pooled = (void*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    char const* code = bg3le_stats_expression_code(pooled);
+    int refCount = 0;
+    if (code == nullptr || !bg3le_stats_expression_refcount(pooled, &refCount)) return 0;
+    lua_pushstring(L, code);
+    lua_pushinteger(L, refCount);
+    return 2;
+}
+
 // Ext._Internal.StatsEnumLabel(enumeration, index) -> label
 int l_stats_enum_label(lua_State* L) {
     char const* label = bg3le_stats_enum_label(luaL_checkstring(L, 1),
@@ -6098,6 +6109,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ExpressionDump");
     lua_pushcfunction(g_lua, l_object_expression);
     lua_setfield(g_lua, -2, "ObjectExpression");
+    lua_pushcfunction(g_lua, l_expression_at);
+    lua_setfield(g_lua, -2, "ExpressionAt");
     lua_pushcfunction(g_lua, l_stats_enum_label);
     lua_setfield(g_lua, -2, "StatsEnumLabel");
     lua_pushcfunction(g_lua, l_stats_enum_index);
@@ -11194,7 +11207,18 @@ function Ext._Internal.PointedObject(target, class)
   if class == nil then return "<unsupported>" end
   local loaded
   local function get()
-    if loaded == nil then loaded = read_object(target, class, "", {}) end
+    if loaded == nil then
+      loaded = read_object(target, class, "", {})
+      -- A pooled stats expression's Code and RefCount are getters upstream,
+      -- not fields; read_functor supplies them the same way.
+      if class:find("StatsExpressionPooled$") then
+        local code, refCount = Ext._Internal.ExpressionAt(target)
+        if code ~= nil then
+          Ext._Internal.AmendObject(loaded, "Code", code)
+          Ext._Internal.AmendObject(loaded, "RefCount", refCount)
+        end
+      end
+    end
     return loaded
   end
   return Ext._Internal.NewObjectProxy({
