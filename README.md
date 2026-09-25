@@ -603,9 +603,18 @@ component's declared size with the size the engine recorded, and
   game's own stats files over the loaded game changes 634 of 404,093
   values: 340 are armour combo categories appended a second time, as the engine's
   loader appends them, and the rest are the files' own values coming back
-  over later mods and patches. `Ext.IO.LoadFile`
-  in the `data` context reads the game's own archives now, after loose files
-  and mod archives, as the engine's file system layers them
+  over later mods and patches. `Ext.IO.LoadFile` in the `data` context reads
+  through the engine's own `ls::FileReader` (image+0x2704030, and its
+  destructor at +0x27036f0, both checked by their openings), as upstream's
+  `LoadExternalFile` does, so it sees exactly what the engine sees; bg3le's own
+  archive reader stays behind it as a fallback
+- **`Ext.IO.AddPathOverride` is honoured.** Upstream redirects in the
+  FileReader's constructor, which every engine file open goes through; bg3le
+  hooks all 75 of its call sites (`src/vendor/path_override.cpp`) and swaps
+  the path the same way, keyed by `ToPath(path, Data)`, and clears the table
+  on a Lua reset as upstream does. Overriding `Spell_Projectile.txt` with
+  `Spell_Target.txt` makes a read of the first return the second, through the
+  engine. `BG3LE_TRACE_FILES=N` logs the first N paths the engine opens
 - `Ext.Stats`: 15,754 stats, enumerable and readable by name, through a
   proxy that reads an attribute when it is asked for, as upstream's does.
   Snapshotting all two hundred of them per fetch made a mod's stats pass

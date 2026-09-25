@@ -5240,6 +5240,22 @@ int l_stats_extra_all(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.PathOverrideAdd(path, override) -> bool;
+// PathOverrideGet(path) -> the absolute override, or nil
+extern "C" bool bg3le_path_override_add(char const* path, char const* overridePath);
+extern "C" char const* bg3le_path_override_get(char const* path);
+extern "C" void bg3le_path_override_clear();
+int l_path_override_add(lua_State* L) {
+    lua_pushboolean(L, bg3le_path_override_add(luaL_checkstring(L, 1), luaL_checkstring(L, 2)));
+    return 1;
+}
+int l_path_override_get(lua_State* L) {
+    char const* to = bg3le_path_override_get(luaL_checkstring(L, 1));
+    if (to == nullptr) return 0;
+    lua_pushstring(L, to);
+    return 1;
+}
+
 // Ext._Internal.BuiltinFile(path) -> the builtin script's text, or nil
 extern "C" char const* bg3le_builtin_lua(char const* path, std::size_t* size);
 int l_builtin_file(lua_State* L) {
@@ -7274,6 +7290,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "TypeInfoEach");
     lua_pushcfunction(g_lua, l_type_info_names);
     lua_setfield(g_lua, -2, "TypeInfoNames");
+    lua_pushcfunction(g_lua, l_path_override_add);
+    lua_setfield(g_lua, -2, "PathOverrideAdd");
+    lua_pushcfunction(g_lua, l_path_override_get);
+    lua_setfield(g_lua, -2, "PathOverrideGet");
     lua_pushcfunction(g_lua, l_stats_extra_get);
     lua_setfield(g_lua, -2, "StatsExtraGet");
     lua_pushcfunction(g_lua, l_stats_extra_set);
@@ -7873,19 +7893,16 @@ function Ext.IO.AppendFile(path, contents)
   return Ext._Internal.SaveFile(path, tostring(contents), true)
 end
 
--- Path overrides are a redirection table the engine consults when opening a
--- file. bg3le does not hook the engine's file opens, so an override would
--- be recorded and never honoured; it is kept and reported so
--- GetPathOverride round-trips, and the limitation is stated rather than
--- hidden behind a silent no-op.
-local path_overrides = {}
-
+-- Upstream's: consulted by the engine's FileReader (src/vendor/path_override.cpp),
+-- keyed by absolute data path.
 function Ext.IO.AddPathOverride(path, overridePath)
-  path_overrides[path] = overridePath
+  if not Ext._Internal.PathOverrideAdd(tostring(path), tostring(overridePath)) then
+    Ext.Log.PrintError("bg3le: path overrides are unavailable; the engine's FileReader is not hooked")
+  end
 end
 
 function Ext.IO.GetPathOverride(path)
-  return path_overrides[path]
+  return Ext._Internal.PathOverrideGet(tostring(path))
 end
 
 -- ---- Ext.Debug ----
@@ -14690,6 +14707,7 @@ end
         lua_pop(g_lua, 1);
     }
     run_sandbox();
+    bg3le_path_override_clear();
     statusf("LUA VM initialised (%s)", LUA_RELEASE);
 }
 

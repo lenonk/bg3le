@@ -34,6 +34,7 @@
 
 namespace bg3le {
 bool game_file_read(char const* relative, std::string* out);
+bool engine_read_file(char const* relative, std::string* out);
 
 namespace {
 
@@ -283,6 +284,16 @@ extern "C" int bg3le_ext_load_file(lua_State* L) {
 
     std::string path;
     if (!resolve_under(root, relative, &path)) return 0;
+
+    // Upstream reads this context through the engine's FileReader, which
+    // sees what the engine sees and honours path overrides.
+    if (std::strcmp(context, "data") == 0) {
+        std::string contents;
+        if (bg3le::engine_read_file(relative, &contents)) {
+            lua_pushlstring(L, contents.data(), contents.size());
+            return 1;
+        }
+    }
 
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) {

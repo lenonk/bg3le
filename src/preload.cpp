@@ -36,6 +36,10 @@ namespace bg3le { void install_entity_trace_hook(); }
 #include "lua_host.h"
 #include "osi.h"
 #include "fast_alloc.h"
+
+namespace bg3le {
+void install_path_override_hook();
+}
 #include "stackdump.h"
 #include "mem.h"
 #include "log.h"
@@ -505,6 +509,7 @@ void ensure_symbols() {
         ecs::install_container_capture();
         install_game_allocator();
         fast_alloc_install();
+        install_path_override_hook();
     });
 }
 

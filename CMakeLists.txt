@@ -188,6 +188,7 @@ list(APPEND VENDOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/entity_trace.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_functor_set.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/type_info.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/path_override.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/prototypes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_sync.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_create.cpp
