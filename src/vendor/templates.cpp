@@ -248,6 +248,62 @@ bool image_range(unsigned long long* from, unsigned long long* to) {
 char const* type_name_of(std::uint64_t vtable);
 bool image_range(unsigned long long* from, unsigned long long* to);
 
+}  // namespace
+extern "C" std::uintptr_t bg3le_image_find_static(bool (*accept)(std::uintptr_t));
+namespace {
+
+// A GlobalTemplateManager: a vtable, then a bank that holds templates keyed
+// by their own Ids. Checked on the first bucket entry only, for speed.
+bool looks_like_manager(std::uintptr_t mgr) {
+    unsigned long long imageFrom = 0, imageTo = 0;
+    if (!image_range(&imageFrom, &imageTo)) return false;
+    auto in_image = [&](std::uint64_t v) { return v >= imageFrom && v < imageTo; };
+    std::uint64_t vmt = 0;
+    if (!read_as((void const*)mgr, &vmt) || !in_image(vmt)) return false;
+    for (int slot = 0; slot < 2; ++slot) {
+        std::uint64_t bank = 0, bvmt = 0, table = 0;
+        std::uint32_t count = 0, hashSize = 0;
+        if (!read_as((void const*)(mgr + kManagerBanks + slot * 8), &bank)
+            || !read_as((void const*)bank, &bvmt) || !in_image(bvmt)
+            || !read_as((void const*)(bank + kBankCount), &count) || count < 100
+            || !read_as((void const*)(bank + kBankHashSize), &hashSize)
+            || !read_as((void const*)(bank + kBankTable), &table)
+            || hashSize == 0 || hashSize > (1u << 22)) {
+            continue;
+        }
+        for (std::uint32_t b = 0; b < hashSize && b < 64; ++b) {
+            std::uint64_t node = 0;
+            if (!read_as((void const*)(table + b * 8), &node)) break;
+            if (node == 0) continue;
+            std::uint64_t raw[3] = {};
+            std::uint64_t head[3] = {};
+            return safe_read((void const*)node, raw, sizeof(raw))
+                   && safe_read((void const*)raw[2], head, sizeof(head))
+                   && in_image(head[0]) && (std::uint32_t)head[2] == (std::uint32_t)raw[1];
+        }
+    }
+    return false;
+}
+
+// The static holding the manager: the recorded one, else found again.
+std::uint64_t manager_static(unsigned long long imageFrom) {
+    static std::uint64_t found = 0;
+    static bool searched = false;
+    std::uint64_t mgr = 0;
+    const std::uint64_t recorded = imageFrom + kRecordedManagerGlobal;
+    if (found == 0 && read_as((void const*)recorded, &mgr) && looks_like_manager(mgr)) {
+        found = recorded;
+    }
+    if (found != 0 || searched) return found;
+    searched = true;
+    found = bg3le_image_find_static(&looks_like_manager);
+    if (found != 0) {
+        logf("templates: GlobalTemplateManager static at image+%#lx (recorded +%#lx)",
+             (unsigned long)(found - imageFrom), (unsigned long)kRecordedManagerGlobal);
+    }
+    return found;
+}
+
 // The populated bank of the GlobalTemplateManager, walked into `out`.
 bool build_from_manager(Templates* out) {
     unsigned long long imageFrom = 0, imageTo = 0;
@@ -255,7 +311,8 @@ bool build_from_manager(Templates* out) {
     auto in_image = [&](std::uint64_t v) { return v >= imageFrom && v < imageTo; };
 
     std::uint64_t mgr = 0, vmt = 0;
-    if (!read_as((void const*)(std::uintptr_t)(imageFrom + kRecordedManagerGlobal), &mgr)
+    const std::uint64_t at = manager_static(imageFrom);
+    if (at == 0 || !read_as((void const*)(std::uintptr_t)at, &mgr)
         || !read_as((void const*)(std::uintptr_t)mgr, &vmt) || !in_image(vmt)) {
         return false;
     }

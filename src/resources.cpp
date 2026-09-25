@@ -102,14 +102,15 @@ bool looks_like_manager(std::uintptr_t mgr) {
     return peek(mgr + kResourceBanks, &first) && looks_like_resource_bank(first);
 }
 
-// The global that holds the manager: the recorded one if it agrees, else
-// whatever qword in the executable's data points at something that does.
-std::uintptr_t find_global() {
-    const std::uintptr_t recorded = image().From + kRecordedGlobal;
-    std::uintptr_t mgr = 0;
-    if (image().From != 0 && peek(recorded, &mgr) && looks_like_manager(mgr)) return recorded;
+}  // namespace
+}  // namespace bg3le
 
-    // Read a chunk at a time: one safe_read per qword would be millions.
+// The static in the executable's data -- .data and the .bss after it -- that
+// points at something `accept` agrees with, or 0. For a manager whose
+// recorded static no longer checks out, as after a game patch. Chunked,
+// since one safe_read per qword would be millions.
+extern "C" std::uintptr_t bg3le_image_find_static(bool (*accept)(std::uintptr_t)) {
+    using namespace bg3le;
     constexpr std::size_t kChunk = 1 << 16;
     std::vector<std::uintptr_t> words(kChunk / 8);
     for (auto const& [from, to] : image().Writable) {
@@ -120,16 +121,31 @@ std::uintptr_t find_global() {
             for (std::size_t i = 0; i < got; ++i) {
                 const std::uintptr_t p = words[i];
                 if (p < 0x10000 || in_image(p) || (p & 7) != 0) continue;
-                if (looks_like_manager(p)) {
-                    const std::uintptr_t at = base + i * 8;
-                    logf("resources: ResourceManager global at image+%#lx (recorded +%#lx)",
-                         (unsigned long)(at - image().From), (unsigned long)kRecordedGlobal);
-                    return at;
-                }
+                if (accept(p)) return base + i * 8;
             }
         }
     }
     return 0;
+}
+
+extern "C" std::uintptr_t bg3le_image_base() { return bg3le::image().From; }
+
+namespace bg3le {
+namespace {
+
+// The global that holds the manager: the recorded one if it agrees, else
+// whatever qword in the executable's data points at something that does.
+std::uintptr_t find_global() {
+    const std::uintptr_t recorded = image().From + kRecordedGlobal;
+    std::uintptr_t mgr = 0;
+    if (image().From != 0 && peek(recorded, &mgr) && looks_like_manager(mgr)) return recorded;
+
+    const std::uintptr_t at = bg3le_image_find_static(&looks_like_manager);
+    if (at != 0) {
+        logf("resources: ResourceManager global at image+%#lx (recorded +%#lx)",
+             (unsigned long)(at - image().From), (unsigned long)kRecordedGlobal);
+    }
+    return at;
 }
 
 std::mutex& lock() {

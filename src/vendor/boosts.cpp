@@ -24,6 +24,7 @@ extern "C" char const* bg3le_fixed_string(std::uint32_t index, std::uint32_t* le
 extern "C" bool bg3le_meta_enum_label_value(char const* enumName, char const* label,
                                             std::uint64_t* value);
 extern "C" bool bg3le_meta_parse_guid(char const* text, void* out);
+extern "C" std::uintptr_t bg3le_image_find_static(bool (*accept)(std::uintptr_t));
 
 namespace bg3le {
 namespace {
@@ -60,7 +61,8 @@ std::uintptr_t image_base() {
     return base;
 }
 
-// Whether a prototype's TypeName is the label of its own Boost type.
+// Whether a prototype's TypeName is the label of its own Boost type. Most
+// do; a Disadvantage boost is the Advantage type under its own name.
 bool names_its_type(std::uintptr_t prototype) {
     std::uint32_t typeName = 0;
     std::uint8_t type = 0;
@@ -71,6 +73,43 @@ bool names_its_type(std::uintptr_t prototype) {
     std::uint64_t value = 0;
     return text != nullptr && bg3le_meta_enum_label_value("BoostType", text, &value)
            && value == type;
+}
+
+// A manager whose Boosts map is well formed and names its own types.
+bool looks_like_manager(std::uintptr_t mgr) {
+    const std::uintptr_t map = mgr + kBoosts;
+    std::uint32_t size = 0, capacity = 0;
+    std::uintptr_t values = 0;
+    if (!peek(map + kKeysSize, &size) || !peek(map + kKeysCapacity, &capacity)
+        || !peek(map + kValuesBuffer, &values) || size < 100 || size > capacity
+        || size > (1u << 20)) {
+        return false;
+    }
+    std::uintptr_t sample[8] = {};
+    if (!safe_read(reinterpret_cast<void const*>(values), sample, sizeof(sample))) return false;
+    int agreed = 0;
+    for (std::uintptr_t prototype : sample) agreed += names_its_type(prototype) ? 1 : 0;
+    return agreed >= 6;
+}
+
+// The static holding the manager: the recorded one, else found again.
+std::uintptr_t manager_static() {
+    static std::uintptr_t found = 0;
+    static bool searched = false;
+    std::uintptr_t mgr = 0;
+    if (found != 0 && peek(found, &mgr) && looks_like_manager(mgr)) return found;
+    const std::uintptr_t recorded = image_base() + kRecordedManagerGlobal;
+    if (image_base() != 0 && peek(recorded, &mgr) && looks_like_manager(mgr)) {
+        return found = recorded;
+    }
+    if (searched) return 0;
+    searched = true;
+    found = bg3le_image_find_static(&looks_like_manager);
+    if (found != 0) {
+        logf("boosts: BoostPrototypeManager static at image+%#lx (recorded +%#lx)",
+             (unsigned long)(found - image_base()), (unsigned long)kRecordedManagerGlobal);
+    }
+    return found;
 }
 
 struct Index {
@@ -88,7 +127,8 @@ std::mutex& lock() {
 Index const* index() {
     static Index built;
     std::uintptr_t mgr = 0;
-    if (image_base() == 0 || !peek(image_base() + kRecordedManagerGlobal, &mgr)) return nullptr;
+    const std::uintptr_t at = manager_static();
+    if (at == 0 || !peek(at, &mgr)) return nullptr;
     const std::uintptr_t map = mgr + kBoosts;
     std::uint32_t size = 0, capacity = 0;
     std::uintptr_t keys = 0, values = 0;
@@ -105,17 +145,6 @@ Index const* index() {
                        size * sizeof(std::uintptr_t)) != size * sizeof(std::uintptr_t)
         || safe_read_some(reinterpret_cast<void const*>(keys), guids.data(), guids.size())
                != guids.size()) {
-        return nullptr;
-    }
-    // Most, not all: a Disadvantage boost is the Advantage type under its
-    // own name.
-    std::uint32_t sampled = 0, agreed = 0;
-    for (std::uint32_t i = 0; i < 8 && i < size; ++i, ++sampled) {
-        if (names_its_type(prototypes[i])) ++agreed;
-    }
-    if (sampled < 8 || agreed < 6) {
-        logf("boosts: the manager at image+%#lx did not check out (%u of %u agreed)",
-             (unsigned long)kRecordedManagerGlobal, agreed, sampled);
         return nullptr;
     }
 
