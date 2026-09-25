@@ -86,7 +86,7 @@ std::uintptr_t load_bias() {
 }
 
 std::size_t hook_call_sites(std::uintptr_t func_offset, void* replacement,
-                            void** original) {
+                            void** original, bool tail_jumps) {
     const std::uintptr_t bias = load_bias();
     const std::uintptr_t target = bias + func_offset;
     if (original != nullptr) *original = reinterpret_cast<void*>(target);
@@ -109,13 +109,13 @@ std::size_t hook_call_sites(std::uintptr_t func_offset, void* replacement,
     std::size_t patched = 0;
 
     for (std::size_t i = 0; i + 5 <= text_size; ++i) {
-        if (code[i] != 0xE8) continue;
+        if (code[i] != 0xE8 && !(tail_jumps && code[i] == 0xE9)) continue;
         std::int32_t disp = 0;
         std::memcpy(&disp, code + i + 1, 4);
         const auto site = reinterpret_cast<std::uintptr_t>(code + i);
         if (site + 5 + disp != target) continue;
 
-        // Only the 4 displacement bytes change; the E8 stays put.
+        // Only the 4 displacement bytes change; the opcode stays put.
         auto* start = reinterpret_cast<void*>((site + 1) & ~(std::uintptr_t)(page - 1));
         const std::size_t span = (site + 5) - reinterpret_cast<std::uintptr_t>(start);
         if (::mprotect(start, span, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) continue;

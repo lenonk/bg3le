@@ -30,6 +30,7 @@
 #include "elf_symbols.h"
 #include "hook.h"
 #include "game_state.h"
+namespace bg3le { void install_entity_trace_hook(); }
 #include "savegame.h"
 #include "debug_server.h"
 #include "lua_host.h"
@@ -1367,6 +1368,7 @@ __attribute__((constructor)) static void bg3le_init() {
     bg3le::install_savegame_hook();
     // Before the module loads, so its exit is seen (the menu line, client mods).
     bg3le::install_game_state_hook();
+    bg3le::install_entity_trace_hook();
 
     // BG3LE_STACKDUMP_AT=<seconds>: every thread's stack, that long after load.
     if (const char* at = std::getenv("BG3LE_STACKDUMP_AT")) {

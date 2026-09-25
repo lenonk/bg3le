@@ -39,8 +39,9 @@ bool hook_slot(std::uintptr_t slot_offset, std::uintptr_t expected_offset,
 // rel32 cannot reach our library from the executable's text, so the calls
 // are pointed at a trampoline allocated within +/-2GB of the code. Returns
 // the number of sites patched; original receives the real function address.
+// With tail_jumps, E9 tail calls to the function are redirected too.
 std::size_t hook_call_sites(std::uintptr_t func_offset, void* replacement,
-                            void** original);
+                            void** original, bool tail_jumps = false);
 
 // Overwrites len bytes at a link-time .text offset with patch,
 // after verifying they still hold expected (as hook_slot does).

@@ -185,6 +185,7 @@ list(APPEND VENDOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/level.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/functor_exec.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/static_data_write.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/entity_trace.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/prototypes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_sync.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_create.cpp

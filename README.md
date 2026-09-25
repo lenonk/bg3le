@@ -368,6 +368,18 @@ component's declared size with the size the engine recorded, and
   by two pages, leaving the first dead, where the engine grows one page with
   every entry free. `IsAlive` now checks the generator, as upstream's does,
   rather than the entity's storage
+- **`Ext.Entity`'s tracing**: `SetupTracing`, `EnableTracing`, `GetTrace` and
+  `ClearTrace`, logging what upstream's `ECSChangeTracer` logs, into bg3se's
+  own `ECSChangeLog`, from a pre-hook on the engine's
+  `EntityWorld::FlushECBs` (upstream's hook point; found where the world
+  update calls it, and reached by tail call from two more callers, which
+  `hook_call_sites` can now redirect too). Replication is logged at the
+  update's second flush, since by bg3le's tick the pools have been sent.
+  Like upstream's, enabling it needs DeveloperMode. Over two seconds of the
+  host walking it logged 1,791 entities, with creates, destroys,
+  modifications, one-frame and replicated changes, and an `Ext.Entity.Create`
+  entity as `Create Immediate`. `GetTrace` hands back a copy of the log
+  taken under its lock, since the engine writes it from its own thread
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -653,13 +665,10 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **1 of `Ext.*` refuses rather than answers.** Every name bg3se exposes is
-  present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
-  needing machinery bg3le does not have raise instead of returning a
-  plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: it is
-  `Ext.Entity.SetupTracing`.
-  `reference/ext-api-surface.txt` lists them with their shapes
+- **No `Ext.*` function refuses any more.** Every name bg3se exposes is
+  present — `tools/api-coverage.lua` reports 715 of 715 — and
+  `tools/count-refusals.py`, which counts the ones that raise instead of
+  answering, now finds none. What is left is in the smaller gaps below
 - **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
   enumerations in place; conditions, strings, floats, GUIDs, flag sets and

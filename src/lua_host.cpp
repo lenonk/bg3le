@@ -5140,6 +5140,43 @@ int l_entity_destroy(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.TraceSetup(ecb, immediate, replication, modifications, {index...})
+extern "C" bool bg3le_trace_setup(void* container, bool ecb, bool immediate, bool replication,
+                                  bool modifications, std::uint16_t const* exclude,
+                                  std::size_t excludeCount);
+extern "C" bool bg3le_trace_enable(void* container, bool enable);
+extern "C" void* bg3le_trace_get(void* container);
+extern "C" void bg3le_trace_clear(void* container);
+int l_trace_setup(lua_State* L) {
+    std::vector<std::uint16_t> exclude;
+    if (lua_istable(L, 5)) {
+        const lua_Integer n = luaL_len(L, 5);
+        for (lua_Integer i = 1; i <= n; ++i) {
+            lua_geti(L, 5, i);
+            if (lua_isinteger(L, -1)) exclude.push_back((std::uint16_t)lua_tointeger(L, -1));
+            lua_pop(L, 1);
+        }
+    }
+    lua_pushboolean(L, bg3le_trace_setup(world_container(), lua_toboolean(L, 1), lua_toboolean(L, 2),
+                                          lua_toboolean(L, 3), lua_toboolean(L, 4), exclude.data(),
+                                          exclude.size()));
+    return 1;
+}
+int l_trace_enable(lua_State* L) {
+    lua_pushboolean(L, bg3le_trace_enable(world_container(), lua_toboolean(L, 1)));
+    return 1;
+}
+int l_trace_get(lua_State* L) {
+    void* at = bg3le_trace_get(world_container());
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+int l_trace_clear(lua_State* L) {
+    bg3le_trace_clear(world_container());
+    return 0;
+}
+
 // Ext._Internal.StatSync(name) -> true, or nil and why
 extern "C" char const* bg3le_stats_sync(char const* name);
 int l_stat_sync(lua_State* L) {
@@ -6897,6 +6934,14 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsCreate");
     lua_pushcfunction(g_lua, l_entity_create);
     lua_setfield(g_lua, -2, "EntityCreate");
+    lua_pushcfunction(g_lua, l_trace_setup);
+    lua_setfield(g_lua, -2, "TraceSetup");
+    lua_pushcfunction(g_lua, l_trace_enable);
+    lua_setfield(g_lua, -2, "TraceEnable");
+    lua_pushcfunction(g_lua, l_trace_get);
+    lua_setfield(g_lua, -2, "TraceGet");
+    lua_pushcfunction(g_lua, l_trace_clear);
+    lua_setfield(g_lua, -2, "TraceClear");
     lua_pushcfunction(g_lua, l_entity_destroy);
     lua_setfield(g_lua, -2, "EntityDestroy");
     lua_pushcfunction(g_lua, l_stats_enum_add);
@@ -13373,11 +13418,51 @@ end
 function Ext.Entity.Destroy(entity)
   return Ext._Internal.EntityDestroy(entity)
 end
-Ext.Entity.SetupTracing = needs(
-  "Ext.Entity.SetupTracing needs the ECS change journal")
-Ext.Entity.EnableTracing = Ext.Entity.SetupTracing
-Ext.Entity.GetTrace = Ext.Entity.SetupTracing
-Ext.Entity.ClearTrace = Ext.Entity.SetupTracing
+-- Upstream's tracing: src/vendor/entity_trace.cpp logs from the engine's
+-- command-buffer flush.
+do
+  local warned = false
+
+  function Ext.Entity.SetupTracing(options)
+    options = options or {}
+    local function flag(name, default)
+      if options[name] == nil then return default end
+      return options[name] and true or false
+    end
+    local exclude = {}
+    for _, name in ipairs(options.ExcludeModificationComponents or {}) do
+      local index = Ext._Internal.ComponentIndex(name)
+      -- One-frame types are not modified in place, as upstream skips them.
+      if index ~= nil and index & 0x8000 == 0 then exclude[#exclude + 1] = index end
+    end
+    Ext._Internal.TraceSetup(flag("TrackECB", true), flag("TrackImmediateWorldCache", true),
+      flag("TrackReplication", true), flag("TrackModifications", false), exclude)
+  end
+
+  function Ext.Entity.EnableTracing(enable)
+    if not Ext.Debug.IsDeveloperMode() then
+      Ext.Log.PrintError("Entity tracing is only available in developer mode")
+      return
+    end
+    if enable and not warned then
+      warned = true
+      Ext.Log.PrintWarning("Entity tracing is a development tool designed for tracking entity changes; it should not be used in production!")
+    end
+    if not Ext._Internal.TraceEnable(enable and true or false) then
+      Ext.Log.PrintError("bg3le: entity tracing needs the engine's command-buffer flush, which is not hooked on this build")
+    end
+  end
+
+  function Ext.Entity.GetTrace()
+    local at = Ext._Internal.TraceGet()
+    if at == nil then return nil end
+    return Ext._Internal.PointedObject(at, "ecs::ECSChangeLog")
+  end
+
+  function Ext.Entity.ClearTrace()
+    Ext._Internal.TraceClear()
+  end
+end
 
 -- ---- the rest of Ext.StaticData, and Ext.Definition ----
 
