@@ -553,6 +553,7 @@ namespace {
 
 struct ComponentEvent {
     std::uint64_t Entity;
+    std::uint64_t World;  // the EntityWorld that raised it
     std::uint16_t Type;
     std::uint8_t Kind;  // 1 construct, 2 destroy
 };
@@ -567,12 +568,8 @@ std::vector<ComponentEvent>& event_queue() {
     return q;
 }
 
-std::vector<bool>& watched_types() {
-    static std::vector<bool> w;
-    return w;
-}
-
-void queue_event(std::uint16_t type, std::uint64_t entity, std::uint8_t kind) {
+void queue_event(std::uint16_t type, std::uint64_t entity, std::uint64_t world,
+                 std::uint8_t kind) {
     static std::atomic<int> said{0};
     if (said.fetch_add(1) < 3) {
         bg3le::logf("component events: %s of type %u for %#llx on thread %lu",
@@ -581,7 +578,7 @@ void queue_event(std::uint16_t type, std::uint64_t entity, std::uint8_t kind) {
     }
     const std::lock_guard<std::mutex> held(events_lock());
     if (event_queue().size() < (1u << 20)) {
-        event_queue().push_back(ComponentEvent{entity, type, kind});
+        event_queue().push_back(ComponentEvent{entity, world, type, kind});
     }
 }
 
@@ -594,8 +591,8 @@ using Storage = bg3se::FunctionStorage<void(bg3se::ecs::EntityRef*, void*)>;
 // handle and the world, with the component third.
 template <std::uint8_t Kind>
 void component_signal_call(Storage const& self, std::uint64_t handle,
-                           std::uint64_t /*world*/, void* /*component*/) {
-    queue_event(*self.data<std::uint16_t>(), handle, Kind);
+                           std::uint64_t world, void* /*component*/) {
+    queue_event(*self.data<std::uint16_t>(), handle, world, Kind);
 }
 
 Storage* component_signal_copy(Storage const&, Storage const& src, Storage* dst) {
@@ -669,6 +666,22 @@ bool add_connection(bg3se::ecs::ComponentSignal& signal,
     return true;
 }
 
+// Whether a signal already carries bg3le's handler for this type. Asked of
+// the engine's own array, so a new world (another save) starts unwatched.
+bool has_connection(bg3se::ecs::ComponentSignal& signal, void const* call,
+                    std::uint16_t type) {
+    auto const* array = reinterpret_cast<RawArray const*>(&signal.Connections);
+    auto* buffer = static_cast<Connection*>(array->Buffer);
+    for (std::uint32_t i = 0; buffer != nullptr && i < array->Size; ++i) {
+        auto const* storage = *reinterpret_cast<Storage* const*>(&buffer[i].Handler);
+        if (storage != nullptr && reinterpret_cast<void const*>(storage->call_) == call
+            && *storage->data<std::uint16_t>() == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 // Starts delivering construct and destroy events for one component type.
@@ -681,41 +694,45 @@ extern "C" bool bg3le_component_events_watch(void* container,
     auto* callbacks = registry.Callbacks[componentIndex];
     if (callbacks == nullptr) return false;
 
-    // The connections belong to this world's registry; another world
-    // (another save) starts with none.
-    static bg3se::ecs::EntityWorld* watchedWorld = nullptr;
-    auto& watched = watched_types();
-    if (watchedWorld != world) {
-        watched.clear();
-        watchedWorld = world;
-    }
-    if (watched.size() <= componentIndex) watched.resize(componentIndex + 1);
-    if (watched[componentIndex]) return true;
-
     const std::uint16_t type = componentIndex;
-    if (!add_connection(callbacks->OnConstruct, component_handler<1>(type))
-        || !add_connection(callbacks->OnDestroy, component_handler<2>(type))) {
+    if (!has_connection(callbacks->OnConstruct,
+                        reinterpret_cast<void const*>(&component_signal_call<1>), type)
+        && !add_connection(callbacks->OnConstruct, component_handler<1>(type))) {
         return false;
     }
-    watched[componentIndex] = true;
-    bg3le::logf("component events: watching type %u", componentIndex);
+    if (!has_connection(callbacks->OnDestroy,
+                        reinterpret_cast<void const*>(&component_signal_call<2>), type)
+        && !add_connection(callbacks->OnDestroy, component_handler<2>(type))) {
+        return false;
+    }
+    bg3le::logf("component events: watching type %u in world %p", componentIndex,
+                (void*)world);
     return true;
 }
 
-// Takes up to max queued events; returns how many were written.
-extern "C" std::size_t bg3le_component_events_take(std::uint64_t* entities,
+// Takes up to max queued events raised by one world; returns how many were
+// written. The other world's stay queued for its own context.
+extern "C" std::size_t bg3le_component_events_take(void* world,
+                                                   std::uint64_t* entities,
                                                    std::uint16_t* types,
                                                    std::uint8_t* kinds,
                                                    std::size_t max) {
     const std::lock_guard<std::mutex> held(events_lock());
     auto& q = event_queue();
-    const std::size_t n = q.size() < max ? q.size() : max;
-    for (std::size_t i = 0; i < n; ++i) {
-        entities[i] = q[i].Entity;
-        types[i] = q[i].Type;
-        kinds[i] = q[i].Kind;
+    const auto want = (std::uint64_t)(std::uintptr_t)world;
+    std::size_t n = 0;
+    std::size_t keep = 0;
+    for (std::size_t i = 0; i < q.size(); ++i) {
+        if (q[i].World == want && n < max) {
+            entities[n] = q[i].Entity;
+            types[n] = q[i].Type;
+            kinds[n] = q[i].Kind;
+            ++n;
+        } else {
+            q[keep++] = q[i];
+        }
     }
-    q.erase(q.begin(), q.begin() + (std::ptrdiff_t)n);
+    q.resize(keep);
     return n;
 }
 

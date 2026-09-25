@@ -1335,6 +1335,24 @@ void* server_container() {
     return ecs::container();
 }
 
+// The client world's container: the captured one that is not the server's,
+// once the two have been told apart.
+void* client_container() {
+    void* server = server_container();
+    if (!bg3le_container_is_server(server)) return nullptr;
+    void* other = ecs::container() != server ? ecs::container() : ecs::container_alt();
+    return other != server ? other : nullptr;
+}
+
+// The world the running context reads, as upstream's client and server each
+// read their own: the client context gets the client world.
+void* world_container() {
+    if (g_lua != nullptr && g_lua == g_client_lua) {
+        if (void* client = client_container()) return client;
+    }
+    return server_container();
+}
+
 // Accepts either name a component goes by and yields the engine's.
 //
 // bg3se describes 1,071 components and the symbol table has rather more, so a
@@ -1431,7 +1449,7 @@ void* component_pointer(std::uint64_t handle, const char* name,
     // in SizeAudit were -- not a wrong struct, a wrong mechanism.
     if (bg3le_meta_component_is_one_frame(*meta)) {
         return bg3le_entity_one_frame_component(
-            server_container(), handle, static_cast<std::uint16_t>(*index));
+            world_container(), handle, static_cast<std::uint16_t>(*index));
     }
 
     // The stride, not the struct size. For a proxy component the page holds a
@@ -1439,7 +1457,7 @@ void* component_pointer(std::uint64_t handle, const char* name,
     // size would stride the page wrongly and then read the pointer's own bytes
     // as the first fields. 46 of the components a live save carries are
     // proxies, so this is not an edge case.
-    void* slot = bg3le_entity_component(server_container(), handle,
+    void* slot = bg3le_entity_component(world_container(), handle,
                                         static_cast<std::uint16_t>(*index),
                                         bg3le_meta_component_stride(*meta));
     if (slot == nullptr) return nullptr;
@@ -2083,7 +2101,7 @@ int l_set_field(lua_State* L) {
     // OverrideableProperty marked overridden, an empty EntityRef given a
     // world. A no-op for any other field.
     bg3le_meta_after_write(meta, path, component, false,
-                           bg3le_entity_world(server_container()));
+                           bg3le_entity_world(world_container()));
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -2685,7 +2703,7 @@ int l_object_set_field(lua_State* L) {
     // which it is. A no-op for any other field.
     const bool unserializing = lua_toboolean(L, 5) != 0;
     bg3le_meta_after_write(subject.Meta, path, subject.Base, unserializing,
-                           bg3le_entity_world(server_container()));
+                           bg3le_entity_world(world_container()));
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -3832,7 +3850,7 @@ int l_all_entities(lua_State* L) {
     // Enumerating ecs::container() instead handed back handles from
     // whichever world was captured first -- valid there, rejected by the
     // component readers, and so entirely unreadable.
-    void* container = server_container();
+    void* container = world_container();
     if (container == nullptr) {
         lua_pushnil(L);
         lua_pushstring(L, "the ECS container has not been captured yet");
@@ -4929,7 +4947,7 @@ int l_entity_get_health(lua_State* L) {
 
     std::int32_t hp = 0;
     std::int32_t maxHp = 0;
-    if (!bg3le_entity_health(server_container(), handle,
+    if (!bg3le_entity_health(world_container(), handle,
                              static_cast<std::uint16_t>(*index), &hp, &maxHp)) {
         return 0;
     }
@@ -4947,7 +4965,7 @@ int l_entity_set_health(lua_State* L) {
         lua_pushboolean(L, 0);
         return 1;
     }
-    lua_pushboolean(L, bg3le_set_health(server_container(), handle,
+    lua_pushboolean(L, bg3le_set_health(world_container(), handle,
                                         static_cast<std::uint16_t>(*index), hp,
                                         setMax));
     return 1;
@@ -5071,7 +5089,7 @@ int l_entity_has_component(lua_State* L) {
     std::int32_t storageIndex = -1;
     void* storage = nullptr;
     void* component = nullptr;
-    bg3le_entity_probe(server_container(), handle,
+    bg3le_entity_probe(world_container(), handle,
                        static_cast<std::uint16_t>(*index), &storageIndex,
                        &storage, &component);
     lua_pushboolean(L, component != nullptr);
@@ -5139,7 +5157,7 @@ int l_entity_proxy_handle(lua_State* L) {
 // Ext._Internal.EntityAlive(handle) -> whether the entity has a storage
 int l_entity_alive(lua_State* L) {
     const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
-    lua_pushboolean(L, bg3le_entity_alive(server_container(), handle));
+    lua_pushboolean(L, bg3le_entity_alive(world_container(), handle));
     return 1;
 }
 
@@ -5152,10 +5170,10 @@ int l_entity_component_names(lua_State* L) {
     std::vector<std::uint16_t> types(512);
     auto fetch = changedOnly ? bg3le_entity_changed_types
                              : bg3le_entity_component_types;
-    std::size_t n = fetch(server_container(), handle, types.data(), types.size());
+    std::size_t n = fetch(world_container(), handle, types.data(), types.size());
     if (n > types.size()) {
         types.resize(n);
-        n = fetch(server_container(), handle, types.data(), types.size());
+        n = fetch(world_container(), handle, types.data(), types.size());
     }
 
     lua_createtable(L, (int)n, 0);
@@ -5187,7 +5205,8 @@ extern "C" void bg3le_component_callbacks_probe(void* container,
                                                 std::uint16_t componentIndex);
 extern "C" bool bg3le_component_events_watch(void* container,
                                              std::uint16_t componentIndex);
-extern "C" std::size_t bg3le_component_events_take(std::uint64_t* entities,
+extern "C" std::size_t bg3le_component_events_take(void* world,
+                                                   std::uint64_t* entities,
                                                    std::uint16_t* types,
                                                    std::uint8_t* kinds,
                                                    std::size_t max);
@@ -5197,7 +5216,7 @@ int l_watch_component_events(lua_State* L) {
     const auto index = component_index(engine_name_of(luaL_checkstring(L, 1)));
     lua_pushboolean(L, index && !(*index & 0x8000)
                            && bg3le_component_events_watch(
-                               server_container(),
+                               world_container(),
                                static_cast<std::uint16_t>(*index)));
     return 1;
 }
@@ -5209,8 +5228,8 @@ int l_take_component_events(lua_State* L) {
     static std::uint64_t entities[kBatch];
     static std::uint16_t types[kBatch];
     static std::uint8_t kinds[kBatch];
-    const std::size_t n = bg3le_component_events_take(entities, types, kinds,
-                                                      kBatch);
+    const std::size_t n = bg3le_component_events_take(
+        bg3le_entity_world(world_container()), entities, types, kinds, kBatch);
     lua_createtable(L, (int)n, 0);
     int at = 0;
     for (std::size_t i = 0; i < n; ++i) {
@@ -5297,11 +5316,11 @@ int l_component_callbacks_probe(lua_State* L) {
 //   -> { { engine name, one-frame, short name or false }, ... }
 int l_registered_component_types(lua_State* L) {
     std::vector<std::uint16_t> types(4096);
-    std::size_t n = bg3le_registered_component_types(server_container(),
+    std::size_t n = bg3le_registered_component_types(world_container(),
                                                      types.data(), types.size());
     if (n > types.size()) {
         types.resize(n);
-        n = bg3le_registered_component_types(server_container(), types.data(),
+        n = bg3le_registered_component_types(world_container(), types.data(),
                                              types.size());
     }
 
@@ -5370,7 +5389,7 @@ int l_uuid_to_handle(lua_State* L) {
     }
 
     const std::uint64_t handle = bg3le_uuid_to_handle(
-        server_container(), static_cast<std::uint16_t>(*index), uuid);
+        world_container(), static_cast<std::uint16_t>(*index), uuid);
     if (handle == 0) {
         lua_pushnil(L);
         lua_pushstring(L, "UUID not found in the mapping");
@@ -5400,7 +5419,7 @@ int l_entity_probe(lua_State* L) {
     auto handle = static_cast<std::uint64_t>(luaL_optinteger(L, 1, 0));
     bool found = false;
     if (handle == 0) {
-        handle = bg3le_find_entity_with(server_container(),
+        handle = bg3le_find_entity_with(world_container(),
                                         static_cast<std::uint16_t>(*index), &seen);
         found = true;
     }
@@ -5408,7 +5427,7 @@ int l_entity_probe(lua_State* L) {
     std::int32_t storageIndex = -1;
     void* storage = nullptr;
     void* component = nullptr;
-    bg3le_entity_probe(server_container(), handle,
+    bg3le_entity_probe(world_container(), handle,
                        static_cast<std::uint16_t>(*index), &storageIndex,
                        &storage, &component);
 
@@ -5431,7 +5450,7 @@ int l_entity_probe(lua_State* L) {
     if (component != nullptr) {
         std::int32_t hp = 0;
         std::int32_t maxHp = 0;
-        if (bg3le_entity_health(server_container(), handle,
+        if (bg3le_entity_health(world_container(), handle,
                                 static_cast<std::uint16_t>(*index), &hp, &maxHp)) {
             lua_pushinteger(L, hp);
             lua_setfield(L, -2, "Hp");
@@ -5475,7 +5494,7 @@ int l_entity_health(lua_State* L) {
 
     std::int32_t hp = 0;
     std::int32_t maxHp = 0;
-    if (!bg3le_entity_health(server_container(), handle,
+    if (!bg3le_entity_health(world_container(), handle,
                              static_cast<std::uint16_t>(*index), &hp, &maxHp)) {
         lua_pushnil(L);
         lua_pushstring(L, "entity has no Health component");
@@ -11730,6 +11749,8 @@ function Ext._Internal.DeliverComponentEvents()
 
   -- And the replication changes the last update made: upstream's OnChange
   -- handler gets the entity, the component and the changed field flags.
+  -- Only the server world replicates, so the client leaves them queued.
+  if Ext.IsClient() then return end
   for _, c in ipairs(Ext._Internal.TakeReplicationChanges()) do
     local entity = Ext._Internal.EntityValue(c[1])
     if entity ~= nil then

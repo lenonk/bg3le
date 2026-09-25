@@ -196,6 +196,13 @@ component's declared size with the size the engine recorded, and
   value-compared proxies do. `Ext.Types.GetValueType` answers as upstream's
   does: `"Entity"`, a struct's name (base type `"CppObject"`), or Lua's own
   type name
+- **Each context reads its own world.** The client context's entity reads go
+  to the client EntityWorld, as upstream's client state's do, and the
+  server's to the server's: `_C()` on the client is the controlled
+  character from the client world, carrying the `ecl::` components and
+  `ClientCharacter`, `GameObjectVisual` and the rest, under its own handle.
+  UUID lookups, component lists and `GetAllEntitiesWithComponent` follow the
+  same rule
 - **An entity has upstream's methods**: `IsAlive`, `GetAllComponents` and
   `GetAllComponentNames` from the entity's own storage (146 components for
   Lae'zel, in 2 ms), `HasRawComponent`, `GetChangedComponents`,
@@ -217,7 +224,8 @@ component's declared size with the size the engine recorded, and
   pointer-table `Function`; the signal's `EntityRef` argument, which bg3se
   writes as a pointer because MSVC passes a 16-byte struct by hidden
   reference, arrives by value in two registers under System V. Events are
-  queued and delivered on the next server tick, immediate subscribers
+  queued per world and delivered on that context's next tick — the client's
+  subscribers get the client world's entities — immediate subscribers
   before deferred ones, because the Lua states may only be entered from
   their own thread — so a destroy handler gets `nil` for the component,
   which no longer exists by then. Applying `BLESS` with Osiris reaches an
@@ -511,9 +519,6 @@ component's declared size with the size the engine recorded, and
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
-- **Client-side entities.** Entity reads go to the server world, so the
-  client context sees the server's entities and none of its own
-  (`ClientControl`, client visuals).
 - **`Ext.Entity.OnSystemUpdate`/`OnSystemPostUpdate`.** Upstream swaps a
   system's update function; systems update on worker threads here, where a
   Lua state cannot be entered.
