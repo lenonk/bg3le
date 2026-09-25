@@ -4679,6 +4679,42 @@ int l_stats_int64_intern(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.StringKeyFind(key) -> the TranslatedString's address, or nil
+extern "C" void* bg3le_string_key_find(char const* key);
+int l_string_key_find(lua_State* L) {
+    void* value = bg3le_string_key_find(luaL_checkstring(L, 1));
+    if (value == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)value);
+    return 1;
+}
+
+// Ext._Internal.StringKeys() -> {key = address}, or nil without the manager
+extern "C" std::size_t bg3le_string_keys(void (*each)(void*, char const*, void*),
+                                         void* context);
+int l_string_keys(lua_State* L) {
+    lua_newtable(L);
+    const std::size_t n = bg3le_string_keys(
+        [](void* context, char const* key, void* value) {
+            auto* L = static_cast<lua_State*>(context);
+            lua_pushinteger(L, (lua_Integer)(std::uintptr_t)value);
+            lua_setfield(L, -2, key);
+        },
+        L);
+    if (n == 0) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    return 1;
+}
+
+// Ext._Internal.StringKeySet(key, handle) -> boolean
+extern "C" bool bg3le_string_key_set(char const* key, char const* handle);
+int l_string_key_set(lua_State* L) {
+    lua_pushboolean(L, bg3le_string_key_set(luaL_checkstring(L, 1),
+                                            luaL_checkstring(L, 2)));
+    return 1;
+}
+
 // Ext._Internal.BuiltinFile(path) -> the builtin script's text, or nil
 extern "C" char const* bg3le_builtin_lua(char const* path, std::size_t* size);
 int l_builtin_file(lua_State* L) {
@@ -6350,6 +6386,12 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatSync");
     lua_pushcfunction(g_lua, l_builtin_file);
     lua_setfield(g_lua, -2, "BuiltinFile");
+    lua_pushcfunction(g_lua, l_string_key_find);
+    lua_setfield(g_lua, -2, "StringKeyFind");
+    lua_pushcfunction(g_lua, l_string_keys);
+    lua_setfield(g_lua, -2, "StringKeys");
+    lua_pushcfunction(g_lua, l_string_key_set);
+    lua_setfield(g_lua, -2, "StringKeySet");
     lua_pushcfunction(g_lua, l_settings_flag);
     lua_setfield(g_lua, -2, "SettingsFlag");
     lua_pushcfunction(g_lua, l_stats_type);
@@ -12808,8 +12850,37 @@ function Ext.Loca.GetTranslatedString(handle, fallback)
   return fallback or ""
 end
 
+-- Upstream's: TranslatedStringKeyManager's Keys, each key's TranslatedString
+-- read through the engine's own object.
 function Ext.Loca.GetAllTranslatedStringKeys()
-  return Ext._Internal.LocaKeys()
+  local all = Ext._Internal.StringKeys()
+  if all == nil then return nil end
+  local views = {}
+  local function view(key)
+    local addr = all[key]
+    if addr == nil then return nil end
+    if views[key] == nil then
+      views[key] = Ext._Internal.PointedObject(addr, "TranslatedString")
+    end
+    return views[key]
+  end
+  return Ext._Internal.NewObjectProxy({
+    __bg3leContainer = "map",
+    __index = function(_, key) return view(key) end,
+    __len = function()
+      local n = 0
+      for _ in pairs(all) do n = n + 1 end
+      return n
+    end,
+    __pairs = function(self)
+      local key
+      return function()
+        key = next(all, key)
+        if key == nil then return nil end
+        return key, view(key)
+      end, self, nil
+    end,
+  })
 end
 
 -- A key and a handle are the same string in this build -- a stat's
@@ -12825,18 +12896,17 @@ function Ext.Loca.UpdateTranslatedString(handle, value)
   return Ext._Internal.LocaSet(handle, value)
 end
 
+-- Upstream returns the TranslatedString by value, which its serializer
+-- pushes as the handle.
 function Ext.Loca.GetTranslatedStringKey(key)
-  if type(key) ~= "string" then return nil end
-  if Ext._Internal.Loca(key) == nil then return nil end
-  return key
+  local addr = Ext._Internal.StringKeyFind(tostring(key))
+  if addr == nil then return nil end
+  return Ext._Internal.PointedObject(addr, "TranslatedString").Handle.Handle
 end
 
--- The key variant is not: a key maps to a handle through
--- TranslatedStringKeyManager, which is not located in this build.
-Ext.Loca.UpdateTranslatedStringKey = needs(
-  "Ext.Loca.UpdateTranslatedStringKey writes the key-to-handle map, which "
-  .. "bg3le does not read either; Ext.Loca.UpdateTranslatedString takes a "
-  .. "handle and works")
+function Ext.Loca.UpdateTranslatedStringKey(key, handle)
+  return Ext._Internal.StringKeySet(tostring(key), tostring(handle))
+end
 
 -- ---- Ext.Template ----
 --
