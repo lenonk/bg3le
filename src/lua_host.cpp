@@ -4679,6 +4679,19 @@ int l_stats_int64_intern(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.StatSync(name) -> true, or nil and why
+extern "C" char const* bg3le_stats_sync(char const* name);
+int l_stat_sync(lua_State* L) {
+    char const* err = bg3le_stats_sync(luaL_checkstring(L, 1));
+    if (err != nullptr) {
+        lua_pushnil(L);
+        lua_pushstring(L, err);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 int l_stats_find(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     void* obj = bg3le_stats_find(name);
@@ -6315,6 +6328,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsAt");
     lua_pushcfunction(g_lua, l_stats_find);
     lua_setfield(g_lua, -2, "StatsFind");
+    lua_pushcfunction(g_lua, l_stat_sync);
+    lua_setfield(g_lua, -2, "StatSync");
     lua_pushcfunction(g_lua, l_stats_type);
     lua_setfield(g_lua, -2, "StatsType");
     lua_pushcfunction(g_lua, l_stats_using);
@@ -10655,11 +10670,6 @@ end
 -- with "attempt to call a nil value", so this is a proxy with a metatable:
 -- the attributes read through __index, the methods exist, and __pairs
 -- enumerates both so a dump looks like upstream's.
---
--- The methods raise rather than pretend. Writing a stat needs
--- RPGStats::SyncWithPrototypeManager and the parse buffers behind it, none
--- of which bg3le reaches yet, and a silent no-op would be worse than an
--- error a mod author can read.
 -- Writing an attribute.
 --
 -- An attribute is one int32 in the stat object's indexed properties, and
@@ -10866,16 +10876,30 @@ local function stat_write(self, key, value)
   return true
 end
 
-local STAT_NOT_WRITABLE =
-  "bg3le cannot write stats yet; %s needs the engine's stat sync path, " ..
-  "which is not implemented"
+-- Upstream's WARN_ONCE.
+local warned_once = {}
+function Ext._Internal.WarnOnce(message)
+  if warned_once[message] then return end
+  warned_once[message] = true
+  Ext.Log.PrintWarning(message)
+end
 
-local function stat_method(name)
-  return function() error(string.format(STAT_NOT_WRITABLE, name), 2) end
+-- Upstream's SyncWithPrototypeManager. The write already reached the stat,
+-- so a prototype that cannot be rebuilt is reported once rather than raised.
+function Ext._Internal.SyncStat(name, persist)
+  local ok, err = Ext._Internal.StatSync(name)
+  if not ok then
+    Ext._Internal.WarnOnce("bg3le: Sync(" .. tostring(name) .. "): " .. tostring(err))
+  end
+  if persist ~= nil then
+    Ext._Internal.WarnOnce("The 'persist' argument to Ext.Stats.Sync() is deprecated")
+  end
 end
 
 local STAT_METHODS = {
-  SetPersistence = stat_method("SetPersistence"),
+  SetPersistence = function()
+    Ext._Internal.WarnOnce("Ext.Stats.SetPersistence() is deprecated")
+  end,
 
   -- Upstream's Object::CopyFrom: it refuses across modifier lists, then
   -- assigns AIFlags and every IndexedProperties entry. Those properties are
@@ -10919,24 +10943,9 @@ local STAT_METHODS = {
     return stat_write(self, name, value)
   end,
 
-  -- Nothing to push: the write went into the object the engine reads, and
-  -- the prototype rebuild that upstream's Sync triggers has no symbol here.
-  -- Saying so once beats raising, because a mod that writes an attribute
-  -- and then syncs would lose the write it already made.
-  Sync = function(self)
-    if not rawget(self, "__syncSaid") then
-      rawset(self, "__syncSaid", true)
-      Ext.Log.Print(
-        "bg3le: stat:Sync() has nothing to push -- the attribute was written "
-        .. "to the object the engine reads. What upstream's Sync also does, "
-        .. "rebuilding the spell and status prototypes from the stats, needs "
-        .. "RPGStats::SyncWithPrototypeManager, which has no symbol on this "
-        .. "build. An attribute the engine has already compiled into a "
-        .. "prototype can still be changed: Ext.Stats.GetCachedSpell and its "
-        .. "siblings resolve the compiled form and its fields are writable, "
-        .. "so name the prototype field rather than waiting for a rebuild")
-    end
-    return true
+  -- Rebuilds the spell, status or interrupt prototype from the stat.
+  Sync = function(self, persist)
+    Ext._Internal.SyncStat(self.Name, persist)
   end,
 }
 
@@ -12239,22 +12248,17 @@ function Ext.Stats.GetStatsLoadedBefore(modId)
 end
 
 -- Sync and SetPersistence exist at module level as well as on the stat
--- object -- upstream's own comment calls the module-level pair a leftover
--- it means to move. Both need RPGStats::SyncWithPrototypeManager, which
--- bg3le does not reach, so both refuse; the name check upstream does first
--- happens here too, so a typo still reports as a typo.
-function Ext.Stats.Sync(statName)
+-- object, as upstream's do.
+function Ext.Stats.Sync(statName, persist)
   if Ext._Internal.StatsFind(statName) == nil then
     Ext.Log.PrintError("Cannot sync nonexistent stat: " .. tostring(statName))
     return
   end
-  error("bg3le: Ext.Stats.Sync needs the engine's stat sync path, which "
-        .. "is not implemented", 2)
+  Ext._Internal.SyncStat(statName, persist)
 end
 
 function Ext.Stats.SetPersistence()
-  error("bg3le: Ext.Stats.SetPersistence is deprecated upstream and needs "
-        .. "the engine's stat persistence flag, which is not implemented", 2)
+  Ext._Internal.WarnOnce("Ext.Stats.SetPersistence() is deprecated")
 end
 
 Ext.Stats.Create = needs(

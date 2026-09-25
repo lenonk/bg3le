@@ -153,12 +153,16 @@ not as text, and upstream delegates to `Object::SetRawAttribute`, which
 has no symbol here. Storing an index to text the engine never compiles
 would look like it worked and do nothing.
 
-`stat:Sync()` reports rather than raising. The write already went to the
-object the engine reads; what upstream's Sync additionally does, rebuilding
-the spell and status prototypes, needs
-`RPGStats::SyncWithPrototypeManager`, which also has no symbol. Raising
-would be worse than saying so, because a mod that writes an attribute and
-then syncs would lose the write it had already made.
+`stat:Sync()` and `Ext.Stats.Sync` rebuild the prototype, as upstream's
+`RPGStats::SyncWithPrototypeManager` does: `src/vendor/stat_sync.cpp`
+resets the fields bg3se's `SyncStat` resets and calls the engine's own
+`SpellPrototype::Init`, `StatusPrototype::Init` (then the status loader's
+boost parse) or `InterruptPrototype::Init`. See "Finding the Init
+functions" below. A passive is the exception: this build parses passives
+inline in their loader, so there is no per-passive rebuild to call, and
+Sync says so once rather than raising -- the write to the stat has already
+happened. `SetPersistence`, and Sync's `persist` argument, are deprecated
+upstream and warn once there; they do here.
 
 ## Copying a stat
 
@@ -190,9 +194,43 @@ put back. So an attribute the engine has already compiled can be changed
 after all — not by syncing the stat, but by writing the prototype the stat
 was compiled into.
 
-What is *not* offered is a Sync that does that for you. The correspondence
-between a stat's attribute names and a prototype's fields is not
-one-for-one — a spell stat carries names the prototype does not have and the
-prototype holds parsed forms of several at once — and guessing at it would
-write plausible values into the wrong fields. Naming the prototype field is
-the honest interface until the mapping is established from data.
+For a passive, that is the only way: its loader has no per-passive
+function to call again.
+
+## Finding the Init functions
+
+None has a symbol, but the executable kept its relocations (`.rela.text`,
+`.rela.data.rel.ro`, ...), so every reference in it is on record.
+`tools/relocs-xref.py` reads them.
+
+- An attribute name the loader reads ("AlternativeCastTextEvents") is a
+  string view in a sorted table in `.data.rel.ro`; a per-name static
+  initializer builds an interned name from it, and the startup initializer
+  stores a pointer to that name's id in a global. `relocs-xref.py table`
+  follows that chain for a whole table and counts which functions read the
+  globals: for the spell table, `0x5e35980` reads 19 of its names and has
+  exactly one caller, the spell loader, which zeroes a fresh 0x338-byte
+  prototype, calls it with `(proto, &name)`, inserts into the map and
+  appends to the name list at `+0x88` -- upstream's Windows pattern, move
+  for move.
+- The status loader (`0x3030350`) allocates 0x110-byte prototypes and calls
+  `0x27e4d90(proto, &name, flags)` fourteen times with hardcoded statuses
+  (upstream's INSURFACE pattern), then once per stat. Its second pass
+  parses Boosts: an empty `+0xc0`, the text, and a type-erased callback
+  (implementation pointer, then invoke, copy and manage, a scratch buffer
+  and `&Boosts`) handed to `0x30317a0`.
+- The loaders run in sequence from one function; `0x2fb8e20` is the
+  interrupt loader, and its loop calls `0x2fc33d0(proto, stats object)`
+  with a 0x1f0-byte stride.
+- The passive loader, `0x2fc1b00`, reads the passive table's names itself.
+
+Every one is pinned by offset and checked before use: its opening bytes,
+and where it loads the global at `0x7bbd418`, that the object there holds
+the RPGStats bg3le found at `+0xc8`. A different build fails the check and
+Sync reports it rather than calling anything.
+
+Syncing an unchanged stat leaves its prototype as the loader built it: 400
+of 400 spells and 399 of 400 statuses compare equal after a sync (BLUR's
+boost gets a fresh GUID from the reparse). 21 of 400 interrupts come out
+different, and rightly -- their Conditions now carry the edits 5eSpells
+made to their stats and asked to be synced.

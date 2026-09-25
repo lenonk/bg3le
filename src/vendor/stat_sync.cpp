@@ -1,0 +1,321 @@
+// stat:Sync() and Ext.Stats.Sync, as upstream's
+// RPGStats::SyncWithPrototypeManager: a spell, status or interrupt prototype
+// is reset the way bg3se's SyncStat resets it, then rebuilt by the engine's
+// own Init from the stat. Adapted from bg3se's GameDefinitions/Stats/Stats.cpp,
+// by Norbyte and the bg3se contributors -- thank you.
+//
+// None of the Init functions has a symbol. Their offsets come from the
+// relocations the linker kept (tools/find-prototype-inits.py) and are checked
+// before each call: the opening bytes must match, and where a function loads
+// the RPGStats global, that global must hold the stats manager bg3le found.
+// See reference/STAT-WRITES.md.
+
+#include <stdafx.h>
+
+#include <GameDefinitions/Stats/Stats.h>
+#include <GameDefinitions/Stats/Prototype.h>
+
+#include <cstdint>
+#include <cstring>
+
+#include "../log.h"
+#include "../mem.h"
+
+namespace bg3le {
+std::uintptr_t load_bias();
+}
+
+extern "C" void* bg3le_stats_manager();
+extern "C" void* bg3le_stats_find(char const* name);
+extern "C" char const* bg3le_stats_type(void const* object);
+extern "C" int bg3le_stats_attr_index(void const* object, char const* wanted);
+extern "C" bool bg3le_stats_attr_at(void const* object, std::size_t index,
+                                    char const** nameOut, char const** typeNameOut,
+                                    int* kindOut, int* rawOut);
+extern "C" char const* bg3le_stats_attr_label(void const* object,
+                                              std::size_t index, int raw);
+extern "C" char const* bg3le_stats_attr_string(int raw);
+extern "C" void* bg3le_prototype_find(int kind, char const* name);
+extern "C" bool bg3le_meta_enum_label_value(char const* enumName,
+                                           char const* label,
+                                           std::uint64_t* value);
+
+namespace bg3le {
+namespace {
+
+using namespace bg3se;
+using namespace bg3se::stats;
+
+// The engine's layouts, from the loaders that allocate and fill them.
+static_assert(sizeof(SpellPrototype) == 0x338);
+static_assert(offsetof(SpellPrototype, SteerSpeedMultipler) == 0x330);
+static_assert(sizeof(StatusPrototype) == 0x110);
+static_assert(offsetof(StatusPrototype, Boosts) == 0xc0);
+static_assert(sizeof(InterruptPrototype) == 0x1f0);
+static_assert(offsetof(InterruptPrototype, Name) == 0);
+static_assert(offsetof(Object, Name) == 0x20);
+static_assert(sizeof(Array<int>) == 16);
+
+// The global every Init reads first: an object holding RPGStats at +0xc8.
+constexpr std::uintptr_t kStatsGlobal = 0x7bbd418;
+constexpr std::size_t kStatsInHolder = 0xc8;
+
+struct InitFn {
+    char const* Name;
+    std::uintptr_t Offset;
+    unsigned char Bytes[28];
+    std::size_t Length;
+    std::size_t StatsDisp;   // offset of a disp32 that loads kStatsGlobal, or 0
+};
+
+const InitFn kSpellInit = {
+    "eoc::SpellPrototype::Init", 0x5e35980,
+    {0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+     0x48, 0x81, 0xec, 0xe8, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x1d},
+    20, 20};
+const InitFn kStatusInit = {
+    "eoc::StatusPrototype::Init", 0x27e4d90,
+    {0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+     0x48, 0x83, 0xec, 0x38, 0x4c, 0x8b, 0x2d},
+    17, 17};
+const InitFn kInterruptInit = {
+    "eoc::InterruptPrototype::Init", 0x2fc33d0,
+    {0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+     0x48, 0x83, 0xec, 0x18, 0x8b, 0x07, 0x8b, 0x6e, 0x20, 0x49,
+     0x89, 0xf6, 0x48, 0x89, 0xfb, 0x39, 0xe8},
+    27, 0};
+
+// The status loader's boost parse, which upstream calls ParseStaticBoosts:
+// the parser, then the three functions of the callback it is handed.
+const InitFn kBoostParse = {
+    "the static boost parser", 0x30317a0,
+    {0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+     0x48, 0x83, 0xec, 0x58, 0x85, 0xf6, 0x74, 0x2d},
+    18, 0};
+const InitFn kBoostInvoke = {
+    "the boost parse callback", 0x5e762a0,
+    {0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+     0x48, 0x83, 0xec, 0x68, 0x48, 0x89, 0xfb, 0x48, 0x8b, 0x7f, 0x18},
+    21, 0};
+const InitFn kBoostCopy = {
+    "the boost parse callback's copy", 0x5e765f0,
+    {0x0f, 0x10, 0x46, 0x18, 0x48, 0x89, 0xd0, 0x0f, 0x11, 0x42, 0x18},
+    11, 0};
+const InitFn kBoostManage = {
+    "the boost parse callback's manager", 0x5e76610,
+    {0x48, 0x89, 0xd0, 0x48, 0x85, 0xd2, 0x75, 0x01, 0xc3},
+    9, 0};
+
+// The function's address if it is the one this build was read from.
+void* verified(InitFn const& fn) {
+    const std::uintptr_t bias = load_bias();
+    auto const* code = reinterpret_cast<unsigned char const*>(bias + fn.Offset);
+    unsigned char held[sizeof(fn.Bytes)] = {};
+    if (!safe_read(code, held, fn.Length) || std::memcmp(held, fn.Bytes, fn.Length) != 0) {
+        logf("stat sync: %s is not at image+%#lx on this build", fn.Name,
+             (unsigned long)fn.Offset);
+        return nullptr;
+    }
+    if (fn.StatsDisp != 0) {
+        std::int32_t disp = 0;
+        char const* holder = nullptr;
+        void* stats = nullptr;
+        const std::uintptr_t next = (std::uintptr_t)code + fn.StatsDisp + 4;
+        if (!safe_read(code + fn.StatsDisp, &disp, sizeof(disp))
+            || next + disp != bias + kStatsGlobal
+            || !safe_read((void const*)(bias + kStatsGlobal), &holder, sizeof(holder))
+            || holder == nullptr
+            || !safe_read(holder + kStatsInHolder, &stats, sizeof(stats))
+            || stats == nullptr || stats != bg3le_stats_manager()) {
+            logf("stat sync: %s does not reach the stats manager bg3le found "
+                 "(image+%#lx -> %p -> %p; the manager is %p)", fn.Name,
+                 (unsigned long)(next + disp - bias), (void const*)holder, stats,
+                 bg3le_stats_manager());
+            return nullptr;
+        }
+    }
+    return (void*)code;
+}
+
+// Empties an array without running destructors, which would release strings
+// through engine calls bg3le does not have; the buffer stays the engine's.
+template <class T>
+void forget(Array<T>& a) {
+    std::uint32_t zero = 0;
+    std::memcpy((char*)&a + 12, &zero, sizeof(zero));
+}
+
+void reset_animation(SpellPrototypeAnimationData& a) {
+    for (auto* part : {&a.Part0, &a.Part1, &a.Part3, &a.Part4, &a.Part5,
+                       &a.Part6, &a.Part7, &a.Part8}) {
+        std::memset(part->data(), 0xff, sizeof(*part));
+    }
+    forget(a.Part2);
+    a.Flags = 0;
+}
+
+// A FixedString attribute's text, as upstream's GetFixedString reads it, or
+// an enumeration's label.
+char const* attr_label(void const* object, char const* name) {
+    const int index = bg3le_stats_attr_index(object, name);
+    if (index < 0) return nullptr;
+    int raw = 0;
+    if (!bg3le_stats_attr_at(object, (std::size_t)index, nullptr, nullptr, nullptr, &raw)) {
+        return nullptr;
+    }
+    char const* text = bg3le_stats_attr_string(raw);
+    return text != nullptr ? text : bg3le_stats_attr_label(object, (std::size_t)index, raw);
+}
+
+template <class E>
+E enum_of(char const* enumName, char const* label) {
+    std::uint64_t value = 0;
+    if (label == nullptr || !bg3le_meta_enum_label_value(enumName, label, &value)) {
+        return (E)0;
+    }
+    return (E)value;
+}
+
+char const* sync_spell(Object* object, SpellPrototype* proto) {
+    auto* init = (void (*)(SpellPrototype*, FixedString const*))verified(kSpellInit);
+    if (init == nullptr) return "the engine's SpellPrototype::Init is not where this build has it";
+
+    proto->SpellTypeId = enum_of<SpellType>("SpellType", attr_label(object, "SpellType"));    forget(proto->UseCosts);
+    forget(proto->RitualCosts);
+    forget(proto->DualWieldingUseCosts);
+    forget(proto->HitCostGroups);
+    forget(proto->VariableUseCosts);
+    forget(proto->VariableDualWieldingUseCosts);
+    forget(proto->VariableRitualCosts);
+    reset_animation(proto->SpellAnimation);
+    reset_animation(proto->DualWieldingSpellAnimation);
+    forget(proto->AlternativeCastTextEvents);
+    forget(proto->ContainerSpells);
+    forget(proto->Trajectories);
+    proto->SpellFlags = (SpellFlags)0;
+    proto->LineOfSightFlags = 0;
+    proto->CinematicArenaFlags = 0;
+    proto->WeaponTypes = 0;
+    proto->AiFlags = 0;
+    proto->RequirementEvents = 0;
+    proto->IsWeaponAttack = false;
+
+    init(proto, &object->Name);
+    return nullptr;
+}
+
+// The callback the loader hands the boost parser, as it lays it out: a
+// pointer to the implementation, which is the inline storage right after it.
+struct BoostSink {
+    void* Invoke;
+    void* Copy;
+    void* Manage;
+    void* Scratch;
+    Array<Guid>* Boosts;
+    std::uint64_t Tail[2];
+};
+struct BoostFunction {
+    BoostSink* Impl;
+    BoostSink Sink;
+};
+static_assert(offsetof(BoostFunction, Sink) == 8);
+using ManageProc = void (*)(void* self, void* storage, void* into);
+
+// As the status loader parses a status's Boosts after Init: into the emptied
+// array, through a scratch buffer released afterwards.
+char const* parse_boosts(void const* object, Array<Guid>* boosts) {
+    auto* parse = (void (*)(char const*, std::uint32_t, BoostFunction*))verified(kBoostParse);
+    void* invoke = verified(kBoostInvoke);
+    void* copy = verified(kBoostCopy);
+    void* manage = verified(kBoostManage);
+    if (parse == nullptr || invoke == nullptr || copy == nullptr || manage == nullptr) {
+        return "the engine's boost parser is not where this build has it";
+    }
+
+    forget(*boosts);
+    const int index = bg3le_stats_attr_index(object, "Boosts");
+    int raw = 0;
+    if (index < 0 || !bg3le_stats_attr_at(object, (std::size_t)index, nullptr,
+                                          nullptr, nullptr, &raw)) {
+        return nullptr;
+    }
+    char const* text = bg3le_stats_attr_string(raw);
+    if (text == nullptr) return nullptr;
+
+    alignas(16) unsigned char scratch[64] = {};
+    BoostFunction fn{nullptr, {invoke, copy, manage, scratch, boosts, {0, 0}}};
+    fn.Impl = &fn.Sink;
+    parse(text, (std::uint32_t)std::strlen(text), &fn);
+    if (fn.Impl != nullptr) ((ManageProc)fn.Impl->Manage)(fn.Impl, &fn.Sink, nullptr);
+    void* held = nullptr;
+    std::memcpy(&held, scratch, sizeof(held));
+    if (held != nullptr) {
+        ManageProc release = nullptr;
+        std::memcpy(&release, (char*)held + 0x10, sizeof(release));
+        release(held, scratch + 8, nullptr);
+    }
+    return nullptr;
+}
+
+char const* sync_status(Object* object, StatusPrototype* proto) {
+    auto* init = (void (*)(StatusPrototype*, FixedString const*, std::uint8_t))
+        verified(kStatusInit);
+    if (init == nullptr) return "the engine's StatusPrototype::Init is not where this build has it";
+
+    proto->StatusId = enum_of<StatusType>("StatusType", attr_label(object, "StatusType"));
+    proto->StatusPropertyFlags = 0;
+    proto->StatusGroups = 0;
+    // The loader clears only bit 0 before Init; the rest are set by a later
+    // pass that a sync does not repeat, so they are kept.
+    proto->Flags &= ~1u;
+    proto->RemoveEvents = 0;
+    forget(proto->Boosts);
+
+    init(proto, &object->Name, 0);
+    return parse_boosts(object, &proto->Boosts);
+}
+
+char const* sync_interrupt(Object* object, InterruptPrototype* proto) {
+    auto* init = (void (*)(InterruptPrototype*, Object*))verified(kInterruptInit);
+    if (init == nullptr) return "the engine's InterruptPrototype::Init is not where this build has it";
+
+    forget(proto->Costs);
+    init(proto, object);
+    return nullptr;
+}
+
+}  // namespace
+}  // namespace bg3le
+
+// Rebuilds the prototype of the named stat. Returns nullptr on success, or
+// when the stat has no prototype to rebuild (upstream does nothing there
+// either); otherwise why it could not.
+extern "C" char const* bg3le_stats_sync(char const* name) {
+    using namespace bg3le;
+    auto* object = (bg3se::stats::Object*)bg3le_stats_find(name);
+    if (object == nullptr) return "no such stat";
+    char const* type = bg3le_stats_type(object);
+    if (type == nullptr) return nullptr;
+
+    if (std::strcmp(type, "SpellData") == 0) {
+        auto* proto = (bg3se::stats::SpellPrototype*)bg3le_prototype_find(0, name);
+        if (proto == nullptr) return "the spell has no prototype; bg3le cannot add one";
+        return sync_spell(object, proto);
+    }
+    if (std::strcmp(type, "StatusData") == 0) {
+        auto* proto = (bg3se::stats::StatusPrototype*)bg3le_prototype_find(1, name);
+        if (proto == nullptr) return "the status has no prototype; bg3le cannot add one";
+        return sync_status(object, proto);
+    }
+    if (std::strcmp(type, "InterruptData") == 0) {
+        auto* proto = (bg3se::stats::InterruptPrototype*)bg3le_prototype_find(2, name);
+        if (proto == nullptr) return "the interrupt has no prototype; bg3le cannot add one";
+        return sync_interrupt(object, proto);
+    }
+    if (std::strcmp(type, "PassiveData") == 0) {
+        return "this build parses passives inside their loader, so there is no "
+               "per-passive rebuild to call; Ext.Stats.GetCachedPassive's fields "
+               "are writable";
+    }
+    return nullptr;
+}

@@ -518,13 +518,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **49 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **48 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 49 are
+  the source, because this one was stale at 86 for a while: 24 of the 48 are
   `Ext.Level`'s physics and pathfinding, 3 `Ext.StaticData`'s bank writes,
-  7 `Ext.Stats`' creation and functor execution, 6
+  6 `Ext.Stats`' creation and functor execution, 6
   `Ext.Template`'s local and cache managers, and the rest are singles —
   `Entity.Create`/`Destroy`, `Types.Construct`, and `GlobalSwitches`, whose
   object is findable by its own language string and whose declared layout is
@@ -543,7 +543,7 @@ component's declared size with the size the engine recorded, and
   executable with its own (about 8,000, `PxGetPhysics` and `NpScene`'s queries
   among them). What is unmapped is how Larian's physics types and groups sit
   in PhysX's filter data, which upstream's filters and hits are expressed in
-- **Stat `Sync` and `SetPersistence`.** Every attribute kind upstream
+- **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
   enumerations in place; conditions, strings, floats, GUIDs, flag sets and
   translated-string handles into the matching `RPGStats` pool; roll
@@ -558,14 +558,18 @@ component's declared size with the size the engine recorded, and
   version skipped a pool slot per write, one more each time; see
   `pool_slot` in `src/vendor/stats.cpp`. `CopyFrom` works — it is
   upstream's own loop over the indexed properties, and it refuses across
-  modifier lists exactly as upstream does. `SetPersistence` still raises,
-  and `Sync` reports what it cannot do rather than raising, because a mod
-  that writes and then syncs would otherwise lose the write it already
-  made — and because the thing `Sync` would rebuild is reachable anyway:
-  `Ext.Stats.GetCachedSpell` resolves the compiled prototype and its
-  fields are writable.
-  [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
-  the three theories that were tested and eliminated
+  modifier lists exactly as upstream does. `Sync` rebuilds a spell, status
+  or interrupt prototype the way upstream's does, through the engine's own
+  `Init` functions — found from the relocations the executable kept
+  (`tools/relocs-xref.py`) and checked before every call — so an edited
+  stat reaches the game; syncing 400 unchanged spells leaves every
+  prototype exactly as the loader built it. Passives are parsed inside
+  their loader on this build, with no per-passive rebuild to call, so
+  syncing one says so once; `Ext.Stats.GetCachedPassive`'s fields are
+  writable. `SetPersistence` warns that it is deprecated, as upstream's
+  does. [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the
+  layout, the Init hunt and the three theories that were tested and
+  eliminated
 - **The last few field kinds.** Every component field converts — 3,566 of
   3,566, from `tools/meta-check.c` (94.0% before `STDString` was given this
   build's sixteen-byte layout): scalars of any integer type (the vendored
