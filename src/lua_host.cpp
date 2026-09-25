@@ -9886,9 +9886,18 @@ Ext.ModEvents = setmetatable({}, {
   __metatable = "ModEvents",
 })
 
--- Upstream also refuses outside a mod's bootstrap; bg3le does not track
--- which mod is bootstrapping, so it only refuses a second registration.
+-- Upstream's ModEventManager:RegisterEvent: only while that mod bootstraps.
 function Ext.RegisterModEvent(mod, event)
+  local bootstrapping = Ext._Internal.BootstrappingMod()
+  if bootstrapping == nil then
+    Ext.Log.PrintWarning("Tried to register mod event while not bootstrapping a mod; this is not allowed.")
+    return
+  end
+  if bootstrapping ~= mod then
+    Ext.Log.PrintWarning("Tried to register mod event for mod '" .. tostring(mod)
+                         .. "' while bootstrapping mod '" .. bootstrapping .. "'; this is not allowed.")
+    return
+  end
   if mod_events[mod] == nil then mod_events[mod] = create_mod_events(mod) end
   if mod_events[mod].Events[event] ~= nil then
     Ext.Log.PrintWarning("Tried to register mod event '" .. mod .. "."
@@ -12946,6 +12955,11 @@ end
 local mod_readers = {}
 local loading_mod = nil
 
+-- Upstream's ModLoader.BootstrappingMod: the mod table being bootstrapped.
+function Ext._Internal.BootstrappingMod()
+  return loading_mod and loading_mod.ModTable
+end
+
 -- A loaded mod's reader, by its UUID or directory name, as upstream's
 -- FindModByNameGuid takes either.
 function Ext._Internal.ModReader(nameOrGuid)
@@ -13172,7 +13186,8 @@ local function load_mod_from(name, uuid, read, report)
   -- Also for the case where the table already existed.
   env.ModuleUUID = uuid
 
-  local reader = { Name = name, Uuid = uuid, Read = read, Env = env }
+  local reader = { Name = name, Uuid = uuid, Read = read, Env = env,
+                   ModTable = table_name }
   table.insert(mod_readers, reader)
   local outer = loading_mod
   loading_mod = reader
