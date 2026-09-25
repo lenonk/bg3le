@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <random>
@@ -19,6 +20,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -393,6 +395,20 @@ extern "C" int bg3le_ext_show_error(lua_State* L) {
     logf("Ext.Utils.ShowError: %s", message);
     std::fprintf(stderr, "bg3le: %s\n", message);
     return 0;
+}
+
+// Ext.Utils.ShowErrorAndExitGame: upstream's ShowStartupError with exit set --
+// the message in a box, then the game ends. The box is SDL's, from the game's
+// own libSDL2, and blocks until it is dismissed.
+extern "C" int bg3le_ext_show_error_and_exit(lua_State* L) {
+    char const* message = luaL_checkstring(L, 1);
+    logf("Ext.Utils.ShowErrorAndExitGame: %s", message);
+    std::fprintf(stderr, "bg3le: %s\n", message);
+    using ShowProc = int (*)(std::uint32_t, char const*, char const*, void*);
+    auto show = reinterpret_cast<ShowProc>(::dlsym(RTLD_DEFAULT, "SDL_ShowSimpleMessageBox"));
+    constexpr std::uint32_t kSdlMessageBoxError = 0x10;
+    if (show != nullptr) show(kSdlMessageBoxError, "Script Extender", message, nullptr);
+    std::_Exit(1);
 }
 
 

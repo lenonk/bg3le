@@ -2319,6 +2319,7 @@ extern "C" int bg3le_ext_command_line(lua_State* L);
 extern "C" int bg3le_ext_load_file(lua_State* L);
 extern "C" int bg3le_ext_pak_modules(lua_State* L);
 extern "C" int bg3le_ext_mod_settings_order(lua_State* L);
+extern "C" int bg3le_ext_show_error_and_exit(lua_State* L);
 extern "C" int bg3le_json_parse(lua_State* L);
 extern "C" int bg3le_ext_pak_read(lua_State* L);
 extern "C" int bg3le_ext_save_file(lua_State* L);
@@ -6196,6 +6197,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "GetMemoryUsage");
     lua_pushcfunction(g_lua, bg3le_ext_show_error);
     lua_setfield(g_lua, -2, "ShowError");
+    lua_pushcfunction(g_lua, bg3le_ext_show_error_and_exit);
+    lua_setfield(g_lua, -2, "ShowErrorAndExit");
     lua_pushcfunction(g_lua, bg3le_ext_pak_modules);
     lua_setfield(g_lua, -2, "PakModules");
     lua_pushcfunction(g_lua, bg3le_ext_mod_settings_order);
@@ -8638,8 +8641,7 @@ function Ext.Utils.Version() return 32 end
 function Ext.Utils.GameTime() return Ext.Timer.GameTime() end
 
 function Ext.Utils.ShowErrorAndExitGame(message)
-  Ext._Internal.ShowError(tostring(message))
-  error("bg3le: " .. tostring(message), 0)
+  Ext._Internal.ShowErrorAndExit(tostring(message))
 end
 
 function Ext.Utils.GetValueType(value)
