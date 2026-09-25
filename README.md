@@ -632,6 +632,14 @@ in every stat dump that upstream does not have. See
 `run-upstream-tests.sh` runs the server-side tests from a bg3se checkout's
 `LuaScripts/Tests` (default `../bg3se`). Some of their expectations predate
 the current game, so it prints each failure's reason rather than a verdict.
+Today 11 pass and 6 fail, each for a reason outside bg3le: `TestBaseMod` and
+`TestModManager` expect the old base module; `TestStatAttributes` compares
+functor objects as JSON, which upstream's own `Stringify` refuses without
+`IterateUserdata`; `TestECSComponents` expects `DisplayName.Name` to be a
+string, where upstream now returns a TranslatedString; `TestECSFunctions` calls
+`GetEntityType`, which upstream has since removed; and `TestGuidResourceLayout`
+meets 27 SpellLists (with this mod list) whose engine objects carry a zero
+`ResourceUUID` under a real key.
 
 Two conventions worth knowing. Anything located by content is validated
 before use — a structure has to agree about something only the real one could
