@@ -458,7 +458,10 @@ struct EntityReplicationPeer : public ProtectedGameObject<EntityReplicationPeer>
 };
 
 
-struct EntityHandleGenerator : public ProtectedGameObject<EntityHandleGenerator>
+// bg3le: not a ProtectedGameObject. ThreadState is one too, and under this ABI
+// two ProtectedGameObjectBase subobjects cannot share an address, which put
+// ThreadStates at +0x40 rather than +0, where the engine indexes it.
+struct EntityHandleGenerator
 {
     struct alignas(64) ThreadState : public ProtectedGameObject<ThreadState>
     {

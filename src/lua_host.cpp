@@ -13362,17 +13362,17 @@ function Ext.Entity.GetEntitiesAroundPosition(position, radius)
   end
   return out
 end
--- Upstream's Create allocates a handle through bg3se's own copy of the
--- engine's per-thread handle generator. Tried here (Ext._Internal.EntityCreate):
--- the entity is created and alive, but the calling thread's generator starts
--- empty, bg3se's growth of it is not what this build's engine expects, and the
--- engine regrows it with one page -- so destroying the entity faults in the
--- engine. Refused until the engine's own allocation is called instead.
-Ext.Entity.Create = needs(
-  "Ext.Entity.Create needs the engine's own handle allocation; bg3se's "
-  .. "reimplementation of it does not match this build's generator")
-Ext.Entity.Destroy = needs(
-  "Ext.Entity.Destroy needs entities Ext.Entity.Create can make safely")
+-- Upstream's: a new entity through the calling thread's command buffer,
+-- created immediately; Destroy queues the entity's removal.
+function Ext.Entity.Create()
+  local handle, err = Ext._Internal.EntityCreate()
+  if handle == nil then error("bg3le: Ext.Entity.Create: " .. tostring(err), 2) end
+  return Ext._Internal.EntityValue(handle)
+end
+
+function Ext.Entity.Destroy(entity)
+  return Ext._Internal.EntityDestroy(entity)
+end
 Ext.Entity.SetupTracing = needs(
   "Ext.Entity.SetupTracing needs the ECS change journal")
 Ext.Entity.EnableTracing = Ext.Entity.SetupTracing

@@ -245,16 +245,13 @@ EntityHandle EntityHandleGenerator::Create()
 EntityHandleGenerator::ThreadState::Entry* EntityHandleGenerator::ThreadState::Add()
 {
     if (NumFreeSlots < Entries.bucket_size() / 2) {
-        auto oldCapacity = Entries.capacity();
-        if (Entries.capacity() < Entries.size() + Entries.bucket_size()) {
-            Entries.resize(Entries.capacity() + Entries.bucket_size());
-        }
+        // bg3le: one page more, every new entry on the free list, as the
+        // engine grows it; resize() then add() grew twice and left a page dead.
+        auto oldSize = Entries.size();
+        Entries.resize(oldSize + Entries.bucket_size());
 
-        auto growSize = Entries.capacity() - oldCapacity;
-        for (uint32_t i = 0; i < growSize; i++) {
-            auto index = Entries.size();
-            auto entry = Entries.add();
-            *entry = Entry{
+        for (uint32_t index = oldSize; index < Entries.size(); index++) {
+            Entries[index] = Entry{
                 .Index = index,
                 .Salt = 1
             };

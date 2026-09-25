@@ -358,6 +358,16 @@ component's declared size with the size the engine recorded, and
   called after checking the vtable is the one bg3se declares. In a test, 120
   new ClassDescriptions grew the bank from 104 to 224 and the old entries
   still read
+- **`Ext.Entity.Create` and `Destroy`**, through the calling thread's entity
+  command buffer as upstream's go. Two layout bugs stood in the way, both
+  fixed in the vendored source. bg3se's `EntityHandleGenerator` put its
+  per-thread states at +0x40, because its `ThreadState` shares a
+  `ProtectedGameObjectBase` with it and the Itanium ABI will not overlap two
+  of those; the engine indexes them from +0, so every thread's handles were
+  read from its neighbour's. And its `ThreadState::Add` grew an empty state
+  by two pages, leaving the first dead, where the engine grows one page with
+  every entry free. `IsAlive` now checks the generator, as upstream's does,
+  rather than the entity's storage
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -643,12 +653,12 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **3 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **1 of `Ext.*` refuses rather than answers.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: they are
-  `Ext.Entity`'s `Create`, `Destroy` and `SetupTracing`.
+  the source, because this one was stale at 86 for a while: it is
+  `Ext.Entity.SetupTracing`.
   `reference/ext-api-surface.txt` lists them with their shapes
 - **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and

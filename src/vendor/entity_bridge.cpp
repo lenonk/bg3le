@@ -469,8 +469,19 @@ bg3se::ecs::EntityStorageData* storage_of(void* container,
 // (Lua/Shared/Proxies/LuaEntityProxy.inl) over the captured container.
 
 // IsAlive: whether the entity has a storage.
+// Upstream's IsAliveEntity: the handle's slot in its thread's generator
+// state still carries its index and salt. A null handle is alive, as there.
 extern "C" bool bg3le_entity_alive(void* container, std::uint64_t handle) {
-    return storage_of(container, bg3se::EntityHandle(handle)) != nullptr;
+    const bg3se::EntityHandle h(handle);
+    if (!h) return true;
+    auto* world = world_from_container(container);
+    if (world == nullptr || world->HandleGenerator == nullptr) return false;
+    auto& generator = *world->HandleGenerator;
+    if (h.GetThreadIndex() >= std::size(generator.ThreadStates)) return false;
+    auto& state = generator.ThreadStates[h.GetThreadIndex()];
+    if (h.GetIndex() >= state.Entries.size()) return false;
+    auto const& entry = state.Entries[h.GetIndex()];
+    return entry.Index == h.GetIndex() && entry.Salt == h.GetSalt();
 }
 
 // GetAllComponentNames: the storage's component types, then the one-frame
@@ -949,6 +960,10 @@ extern "C" bool bg3le_system_probe(void* container, std::int32_t index, void** s
 
 extern "C" int bg3le_engine_thread_index();
 
+// The engine addresses a thread's state as generator + thread * 64.
+static_assert(offsetof(bg3se::ecs::EntityHandleGenerator, ThreadStates) == 0
+              && sizeof(bg3se::ecs::EntityHandleGenerator::ThreadState) == 64);
+
 // Upstream's Ext.Entity.Create and Destroy, through the calling thread's
 // entity command buffer as upstream's go. 0 / false when the thread has no
 // engine thread index, which would pick someone else's buffer.
@@ -963,4 +978,5 @@ extern "C" bool bg3le_entity_destroy(void* container, std::uint64_t handle) {
     if (world == nullptr || bg3le_engine_thread_index() < 0 || !bg3le_game_allocator_ready()) return false;
     return world->Deferred()->DestroyEntity(bg3se::EntityHandle{handle});
 }
+
 

@@ -22,6 +22,10 @@ def grep_count(pattern, flags=0):
 
 
 CHECKS = [
+    ("EntityHandleGenerator keeps ThreadStates at +0",
+     lambda: "ThreadStates at +0x40 rather than +0" in text("BG3Extender/GameDefinitions/EntitySystem.h")),
+    ("entity handle generator grows by one page",
+     lambda: "every new entry on the free list" in text("BG3Extender/GameDefinitions/EntitySystem.cpp")),
     ("requires-clause wrapped in parens",
      lambda: grep_count(r"requires !") == 0),
     ("no stray typename before a builtin type",

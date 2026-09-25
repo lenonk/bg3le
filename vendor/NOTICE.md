@@ -296,6 +296,25 @@ those, all 46 members whose offset the engine's settings registration reveals
 (`tools/relocs-xref.py`; see `reference/GLOBAL-SWITCHES.md`) sit where bg3se
 declares them. Checked by `tools/check-vendor-patches.py`.
 
+### The entity handle generator's thread states start at +0
+
+`GameDefinitions/EntitySystem.h`'s `EntityHandleGenerator` no longer derives
+from `ProtectedGameObject`. Its `ThreadState` does, and under the Itanium ABI
+two `ProtectedGameObjectBase` subobjects cannot share an address, so
+`ThreadStates` landed at +0x40; MSVC puts it at +0, as the engine indexes it
+(`generator + thread * 64`, image+0x320b090). Every thread's state was read
+from its neighbour's. `src/vendor/entity_bridge.cpp` asserts the offset.
+
+### The entity handle generator grows as the engine's
+
+`GameDefinitions/EntitySystem.cpp`'s `EntityHandleGenerator::ThreadState::Add`
+grew an empty thread state twice -- `resize()` to a page, then an `add()` per
+new entry past it -- leaving the first page's entries off the free list and a
+second page the engine does not expect. It now grows by one page and links
+every new entry into the free list, which is the state the engine's own
+threads show: one 32,768-entry page, `{Index = i + 1, Salt = 1}`. Checked by
+`tools/check-vendor-patches.py`.
+
 ### Generated files
 
 Upstream gitignores these; they are committed here so the tree builds without
