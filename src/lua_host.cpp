@@ -6654,10 +6654,8 @@ function Ext.Debug.GenerateIdeHelpers(builtinOnly)
   return path
 end
 
-function Ext.Debug.Crash()
-  error("bg3le: Ext.Debug.Crash is a crash-reporter test and is refused; "
-        .. "bg3le has no crash reporter", 2)
-end
+-- Upstream's crashes only in a debug build; a release build does nothing.
+function Ext.Debug.Crash() end
 
 -- Ext.Debug.Reset()
 --

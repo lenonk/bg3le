@@ -492,11 +492,11 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **57 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **56 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 57 are
+  the source, because this one was stale at 86 for a while: 24 of the 56 are
   `Ext.Level`'s physics and pathfinding, 8 each `Ext.Stats`' creation and
   functor execution and `Ext.StaticData`'s bank writes and atlas, 6
   `Ext.Template`'s local and cache managers, and the rest are singles —
