@@ -2362,6 +2362,11 @@ extern "C" std::size_t bg3le_templates_count();
 extern "C" char const* bg3le_templates_id_at(std::size_t index);
 extern "C" void* bg3le_templates_find(char const* id);
 extern "C" char const* bg3le_templates_type(char const* id);
+extern "C" void* bg3le_templates_in(int source, char const* id, char const** type);
+extern "C" bool bg3le_templates_list(int source,
+                                     void (*each)(void* ctx, char const* id, void* at,
+                                                  char const* type),
+                                     void* ctx);
 extern "C" void* bg3le_prototype_find(int kind, char const* name);
 extern "C" std::size_t bg3le_prototype_count(int kind);
 extern "C" char const* bg3le_prototype_name_at(int kind, std::size_t index);
@@ -3974,6 +3979,40 @@ int l_template_find(lua_State* L) {
     } else {
         lua_pushnil(L);
     }
+    return 2;
+}
+
+// Ext._Internal.TemplateFindIn(source, id) -> address, engine type name,
+// from the level's local templates (1), the cache (2) or the level's cache (3)
+int l_template_find_in(lua_State* L) {
+    char const* type = nullptr;
+    void* at = bg3le_templates_in((int)luaL_checkinteger(L, 1), luaL_checkstring(L, 2), &type);
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    if (type != nullptr) {
+        lua_pushstring(L, type);
+    } else {
+        lua_pushnil(L);
+    }
+    return 2;
+}
+
+// Ext._Internal.TemplatesIn(source) -> {id = address}, {id = engine type},
+// or nothing when that manager is not there
+int l_templates_in(lua_State* L) {
+    const int source = (int)luaL_checkinteger(L, 1);
+    lua_newtable(L);
+    lua_newtable(L);
+    auto each = [](void* ctx, char const* id, void* at, char const* type) {
+        auto* S = static_cast<lua_State*>(ctx);
+        lua_pushinteger(S, (lua_Integer)(std::uintptr_t)at);
+        lua_setfield(S, -3, id);
+        if (type != nullptr) {
+            lua_pushstring(S, type);
+            lua_setfield(S, -2, id);
+        }
+    };
+    if (!bg3le_templates_list(source, each, L)) return 0;
     return 2;
 }
 
@@ -6450,6 +6489,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "TemplateFind");
     lua_pushcfunction(g_lua, l_template_ids);
     lua_setfield(g_lua, -2, "TemplateIds");
+    lua_pushcfunction(g_lua, l_template_find_in);
+    lua_setfield(g_lua, -2, "TemplateFindIn");
+    lua_pushcfunction(g_lua, l_templates_in);
+    lua_setfield(g_lua, -2, "TemplatesIn");
     lua_pushcfunction(g_lua, l_loca_get);
     lua_setfield(g_lua, -2, "Loca");
     lua_pushcfunction(g_lua, l_loca_keys);
@@ -13096,10 +13139,10 @@ end
 
 -- ---- Ext.Template ----
 --
--- The template managers have no symbol, so the templates themselves are
--- found instead: see src/vendor/templates.cpp. A template's concrete type
--- comes from its own vtable, decoded rather than called, and decides which
--- class the reflective reader expands it as.
+-- Upstream's ServerTemplate.inl and ClientTemplate.inl: the managers are
+-- read in src/vendor/templates.cpp. A template's concrete type comes from its
+-- own vtable, decoded rather than called, and decides which class the
+-- reflective reader expands it as.
 
 -- The engine's type name to the class bg3se describes. The types with no
 -- entry -- terrain, fogVolume, Spline, lightProbe, TileConstruction --
@@ -13113,10 +13156,8 @@ local TEMPLATE_CLASS = {
   scenery = "SceneryTemplate",
 }
 
-local function read_template(id)
-  local address, engineType = Ext._Internal.TemplateFind(id)
+local function template_at(address, engineType)
   if address == nil then return nil end
-
   local class = TEMPLATE_CLASS[engineType] or "GameObjectTemplate"
   local out = Ext._Internal.ReadObject(address, class, "", {})
   -- What the engine calls it, which is not a field on the object, so it goes
@@ -13125,41 +13166,51 @@ local function read_template(id)
   return out
 end
 
-function Ext.Template.GetTemplate(id)
+-- The managers besides the root one, as TemplateFindIn numbers them.
+local LOCAL, CACHE, LOCAL_CACHE = 1, 2, 3
+
+local function template_in(source, id)
   if type(id) ~= "string" then return nil end
-  return read_template(id)
+  if source == nil then return template_at(Ext._Internal.TemplateFind(id)) end
+  return template_at(Ext._Internal.TemplateFindIn(source, id))
 end
 
--- Root, local and cache templates are three managers upstream, holding the
--- authored templates, the level's own, and the runtime clones. bg3le finds
--- the objects rather than the managers, so it cannot say which manager a
--- template came from: all four getters resolve the same set, and the two
--- that would return only a subset are not pretended to.
-Ext.Template.GetRootTemplate = Ext.Template.GetTemplate
-
-function Ext.Template.GetAllRootTemplates()
+local function all_in(source)
+  if source == nil then
+    local out = {}
+    for _, id in ipairs(Ext._Internal.TemplateIds()) do
+      out[id] = template_in(nil, id)
+    end
+    return out
+  end
+  local addresses, types = Ext._Internal.TemplatesIn(source)
+  if addresses == nil then return nil end
   local out = {}
-  for _, id in ipairs(Ext._Internal.TemplateIds()) do
-    out[id] = read_template(id)
+  for id, address in pairs(addresses) do
+    out[id] = template_at(address, types[id])
   end
   return out
 end
 
-for _, name in ipairs({"GetLocalTemplate", "GetCacheTemplate",
-                       "GetLocalCacheTemplate"}) do
-  Ext.Template[name] = needs(
-    "Ext.Template." .. name .. " needs the engine's " .. name:sub(4)
-    .. " manager to tell it apart from a root template; bg3le finds the "
-    .. "template objects but not which manager holds them, so use "
-    .. "Ext.Template.GetTemplate")
-end
+function Ext.Template.GetRootTemplate(id) return template_in(nil, id) end
+function Ext.Template.GetAllRootTemplates() return all_in(nil) end
 
-for _, name in ipairs({"GetAllLocalTemplates", "GetAllCacheTemplates",
-                       "GetAllLocalCacheTemplates"}) do
-  Ext.Template[name] = needs(
-    "Ext.Template." .. name .. " needs the engine's template managers to "
-    .. "separate local and cache templates from root ones; use "
-    .. "Ext.Template.GetAllRootTemplates")
+if Ext._Internal.IsClientState() then
+  Ext.Template.GetTemplate = Ext.Template.GetRootTemplate
+else
+  function Ext.Template.GetLocalTemplate(id) return template_in(LOCAL, id) end
+  function Ext.Template.GetCacheTemplate(id) return template_in(CACHE, id) end
+  function Ext.Template.GetLocalCacheTemplate(id) return template_in(LOCAL_CACHE, id) end
+  function Ext.Template.GetAllLocalTemplates() return all_in(LOCAL) end
+  function Ext.Template.GetAllCacheTemplates() return all_in(CACHE) end
+  function Ext.Template.GetAllLocalCacheTemplates() return all_in(LOCAL_CACHE) end
+
+  function Ext.Template.GetTemplate(id)
+    return Ext.Template.GetRootTemplate(id)
+      or Ext.Template.GetLocalTemplate(id)
+      or Ext.Template.GetCacheTemplate(id)
+      or Ext.Template.GetLocalCacheTemplate(id)
+  end
 end
 
 -- ---- Ext.Level ----
@@ -13190,56 +13241,6 @@ for _, name in ipairs({"CreateSurfaceAction", "ExecuteSurfaceAction",
     "Ext.Level." .. name .. " needs the server level manager, which "
     .. "bg3le has not located")
 end
-
--- ---- Ext.Server* and Ext.Client* ----
---
--- bg3se exposes most modules three times: under a plain name, and under a
--- Server and a Client name. They are the same functions -- a mod picks the
--- name that says which side it means to run on -- except that a few are
--- only on the plain one.
---
--- The table below is generated from the captured surface by
--- tools/gen-context-aliases.py rather than written out, because getting a
--- single name wrong here is a mod that does not run and nothing that says
--- so. A view forwards to the base rather than copying it, so a function
--- added to the base later appears in both twins without being listed twice.
-local CONTEXT_MODULES = {
-  {"ClientDebug", "Debug"},
-  {"ClientEntity", "Entity", {GetEntitiesOnTile = true}},
-  {"ClientIO", "IO"},
-  {"ClientJson", "Json"},
-  {"ClientLoca", "Loca"},
-  {"ClientLog", "Log"},
-  {"ClientMath", "Math"},
-  {"ClientMod", "Mod"},
-  {"ClientResource", "Resource"},
-  {"ClientStaticData", "StaticData"},
-  {"ClientStats", "Stats", {LoadStatsFile = true}},
-  {"ClientTable", "Table"},
-  {"ClientTimer", "Timer"},
-  {"ClientTypes", "Types", {GenerateIdeHelpers = true}},
-  {"ClientUtils", "Utils", {GameTime = true, LoadTestLibrary = true, MicrosecTime = true, MonotonicTime = true, Print = true, PrintError = true, PrintWarning = true, Profile = true, ProfileNamed = true, Random = true, Round = true}},
-  {"ClientVars", "Vars"},
-  {"ServerDebug", "Debug"},
-  {"ServerEntity", "Entity", {GetEntitiesOnTile = true}},
-  {"ServerIO", "IO"},
-  {"ServerJson", "Json"},
-  {"ServerLevel", "Level"},
-  {"ServerLoca", "Loca"},
-  {"ServerLog", "Log"},
-  {"ServerMath", "Math"},
-  {"ServerMod", "Mod"},
-  {"ServerNet", "Net"},
-  {"ServerResource", "Resource"},
-  {"ServerStaticData", "StaticData"},
-  {"ServerStats", "Stats", {LoadStatsFile = true}},
-  {"ServerTable", "Table"},
-  {"ServerTemplate", "Template"},
-  {"ServerTimer", "Timer"},
-  {"ServerTypes", "Types", {GenerateIdeHelpers = true}},
-  {"ServerUtils", "Utils", {GameTime = true, LoadTestLibrary = true, MicrosecTime = true, MonotonicTime = true, Print = true, PrintError = true, PrintWarning = true, Profile = true, ProfileNamed = true, Random = true, Round = true}},
-  {"ServerVars", "Vars"},
-}
 
 -- ---- Ext.Server* and Ext.Client* ----
 --

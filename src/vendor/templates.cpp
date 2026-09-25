@@ -1,21 +1,13 @@
-// Root templates, which is what Ext.Template reads.
+// The templates Ext.Template reads, from the engine's own managers.
 //
-// The root templates come from the engine's GlobalTemplateManager, whose
-// global was found by content and is recorded for this build, checked on
-// every read: its bank's Templates map is walked once. A scan for template
-// objects remains for the rest -- the level's local templates -- and runs
-// on the warming thread only, since it takes seconds.
+// Root templates come from the GlobalTemplateManager's bank, walked once.
+// The server's others -- esv::CacheTemplateManager, and the current level's
+// LocalTemplateManager and CacheTemplateManager -- are read live on every
+// call, under the lock the engine takes, as upstream's ServerTemplate.inl
+// reads them. Each global is recorded for this build and checked on read.
 //
-// The scan works because That is viable because a
-// GameObjectTemplate is unusually self-identifying: past its vtable it
-// carries its own Id, TemplateName and ParentTemplateId as FixedStrings
-// and its Name as a Larian string, and an Id is always a 36-character
-// GUID. Four independent checks on the same object is not something other
-// data satisfies by accident.
-//
-// Deliberately not a fingerprint over a container, which is how the first
-// attempt at the translated strings went wrong: here every candidate is
-// validated against its own contents before it is kept.
+// The manager layouts are bg3se's (by Norbyte and the bg3se contributors);
+// the globals and the reading are ours.
 
 #include <stdafx.h>
 
@@ -29,16 +21,19 @@
 #include <unordered_map>
 #include <vector>
 
+#include <pthread.h>
 #include <unistd.h>
 
-#include "ls_string.h"
+#include <GameDefinitions/Level.h>
+#include <GameDefinitions/RootTemplates.h>
+
+#include "engine_containers.h"
 
 #include "../log.h"
 #include "../mem.h"
 
-extern "C" bool bg3le_scannable_region(char const* line,
-                                       unsigned long long* from,
-                                       unsigned long long* to);
+extern "C" bool bg3le_fixed_string_hash(std::uint32_t id, std::uint32_t* out);
+extern "C" bool bg3le_fixed_string_index_of(char const* wanted, std::uint32_t* out);
 
 namespace bg3le {
 
@@ -46,12 +41,6 @@ extern "C" char const* bg3le_fixed_string(std::uint32_t index,
                                           std::uint32_t* length);
 
 namespace {
-
-// Within GameObjectTemplate, past the vtable and the tag container.
-constexpr std::size_t kId = 16;
-constexpr std::size_t kTemplateName = 20;
-constexpr std::size_t kParentTemplateId = 24;
-constexpr std::size_t kName = 32;          // a Larian string
 
 constexpr std::uint32_t kNullFixedString = 0xffffffffu;
 constexpr std::size_t kGuidLength = 36;
@@ -65,21 +54,15 @@ struct Templates {
     bool Built{false};
     std::unordered_map<std::string, Found> ById;
     std::vector<std::string> Order;
-    std::unordered_map<std::uint64_t, std::size_t> ByVtable;
 };
 
-// Root templates from the manager, and what the scan found besides.
+// Root templates, from the manager.
 Templates& state() {
     static Templates t;
     return t;
 }
 
-Templates& scanned() {
-    static Templates t;
-    return t;
-}
-
-// Guards both sets. Held to publish or read, never across a scan.
+// Guards the root set.
 std::mutex& templates_lock() {
     static std::mutex m;
     return m;
@@ -97,49 +80,6 @@ constexpr std::uintptr_t kBankCount = 0x18;
 template <class T>
 bool read_as(void const* addr, T* out) {
     return safe_read(addr, out, sizeof(T));
-}
-
-bool resolves(std::uint32_t index, std::size_t* lengthOut) {
-    if (index == 0 || index == kNullFixedString) return false;
-    char const* text = bg3le_fixed_string(index, nullptr);
-    if (text == nullptr) return false;
-    *lengthOut = std::strlen(text);
-    return true;
-}
-
-// Whether the object at this address reads as a GameObjectTemplate.
-bool is_template(void const* at, std::string* idOut, std::uint64_t* vtable) {
-    std::uint64_t vmt = 0;
-    if (!read_as(at, &vmt) || vmt < 0x1000) return false;
-
-    std::uint32_t id = 0;
-    std::uint32_t templateName = 0;
-    std::uint32_t parent = 0;
-    if (!read_as((char const*)at + kId, &id)
-        || !read_as((char const*)at + kTemplateName, &templateName)
-        || !read_as((char const*)at + kParentTemplateId, &parent)) {
-        return false;
-    }
-
-    // The Id is a GUID.
-    std::size_t length = 0;
-    if (!resolves(id, &length) || length != kGuidLength) return false;
-
-    // TemplateName is a name, not a GUID, and never empty.
-    if (!resolves(templateName, &length) || length == 0) return false;
-
-    // ParentTemplateId is either a GUID or unset.
-    if (parent != 0 && parent != kNullFixedString) {
-        if (!resolves(parent, &length) || length != kGuidLength) return false;
-    }
-
-    // And Name reads as a string.
-    std::string name;
-    if (!read_ls_string((char const*)at + kName, &name)) return false;
-
-    *idOut = bg3le_fixed_string(id, nullptr);
-    *vtable = vmt;
-    return true;
 }
 
 // A template's type name, read rather than called.
@@ -181,32 +121,6 @@ char const* type_name_of(std::uint64_t vtable) {
     if (!read_as((void const*)(std::uintptr_t)at, &index)) return nullptr;
     if (index == 0 || index == kNullFixedString) return nullptr;
     return bg3le_fixed_string(index, nullptr);
-}
-
-// Under BG3LE_DUMP_TEMPLATES: the first bytes of each vtable slot.
-//
-// bg3se asks a template its type through GetType(), a virtual. Calling one
-// blind is how you run a destructor by accident, so the slots are read as
-// data instead: a getter that hands back the address of a member compiles
-// to a two-instruction body, and its displacement says which member --
-// which can then simply be read.
-void dump_vtable(std::uint64_t vtable) {
-    logf("tmpldump: vtable %#llx", (unsigned long long)vtable);
-    for (int slot = 0; slot < 10; ++slot) {
-        std::uint64_t fn = 0;
-        if (!read_as((char const*)(std::uintptr_t)vtable
-                         + (std::size_t)slot * 8, &fn)) {
-            break;
-        }
-        unsigned char code[12] = {};
-        if (safe_read_some((void const*)(std::uintptr_t)fn, code,
-                           sizeof(code)) == 0) {
-            continue;
-        }
-        logf("tmpldump:   slot %2d -> %#llx  %02x %02x %02x %02x %02x %02x "
-             "%02x %02x", slot, (unsigned long long)fn, code[0], code[1],
-             code[2], code[3], code[4], code[5], code[6], code[7]);
-    }
 }
 
 // The executable's own mapping, so a candidate's vtable pointer can be
@@ -367,7 +281,6 @@ bool build_from_manager(Templates* out) {
             if (id == nullptr || std::strlen(id) != kGuidLength) continue;
             char const* type = type_name_of(head[0]);
             if (out->ById.emplace(id, Found{raw[2], type != nullptr ? type : ""}).second) {
-                ++out->ByVtable[head[0]];
                 out->Order.push_back(id);
             }
         }
@@ -379,119 +292,6 @@ bool build_from_manager(Templates* out) {
         return false;
     }
     out->Built = true;
-    return true;
-}
-
-bool build() {
-    Templates found{};
-
-    unsigned long long imageFrom = 0;
-    unsigned long long imageTo = 0;
-    if (!image_range(&imageFrom, &imageTo)) {
-        logf("templates: cannot locate the executable's mapping");
-        return false;
-    }
-
-    std::FILE* maps = std::fopen("/proc/self/maps", "r");
-    if (maps == nullptr) return false;
-
-    constexpr std::size_t kChunk = 1u << 20;
-    constexpr std::size_t kObject = 48;
-    static std::vector<unsigned char> block;
-    block.resize(kChunk + kObject);
-
-    char line[512];
-    while (std::fgets(line, sizeof(line), maps) != nullptr) {
-        unsigned long long from = 0;
-        unsigned long long to = 0;
-        if (!bg3le_scannable_region(line, &from, &to)) continue;
-
-        for (unsigned long long base = from; base < to; base += kChunk) {
-            std::size_t want = (std::size_t)(to - base);
-            if (want > kChunk + kObject) want = kChunk + kObject;
-            const std::size_t got =
-                safe_read_some((void const*)base, block.data(), want);
-            scan_yield();
-            if (got < kObject) continue;
-
-            for (std::size_t off = 0; off + kObject <= got; off += 8) {
-                // Every rejection here is from the block already read, not
-                // a syscall. Without that the scan calls is_template on
-                // almost every slot in a multi-gigabyte address space and
-                // takes hours -- the same mistake that once locked the
-                // story thread.
-                std::uint64_t vmt = 0;
-                std::memcpy(&vmt, block.data() + off, sizeof(vmt));
-                if (vmt < imageFrom || vmt >= imageTo) continue;
-                if ((vmt & 7) != 0) continue;
-
-                std::uint32_t id = 0;
-                std::uint32_t templateName = 0;
-                std::memcpy(&id, block.data() + off + kId, sizeof(id));
-                std::memcpy(&templateName, block.data() + off + kTemplateName,
-                            sizeof(templateName));
-                if (id == 0 || id == kNullFixedString) continue;
-                if (templateName == 0 || templateName == kNullFixedString) {
-                    continue;
-                }
-
-                std::string key;
-                std::uint64_t vtable = 0;
-                if (!is_template((void const*)(base + off), &key, &vtable)) {
-                    continue;
-                }
-
-                // The first one wins: a template can be referenced from
-                // several places but only one object is the template.
-                char const* type = type_name_of(vtable);
-                Found entry{base + off, type != nullptr ? type : ""};
-                if (found.ById.emplace(key, entry).second) {
-                    ++found.ByVtable[vtable];
-                }
-            }
-        }
-    }
-    std::fclose(maps);
-
-    if (found.ById.size() < 100) {
-        logf("templates: only %zu candidates found; treating that as not "
-             "found rather than publishing a partial set",
-             found.ById.size());
-        return false;
-    }
-
-    found.Order.reserve(found.ById.size());
-    for (auto const& entry : found.ById) found.Order.push_back(entry.first);
-
-    found.Built = true;
-    std::size_t typed = 0;
-    for (auto const& entry : found.ById) {
-        if (!entry.second.Type.empty()) ++typed;
-    }
-    logf("templates: the scan found %zu templates across %zu distinct vtables, "
-         "%zu with a type name", found.ById.size(), found.ByVtable.size(), typed);
-
-    if (std::getenv("BG3LE_DUMP_TEMPLATES") != nullptr) {
-        std::unordered_map<std::string, std::size_t> byType;
-        for (auto const& entry : found.ById) ++byType[entry.second.Type];
-        for (auto const& entry : byType) {
-            logf("templates: type \"%s\": %zu", entry.first.c_str(),
-                 entry.second);
-        }
-        std::size_t shown = 0;
-        for (auto const& entry : found.ByVtable) {
-            logf("templates: vtable %#llx holds %zu templates",
-                 (unsigned long long)entry.first, entry.second);
-            if (shown++ < 2) dump_vtable(entry.first);
-        }
-    }
-
-    // Published only now, so a lookup never waits on the scan itself.
-    const std::lock_guard<std::mutex> held(templates_lock());
-    for (auto const& id : found.Order) {
-        if (state().ById.count(id) == 0) state().Order.push_back(id);
-    }
-    scanned() = std::move(found);
     return true;
 }
 
@@ -507,42 +307,222 @@ bool root_ready() {
 
     Templates found{};
     if (!build_from_manager(&found)) return false;
-    for (auto const& id : scanned().Order) {
-        if (found.ById.count(id) == 0) found.Order.push_back(id);
-    }
     state() = std::move(found);
     logf("templates: %zu root templates from the GlobalTemplateManager",
          state().ById.size());
     return true;
 }
 
-// The scan, for what the manager does not hold. The warming thread only.
-bool scan_ready() {
-    if (scanned().Built) return true;
-    if (!scan_allowed()) return false;
-    static int attempts = 0;
-    if (attempts >= 40) return false;
-    ++attempts;
-    return build();
-}
-
 Found const* lookup(char const* id) {
     auto it = state().ById.find(id);
-    if (it != state().ById.end()) return &it->second;
-    it = scanned().ById.find(id);
-    return it != scanned().ById.end() ? &it->second : nullptr;
+    return it != state().ById.end() ? &it->second : nullptr;
+}
+
+// ---- the server's local and cache managers ----
+
+constexpr std::uintptr_t kRecordedCacheGlobal = 0x7c8d978;
+constexpr std::uintptr_t kRecordedLevelManagerGlobal = 0x7c9f7b0;
+
+// TemplateManagerType, which the engine's resolver switches on.
+constexpr std::uint8_t kCacheType = 3;
+constexpr std::uint8_t kLevelCacheType = 5;
+
+using CacheManager = bg3se::LevelCacheTemplateManager;
+constexpr std::size_t kCacheTemplates = offsetof(CacheManager, Templates);
+constexpr std::size_t kCacheLock = offsetof(CacheManager, Lock);
+// The writing thread's pthread_self, or -1: the rwlock's own size past it.
+constexpr std::size_t kCacheWriter = kCacheLock + sizeof(pthread_rwlock_t);
+constexpr std::size_t kLocalTemplates = offsetof(bg3se::LocalTemplateManager, Templates);
+constexpr std::size_t kCurrentLevel = offsetof(bg3se::esv::LevelManager, CurrentLevel);
+constexpr std::size_t kLevelOwner = offsetof(bg3se::esv::Level, LevelManager);
+constexpr std::size_t kLevelLocal = offsetof(bg3se::esv::Level, LocalTemplateManager);
+constexpr std::size_t kLevelCache = offsetof(bg3se::esv::Level, CacheTemplateManager);
+static_assert(kCacheLock == 0xd0 && kLocalTemplates == 0x38 && kCurrentLevel == 0x90
+              && kLevelCache == 0xe8, "the offsets the engine's resolver reads");
+
+bool in_image(std::uint64_t v) {
+    unsigned long long from = 0, to = 0;
+    return image_range(&from, &to) && v >= from && v < to;
+}
+
+bool looks_like_cache(std::uintptr_t mgr, std::uint8_t type) {
+    std::uint64_t vmt = 0, writer = 0;
+    std::uint8_t kind = 0;
+    bg3le::RawMap map{};
+    return read_as((void const*)mgr, &vmt) && in_image(vmt)
+           && read_as((void const*)(mgr + 8), &kind) && kind == type
+           && read_as((void const*)(mgr + kCacheWriter), &writer)
+           && safe_read((void const*)(mgr + kCacheTemplates), &map, sizeof(map))
+           && map.Buckets != 0 && map.Buckets < (1u << 22) && map.KeysSize <= map.KeysCapacity;
+}
+
+bool looks_like_cache_global(std::uintptr_t mgr) { return looks_like_cache(mgr, kCacheType); }
+
+// A level manager whose current level points back at it.
+bool looks_like_level_manager(std::uintptr_t mgr) {
+    std::uint64_t vmt = 0, level = 0, owner = 0;
+    return read_as((void const*)mgr, &vmt) && in_image(vmt)
+           && read_as((void const*)(mgr + kCurrentLevel), &level) && level != 0
+           && read_as((void const*)(level + kLevelOwner), &owner) && owner == mgr;
+}
+
+// The object a recorded global holds, found again by content if a patch
+// moved the global. An unset one is not a moved one, so it is not searched.
+std::uintptr_t held_by(std::uintptr_t recorded, bool (*accept)(std::uintptr_t),
+                       std::uintptr_t* cached, char const* what) {
+    unsigned long long imageFrom = 0, imageTo = 0;
+    if (!image_range(&imageFrom, &imageTo)) return 0;
+    std::uint64_t at = *cached != 0 ? *cached : imageFrom + recorded;
+    std::uint64_t obj = 0;
+    if (read_as((void const*)at, &obj) && obj != 0 && accept(obj)) {
+        *cached = at;
+        return obj;
+    }
+    static bool searched[2] = {};
+    bool& done = searched[recorded == kRecordedCacheGlobal ? 0 : 1];
+    if (obj != 0 || done || *cached != 0) return 0;
+    done = true;
+    at = bg3le_image_find_static(accept);
+    if (at == 0) return 0;
+    logf("templates: %s static at image+%#lx (recorded +%#lx)", what,
+         (unsigned long)(at - imageFrom), (unsigned long)recorded);
+    *cached = at;
+    return read_as((void const*)at, &obj) ? obj : 0;
+}
+
+std::uintptr_t cache_manager() {
+    static std::uintptr_t at = 0;
+    return held_by(kRecordedCacheGlobal, &looks_like_cache_global, &at, "CacheTemplateManager");
+}
+
+std::uintptr_t current_level() {
+    static std::uintptr_t at = 0;
+    const std::uintptr_t mgr =
+        held_by(kRecordedLevelManagerGlobal, &looks_like_level_manager, &at, "LevelManager");
+    std::uint64_t level = 0;
+    return mgr != 0 && read_as((void const*)(mgr + kCurrentLevel), &level) ? level : 0;
+}
+
+// Taken as the engine takes it: tried for a while before blocking, and not at
+// all by a thread that already holds it for writing.
+struct ReadLock {
+    pthread_rwlock_t* Lock{nullptr};
+    ReadLock(std::uintptr_t lock, std::uintptr_t writer) {
+        std::uint64_t owner = ~0ull;
+        if (writer != 0 && read_as((void const*)writer, &owner)
+            && owner == (std::uint64_t)pthread_self()) {
+            return;
+        }
+        Lock = (pthread_rwlock_t*)lock;
+        for (int i = 0; i < 4001; ++i) {
+            if (pthread_rwlock_tryrdlock(Lock) == 0) return;
+        }
+        pthread_rwlock_rdlock(Lock);
+    }
+    ~ReadLock() {
+        if (Lock != nullptr) pthread_rwlock_unlock(Lock);
+    }
+};
+
+struct Entry {
+    std::uint32_t Key;
+    std::uint64_t Address;
+};
+
+// A HashMap<FixedString, GameObjectTemplate*>'s entries, or one of them.
+bool read_hash_map(std::uintptr_t at, std::uint32_t only, bool one, std::vector<Entry>* out) {
+    bg3le::RawMap m{};
+    if (!safe_read((void const*)at, &m, sizeof(m)) || m.KeysSize > (1u << 22)) return false;
+    const std::uint32_t n = m.KeysSize;
+    std::vector<std::uint32_t> keys(n);
+    std::vector<std::uint64_t> values(n);
+    if (n > 0 && (!safe_read(m.Keys, keys.data(), n * 4)
+                  || !safe_read(m.Values, values.data(), n * 8))) {
+        return false;
+    }
+    if (one) {
+        std::uint32_t hash = 0;
+        if (n == 0 || m.Buckets == 0 || !bg3le_fixed_string_hash(only, &hash)) return true;
+        std::int32_t cur = -1;
+        if (!read_as(m.HashKeys + hash % m.Buckets, &cur)) return false;
+        for (std::uint32_t step = 0; cur >= 0 && (std::uint32_t)cur < n && step <= n; ++step) {
+            if (keys[(std::uint32_t)cur] == only) {
+                out->push_back({only, values[(std::uint32_t)cur]});
+                return true;
+            }
+            if (!read_as(m.NextIds + cur, &cur)) return false;
+        }
+        return true;
+    }
+    for (std::uint32_t i = 0; i < n; ++i) out->push_back({keys[i], values[i]});
+    return true;
+}
+
+// A LegacyRefMap<FixedString, GameObjectTemplate*>'s, bucketed by the id itself.
+bool read_ref_map(std::uintptr_t at, std::uint32_t only, bool one, std::vector<Entry>* out) {
+    struct {
+        std::uint32_t ItemCount, HashSize;
+        std::uint64_t Table;
+    } m{};
+    if (!safe_read((void const*)at, &m, sizeof(m)) || m.HashSize > (1u << 22)) return false;
+    if (m.HashSize == 0) return true;
+    std::vector<std::uint64_t> buckets;
+    if (one) {
+        buckets.resize(1);
+        if (!read_as((void const*)(m.Table + (only % m.HashSize) * 8), &buckets[0])) return false;
+    } else {
+        buckets.resize(m.HashSize);
+        if (!safe_read((void const*)m.Table, buckets.data(), m.HashSize * 8)) return false;
+    }
+    for (std::uint64_t node : buckets) {
+        for (std::uint32_t guard = 0; node != 0 && guard <= m.ItemCount; ++guard) {
+            std::uint64_t raw[3] = {};  // Next, Key, Value
+            if (!safe_read((void const*)node, raw, sizeof(raw))) return false;
+            const auto key = (std::uint32_t)raw[1];
+            if (!one || key == only) out->push_back({key, raw[2]});
+            if (one && key == only) return true;
+            node = raw[0];
+        }
+    }
+    return true;
+}
+
+// Which manager: 1 the level's local templates, 2 the server's cache, 3 the
+// level's cache. False when it is not there, as upstream's nil.
+bool read_source(int source, std::uint32_t only, bool one, std::vector<Entry>* out) {
+    if (source == 2) {
+        const std::uintptr_t mgr = cache_manager();
+        if (mgr == 0) return false;
+        const ReadLock held(mgr + kCacheLock, mgr + kCacheWriter);
+        return read_hash_map(mgr + kCacheTemplates, only, one, out);
+    }
+    const std::uintptr_t level = current_level();
+    if (level == 0 || (source != 1 && source != 3)) return false;
+    std::uint64_t mgr = 0;
+    if (!read_as((void const*)(level + (source == 1 ? kLevelLocal : kLevelCache)), &mgr)
+        || mgr == 0) {
+        return false;
+    }
+    if (source == 1) {
+        const ReadLock held(mgr, 0);
+        return read_ref_map(mgr + kLocalTemplates, only, one, out);
+    }
+    if (!looks_like_cache(mgr, kLevelCacheType)) return false;
+    const ReadLock held(mgr + kCacheLock, mgr + kCacheWriter);
+    return read_hash_map(mgr + kCacheTemplates, only, one, out);
+}
+
+char const* type_of(std::uint64_t tmpl) {
+    std::uint64_t vmt = 0;
+    return tmpl != 0 && read_as((void const*)tmpl, &vmt) && in_image(vmt) ? type_name_of(vmt)
+                                                                          : nullptr;
 }
 
 }  // namespace
 
 extern "C" bool bg3le_templates_ready() {
-    bool root = false;
-    {
-        const std::lock_guard<std::mutex> held(templates_lock());
-        root = root_ready();
-    }
-    // The warming thread goes on to scan for local templates.
-    return scan_ready() || root;
+    const std::lock_guard<std::mutex> held(templates_lock());
+    return root_ready();
 }
 
 extern "C" std::size_t bg3le_templates_count() {
@@ -575,6 +555,33 @@ extern "C" char const* bg3le_templates_type(char const* id) {
     Found const* found = lookup(id);
     if (found == nullptr || found->Type.empty()) return nullptr;
     return found->Type.c_str();
+}
+
+// One template from a manager other than the root one (see read_source),
+// with its engine type name, or null.
+extern "C" void* bg3le_templates_in(int source, char const* id, char const** type) {
+    std::uint32_t key = 0;
+    std::vector<Entry> found;
+    if (id == nullptr || !bg3le_fixed_string_index_of(id, &key)
+        || !read_source(source, key, true, &found) || found.empty()) {
+        return nullptr;
+    }
+    if (type != nullptr) *type = type_of(found[0].Address);
+    return (void*)(std::uintptr_t)found[0].Address;
+}
+
+// Every template in one; false when the manager is not there.
+extern "C" bool bg3le_templates_list(int source,
+                                     void (*each)(void* ctx, char const* id, void* at,
+                                                  char const* type),
+                                     void* ctx) {
+    std::vector<Entry> found;
+    if (!read_source(source, 0, false, &found)) return false;
+    for (Entry const& e : found) {
+        char const* id = bg3le_fixed_string(e.Key, nullptr);
+        if (id != nullptr && e.Address != 0) each(ctx, id, (void*)(std::uintptr_t)e.Address, type_of(e.Address));
+    }
+    return true;
 }
 
 }  // namespace bg3le

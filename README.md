@@ -276,12 +276,19 @@ component's declared size with the size the engine recorded, and
 - **Root templates come from the engine's GlobalTemplateManager**, as
   upstream's `GetRootTemplate` reads them: all 32,911, from its bank's
   `Templates` map, whose keys are checked against each template's own Id. The
-  manager's global is recorded for this build and checked before use. They
-  used to be found by scanning memory for template-shaped objects, which
-  took seconds, ran on the story thread when a mod asked during load, and
-  found about two thousand of them; the scan now runs only on the warming
-  thread, for the level's own templates, and `GetTemplate` checks the root
-  set first, as upstream does
+  manager's global is recorded for this build and checked before use
+- **All of `Ext.Template`, from the engine's managers.** The server's
+  `esv::CacheTemplateManager` and level manager were found beside the root
+  manager, where the engine's own resolver loads all three; the current
+  level's `LocalTemplateManager` and `CacheTemplateManager` hang off the
+  level, at the offsets the resolver reads. Each is read live, under the
+  rwlock the engine takes, so `GetAllLocalTemplates` returns the level's
+  1,846 on the Nautiloid and `GetTemplate` falls through root, local, cache
+  and level cache in upstream's order. The client gets upstream's client
+  module: `GetTemplate`, `GetRootTemplate` and `GetAllRootTemplates`, root
+  only. This replaced a memory scan for template-shaped objects, which took
+  seconds on the warming thread and could not say which manager a template
+  was in
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -567,14 +574,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **39 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **33 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 39 are
+  the source, because this one was stale at 86 for a while: 24 of the 33 are
   `Ext.Level`'s physics and pathfinding, 3 `Ext.StaticData`'s bank writes,
-  2 `Ext.Stats`' functor execution, 6
-  `Ext.Template`'s local and cache managers, and 4 `Ext.Entity`'s
+  2 `Ext.Stats`' functor execution, and 4 `Ext.Entity`'s
   `Create`, `Destroy`, `GetEntitiesOnTile` and `SetupTracing`.
   `reference/ext-api-surface.txt` lists them with their shapes. For the
   physics queries there is a lead: upstream goes through Larian's
