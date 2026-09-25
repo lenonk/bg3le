@@ -1268,6 +1268,20 @@ extern "C" std::size_t bg3le_stats_names_count(char const* list) {
     return found == byList.end() ? 0 : found->second.size();
 }
 
+// Every name of a list, handed to `each` under one lock and one lookup:
+// Ext.Stats.GetStats asks for thousands.
+extern "C" std::size_t bg3le_stats_names_each(char const* list,
+                                              void (*each)(void*, char const*),
+                                              void* context) {
+    const CacheLock lock(stats_cache_lock());
+    if (!ready()) return 0;
+    auto const& byList = stats_names_by_list();
+    auto found = byList.find(list == nullptr ? "" : list);
+    if (found == byList.end()) return 0;
+    for (char const* name : found->second) each(context, name);
+    return found->second.size();
+}
+
 extern "C" char const* bg3le_stats_names_at(char const* list,
                                             std::size_t index) {
     const CacheLock lock(stats_cache_lock());

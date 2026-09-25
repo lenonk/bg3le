@@ -142,11 +142,29 @@ bool looks_like_manager(void const* candidate) {
 void* g_manager = nullptr;
 bool g_searched = false;
 
+// Where the manager has sat inside its region in every run of this build:
+// the region moves, the offset does not. Tried in each region first, and
+// checked like any other candidate.
+constexpr unsigned long long kRecordedRegionOffset = 0x15a940;
+
 void* search_for_manager() {
     std::FILE* maps = std::fopen("/proc/self/maps", "r");
     if (maps == nullptr) return nullptr;
 
     char line[512];
+    while (std::fgets(line, sizeof(line), maps) != nullptr) {
+        unsigned long long from = 0;
+        unsigned long long to = 0;
+        if (!bg3le_scannable_region(line, &from, &to)) continue;
+        const unsigned long long addr = from + kRecordedRegionOffset;
+        if (addr + sizeof(GuidResourceManager) > to) continue;
+        if (!looks_like_manager((void const*)addr)) continue;
+        std::fclose(maps);
+        logf("static data: resource manager at %#llx, at its recorded offset", addr);
+        return (void*)addr;
+    }
+    std::rewind(maps);
+
     std::size_t regions = 0;
     std::size_t scanned = 0;
     while (std::fgets(line, sizeof(line), maps) != nullptr) {

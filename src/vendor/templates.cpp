@@ -1,7 +1,12 @@
 // Root templates, which is what Ext.Template reads.
 //
-// The template managers have no symbol and hang off nothing bg3le holds,
-// so the templates are found directly. That is viable because a
+// The root templates come from the engine's GlobalTemplateManager, whose
+// global was found by content and is recorded for this build, checked on
+// every read: its bank's Templates map is walked once. A scan for template
+// objects remains for the rest -- the level's local templates -- and runs
+// on the warming thread only, since it takes seconds.
+//
+// The scan works because That is viable because a
 // GameObjectTemplate is unusually self-identifying: past its vtable it
 // carries its own Id, TemplateName and ParentTemplateId as FixedStrings
 // and its Name as a Larian string, and an Id is always a 36-character
@@ -18,6 +23,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -61,10 +68,31 @@ struct Templates {
     std::unordered_map<std::uint64_t, std::size_t> ByVtable;
 };
 
+// Root templates from the manager, and what the scan found besides.
 Templates& state() {
     static Templates t;
     return t;
 }
+
+Templates& scanned() {
+    static Templates t;
+    return t;
+}
+
+// Guards both sets. Held to publish or read, never across a scan.
+std::mutex& templates_lock() {
+    static std::mutex m;
+    return m;
+}
+
+// Where ls::GlobalTemplateManager sat in this build, relative to the
+// executable's first mapping; and within it, Banks[2] at +0x20. A bank is
+// { VMT, LegacyMap<FixedString, GameObjectTemplate*> Templates, ... }.
+constexpr std::uintptr_t kRecordedManagerGlobal = 0x7d203f8;
+constexpr std::uintptr_t kManagerBanks = 0x20;
+constexpr std::uintptr_t kBankHashSize = 0x08;
+constexpr std::uintptr_t kBankTable = 0x10;
+constexpr std::uintptr_t kBankCount = 0x18;
 
 template <class T>
 bool read_as(void const* addr, T* out) {
@@ -217,6 +245,86 @@ bool image_range(unsigned long long* from, unsigned long long* to) {
     return high != 0;
 }
 
+char const* type_name_of(std::uint64_t vtable);
+bool image_range(unsigned long long* from, unsigned long long* to);
+
+// The populated bank of the GlobalTemplateManager, walked into `out`.
+bool build_from_manager(Templates* out) {
+    unsigned long long imageFrom = 0, imageTo = 0;
+    if (!image_range(&imageFrom, &imageTo)) return false;
+    auto in_image = [&](std::uint64_t v) { return v >= imageFrom && v < imageTo; };
+
+    std::uint64_t mgr = 0, vmt = 0;
+    if (!read_as((void const*)(std::uintptr_t)(imageFrom + kRecordedManagerGlobal), &mgr)
+        || !read_as((void const*)(std::uintptr_t)mgr, &vmt) || !in_image(vmt)) {
+        return false;
+    }
+
+    // The bank with templates in it; the other is empty on this build.
+    std::uint64_t bank = 0;
+    std::uint32_t best = 0;
+    for (int slot = 0; slot < 2; ++slot) {
+        std::uint64_t b = 0, bvmt = 0;
+        std::uint32_t count = 0;
+        if (!read_as((void const*)(std::uintptr_t)(mgr + kManagerBanks + slot * 8), &b)
+            || !read_as((void const*)(std::uintptr_t)b, &bvmt) || !in_image(bvmt)
+            || !read_as((void const*)(std::uintptr_t)(b + kBankCount), &count)) {
+            continue;
+        }
+        if (count > best) {
+            best = count;
+            bank = b;
+        }
+    }
+    std::uint32_t hashSize = 0;
+    std::uint64_t table = 0;
+    if (bank == 0 || best < 100
+        || !read_as((void const*)(std::uintptr_t)(bank + kBankHashSize), &hashSize)
+        || !read_as((void const*)(std::uintptr_t)(bank + kBankTable), &table)
+        || hashSize == 0 || hashSize > (1u << 22)) {
+        return false;
+    }
+
+    std::vector<std::uint64_t> buckets(hashSize);
+    if (safe_read_some((void const*)(std::uintptr_t)table, buckets.data(),
+                       hashSize * sizeof(std::uint64_t)) != hashSize * sizeof(std::uint64_t)) {
+        return false;
+    }
+
+    // Each node is { Next, Key, Value }, and the key is the template's own
+    // Id: a node that disagrees means this is not the bank.
+    std::size_t disagreed = 0;
+    for (std::uint64_t node : buckets) {
+        for (std::uint32_t guard = 0; node != 0 && guard < (1u << 16); ++guard) {
+            std::uint64_t raw[3] = {};
+            if (!safe_read((void const*)(std::uintptr_t)node, raw, sizeof(raw))) break;
+            node = raw[0];
+            const auto key = (std::uint32_t)raw[1];
+            std::uint64_t head[3] = {};  // VMT, tags, Id and TemplateName
+            if (!safe_read((void const*)(std::uintptr_t)raw[2], head, sizeof(head))
+                || !in_image(head[0]) || (std::uint32_t)head[2] != key) {
+                ++disagreed;
+                continue;
+            }
+            char const* id = bg3le_fixed_string(key, nullptr);
+            if (id == nullptr || std::strlen(id) != kGuidLength) continue;
+            char const* type = type_name_of(head[0]);
+            if (out->ById.emplace(id, Found{raw[2], type != nullptr ? type : ""}).second) {
+                ++out->ByVtable[head[0]];
+                out->Order.push_back(id);
+            }
+        }
+    }
+    if (out->ById.size() < 100 || disagreed > out->ById.size() / 100) {
+        logf("templates: the manager at image+%#lx did not check out (%zu read, %zu disagreed)",
+             (unsigned long)kRecordedManagerGlobal, out->ById.size(), disagreed);
+        *out = Templates{};
+        return false;
+    }
+    out->Built = true;
+    return true;
+}
+
 bool build() {
     Templates found{};
 
@@ -299,72 +407,117 @@ bool build() {
     for (auto const& entry : found.ById) found.Order.push_back(entry.first);
 
     found.Built = true;
-    state() = std::move(found);
     std::size_t typed = 0;
-    for (auto const& entry : state().ById) {
+    for (auto const& entry : found.ById) {
         if (!entry.second.Type.empty()) ++typed;
     }
-    logf("templates: %zu templates across %zu distinct vtables, %zu with a "
-         "type name", state().ById.size(), state().ByVtable.size(), typed);
+    logf("templates: the scan found %zu templates across %zu distinct vtables, "
+         "%zu with a type name", found.ById.size(), found.ByVtable.size(), typed);
 
     if (std::getenv("BG3LE_DUMP_TEMPLATES") != nullptr) {
         std::unordered_map<std::string, std::size_t> byType;
-        for (auto const& entry : state().ById) ++byType[entry.second.Type];
+        for (auto const& entry : found.ById) ++byType[entry.second.Type];
         for (auto const& entry : byType) {
             logf("templates: type \"%s\": %zu", entry.first.c_str(),
                  entry.second);
         }
         std::size_t shown = 0;
-        for (auto const& entry : state().ByVtable) {
+        for (auto const& entry : found.ByVtable) {
             logf("templates: vtable %#llx holds %zu templates",
                  (unsigned long long)entry.first, entry.second);
             if (shown++ < 2) dump_vtable(entry.first);
         }
     }
+
+    // Published only now, so a lookup never waits on the scan itself.
+    const std::lock_guard<std::mutex> held(templates_lock());
+    for (auto const& id : found.Order) {
+        if (state().ById.count(id) == 0) state().Order.push_back(id);
+    }
+    scanned() = std::move(found);
     return true;
 }
 
-bool ready() {
-    // Only the warming thread scans; see mem.h.
-    if (!state().Built && !scan_allowed()) return false;
-
+// The root templates, from the manager: cheap, so any thread may ask, and
+// a failure is retried a few seconds later rather than on every call.
+// Called with templates_lock held.
+bool root_ready() {
     if (state().Built) return true;
+    static std::time_t lastAttempt = 0;
+    const std::time_t now = std::time(nullptr);
+    if (lastAttempt != 0 && now - lastAttempt < 3) return false;
+    lastAttempt = now;
 
+    Templates found{};
+    if (!build_from_manager(&found)) return false;
+    for (auto const& id : scanned().Order) {
+        if (found.ById.count(id) == 0) found.Order.push_back(id);
+    }
+    state() = std::move(found);
+    logf("templates: %zu root templates from the GlobalTemplateManager",
+         state().ById.size());
+    return true;
+}
+
+// The scan, for what the manager does not hold. The warming thread only.
+bool scan_ready() {
+    if (scanned().Built) return true;
+    if (!scan_allowed()) return false;
     static int attempts = 0;
     if (attempts >= 40) return false;
     ++attempts;
     return build();
 }
 
+Found const* lookup(char const* id) {
+    auto it = state().ById.find(id);
+    if (it != state().ById.end()) return &it->second;
+    it = scanned().ById.find(id);
+    return it != scanned().ById.end() ? &it->second : nullptr;
+}
+
 }  // namespace
 
-extern "C" bool bg3le_templates_ready() { return ready(); }
+extern "C" bool bg3le_templates_ready() {
+    bool root = false;
+    {
+        const std::lock_guard<std::mutex> held(templates_lock());
+        root = root_ready();
+    }
+    // The warming thread goes on to scan for local templates.
+    return scan_ready() || root;
+}
 
 extern "C" std::size_t bg3le_templates_count() {
-    return ready() ? state().ById.size() : 0;
+    const std::lock_guard<std::mutex> held(templates_lock());
+    root_ready();
+    return state().Order.size();
 }
 
 extern "C" char const* bg3le_templates_id_at(std::size_t index) {
-    if (!ready() || index >= state().Order.size()) return nullptr;
+    const std::lock_guard<std::mutex> held(templates_lock());
+    root_ready();
+    if (index >= state().Order.size()) return nullptr;
     return state().Order[index].c_str();
 }
 
 extern "C" void* bg3le_templates_find(char const* id) {
-    if (id == nullptr || !ready()) return nullptr;
-
-    auto it = state().ById.find(id);
-    if (it == state().ById.end()) return nullptr;
-    return (void*)(std::uintptr_t)it->second.Address;
+    if (id == nullptr) return nullptr;
+    const std::lock_guard<std::mutex> held(templates_lock());
+    root_ready();
+    Found const* found = lookup(id);
+    return found != nullptr ? (void*)(std::uintptr_t)found->Address : nullptr;
 }
 
 // The engine's own name for a template's type: "character", "item" and so
 // on, from the class's static FixedString.
 extern "C" char const* bg3le_templates_type(char const* id) {
-    if (id == nullptr || !ready()) return nullptr;
-
-    auto it = state().ById.find(id);
-    if (it == state().ById.end() || it->second.Type.empty()) return nullptr;
-    return it->second.Type.c_str();
+    if (id == nullptr) return nullptr;
+    const std::lock_guard<std::mutex> held(templates_lock());
+    root_ready();
+    Found const* found = lookup(id);
+    if (found == nullptr || found->Type.empty()) return nullptr;
+    return found->Type.c_str();
 }
 
 }  // namespace bg3le

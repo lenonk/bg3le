@@ -258,6 +258,15 @@ component's declared size with the size the engine recorded, and
   engine's string repository, so strings the engine made at runtime resolve
   too: a player-named character's `ResStr_272917352` reads back as the name
   they typed
+- **Root templates come from the engine's GlobalTemplateManager**, as
+  upstream's `GetRootTemplate` reads them: all 32,911, from its bank's
+  `Templates` map, whose keys are checked against each template's own Id. The
+  manager's global is recorded for this build and checked before use. They
+  used to be found by scanning memory for template-shaped objects, which
+  took seconds, ran on the story thread when a mod asked during load, and
+  found about two thousand of them; the scan now runs only on the warming
+  thread, for the level's own templates, and `GetTemplate` checks the root
+  set first, as upstream does
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -404,7 +413,13 @@ component's declared size with the size the engine recorded, and
   system calls every time it was read, which came to 73% of the extender's
   CPU and was the difference between a mod's stats pass finishing in five
   seconds and never finishing at all. `BG3LE_COUNT_READS=1` is how that was
-  found and how the next one will be. Every attribute kind is decoded —
+  found and how the next one will be; `BG3LE_PROFILE=1` times every call a
+  slow event handler makes, C functions included, and logs the most
+  expensive. That is what showed 5eSpells' `StatsLoaded` spending 4.4 of its
+  6 seconds waiting on the template scan and half a second on the GUID
+  resource manager's; with the templates from their manager and the GUID
+  manager at the offset it has in every run, the handler takes 0.7 seconds
+  and bg3le's share of the level load went from 6.8 seconds to 1.05. Every attribute kind is decoded —
   ints, floats, strings, GUIDs, enumerations and flag sets;
   `RPGStats` has no symbol and its layout is not ours (our
   `TreasureRarities` sits at 800 where the engine's is at 3648), so nothing

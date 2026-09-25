@@ -4145,18 +4145,25 @@ int l_string_table_dump(lua_State*) {
 // From an index built once rather than by walking every stat and asking
 // each one what it is. Ext.Stats.GetStats is called in loops, and doing it
 // the other way cost a quarter of a second a call.
+extern "C" std::size_t bg3le_stats_names_each(char const* list,
+                                              void (*each)(void*, char const*),
+                                              void* context);
+
 int l_stats_names(lua_State* L) {
     char const* list = lua_isnoneornil(L, 1) ? nullptr : luaL_checkstring(L, 1);
     const std::size_t count = bg3le_stats_names_count(list);
 
+    struct Fill {
+        lua_State* L;
+        int Kept;
+    } fill{L, 0};
     lua_createtable(L, (int)count, 0);
-    int kept = 0;
-    for (std::size_t i = 0; i < count; ++i) {
-        char const* name = bg3le_stats_names_at(list, i);
-        if (name == nullptr) continue;
-        lua_pushstring(L, name);
-        lua_rawseti(L, -2, ++kept);
-    }
+    bg3le_stats_names_each(list, [](void* context, char const* name) {
+        auto* f = static_cast<Fill*>(context);
+        if (name == nullptr) return;
+        lua_pushstring(f->L, name);
+        lua_rawseti(f->L, -2, ++f->Kept);
+    }, &fill);
     return 1;
 }
 
@@ -8276,11 +8283,79 @@ function SubscribableEvent:ProcessDeferredSubscriptions()
   end
 end
 
+-- BG3LE_PROFILE=1: time every call a slow handler makes, C functions
+-- included, and log the most expensive by inclusive and by self time.
+local profile_handlers = os.getenv("BG3LE_PROFILE") ~= nil
+
+local function profiled_call(handler, event, label)
+  local clock = Ext.Utils.MicrosecTime
+  local incl, self_t, calls = {}, {}, {}
+  local stack = {}
+  local function key_of(at, named)
+    if at.what == "C" then
+      return (named and named.name or "?") .. " [C]"
+    end
+    return at.short_src .. ":" .. tostring(at.linedefined)
+  end
+  debug.sethook(function(ev)
+    local now = clock()
+    if ev == "call" or ev == "tail call" then
+      local at = debug.getinfo(2, "S")
+      local named = at and at.what == "C" and debug.getinfo(2, "n") or nil
+      local k = at and key_of(at, named) or "?"
+      if ev == "tail call" and #stack > 0 then
+        -- replaces the caller's frame
+        local top = stack[#stack]
+        local spent = now - top[2]
+        incl[top[1]] = (incl[top[1]] or 0) + spent
+        self_t[top[1]] = (self_t[top[1]] or 0) + spent - top[3]
+        stack[#stack] = {k, now, 0}
+      else
+        stack[#stack + 1] = {k, now, 0}
+      end
+      calls[k] = (calls[k] or 0) + 1
+    else
+      local top = table.remove(stack)
+      if top ~= nil then
+        local spent = now - top[2]
+        incl[top[1]] = (incl[top[1]] or 0) + spent
+        self_t[top[1]] = (self_t[top[1]] or 0) + spent - top[3]
+        local parent = stack[#stack]
+        if parent ~= nil then parent[3] = parent[3] + spent end
+      end
+    end
+  end, "cr")
+  local started = clock()
+  local ok, result = xpcall(handler, debug.traceback, event)
+  debug.sethook()
+  local took = clock() - started
+  if took > 100000 then
+    local function top(t, title)
+      local rows = {}
+      for k, v in pairs(t) do rows[#rows + 1] = {k, v} end
+      table.sort(rows, function(a, b) return a[2] > b[2] end)
+      Ext.Log.Print(string.format("profile %s, %s (%.0f ms with hooks):", label, title, took / 1000))
+      for i = 1, math.min(20, #rows) do
+        Ext.Log.Print(string.format("  %9.1f ms %8d calls  %s", rows[i][2] / 1000,
+                                    calls[rows[i][1]] or 0, rows[i][1]))
+      end
+    end
+    top(self_t, "self time")
+    top(incl, "inclusive")
+  end
+  return ok, result
+end
+
 -- Upstream's Dispatch, plus bg3le's report of a handler that holds the
 -- thread up, named by the file and line it was defined at.
 function SubscribableEvent:Dispatch(event, handler)
   local started = Ext.Utils.MicrosecTime()
-  local ok, result = xpcall(handler, debug.traceback, event)
+  local ok, result
+  if profile_handlers then
+    ok, result = profiled_call(handler, event, self.Name)
+  else
+    ok, result = xpcall(handler, debug.traceback, event)
+  end
   local took = Ext.Utils.MicrosecTime() - started
   if not ok then
     Ext.Log.PrintError("Error while dispatching event " .. self.Name .. ": ",
