@@ -535,11 +535,12 @@ component's declared size with the size the engine recorded, and
   fields are writable.
   [reference/STAT-WRITES.md](reference/STAT-WRITES.md) has the layout and
   the three theories that were tested and eliminated
-- **The last 3% of the field kinds.** 3,477 of 3,566 component fields
-  convert (97.5%, from `tools/meta-check.c`; it was 94.0% before `STDString`
+- **The last 2.4% of the field kinds.** 3,482 of 3,566 component fields
+  convert (97.6%, from `tools/meta-check.c`; it was 94.0% before `STDString`
   was given this build's sixteen-byte layout): scalars, enums and bitmasks,
   nested structs, fixed and dynamic arrays, `CompactSet` (read-only), hash
-  sets, hash maps, glm vectors,
+  sets, hash maps and the node-chained `LegacyMap`/`LegacyRefMap`, glm
+  vectors,
   `std::optional`, `std::variant`, `FixedString`, `OverrideableProperty`,
   `ecs::EntityRef`, and the wrappers upstream pushes as what they hold —
   `Path` as its string, `NetId` and `UserId` as integers, a component handle
@@ -549,7 +550,7 @@ component's declared size with the size the engine recorded, and
   `std::variant` is read by the engine's layout rather than this compiler's
   — the game is libc++ ABI 2, see
   [reference/LIBCXX-ABI.md](reference/LIBCXX-ABI.md). Counting every class
-  the metadata describes rather than only components, 1,660 of 21,514 fields
+  the metadata describes rather than only components, 1,614 of 21,514 fields
   do not convert yet (meta-check prints both). Of those, most are raw
   pointers — 386 in the `aspk` effect timelines alone — which upstream
   follows to the object they point at; the largest named groups are the Lua

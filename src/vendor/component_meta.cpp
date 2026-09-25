@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cstring>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -612,6 +613,63 @@ struct MapTraits<HashMap<K, V>> {
     using Value = V;
 };
 
+// LegacyMap and LegacyRefMap chain their entries off a bucket table, so an
+// entry is reached by walking to it. A cursor per thread keeps walking them
+// in order linear rather than quadratic.
+template <class T>
+struct LegacyMapTraits {
+    static constexpr bool kIsLegacyMap = false;
+    using Key = void;
+    using Value = void;
+};
+
+template <class I>
+struct LegacyMapTraits<LegacyMapBase<I>> {
+    static constexpr bool kIsLegacyMap = true;
+    using Key = typename LegacyMapBase<I>::KeyType;
+    using Value = typename LegacyMapBase<I>::ValueType;
+};
+
+template <class M>
+typename M::Node* legacy_map_node(void const* container, std::size_t index) {
+    auto& map = *const_cast<M*>(static_cast<M const*>(container));
+    if (index >= map.size()) return nullptr;
+    struct Cursor {
+        void const* Map;
+        std::uint32_t Size;
+        std::size_t Index;
+        typename M::Iterator It;
+    };
+    thread_local std::optional<Cursor> cursor;
+    if (!cursor || cursor->Map != container || cursor->Size != map.size()
+        || index < cursor->Index) {
+        cursor.emplace(Cursor{container, map.size(), 0, map.begin()});
+    }
+    while (cursor->Index < index && cursor->It != map.end()) {
+        ++cursor->It;
+        ++cursor->Index;
+    }
+    if (cursor->Index != index || cursor->It == map.end()) return nullptr;
+    return &*cursor->It;
+}
+
+template <class M>
+std::size_t legacy_map_count_thunk(void const* container) {
+    return (std::size_t)static_cast<M const*>(container)->size();
+}
+
+template <class M>
+void* legacy_map_value_thunk(void const* container, std::size_t index) {
+    auto* node = legacy_map_node<M>(container, index);
+    return node != nullptr ? (void*)&node->Value : nullptr;
+}
+
+template <class M>
+void* legacy_map_key_thunk(void const* container, std::size_t index) {
+    auto* node = legacy_map_node<M>(container, index);
+    return node != nullptr ? (void*)&node->Key : nullptr;
+}
+
 template <class M>
 std::size_t map_count_thunk(void const* container) {
     return (std::size_t)static_cast<M const*>(container)->size();
@@ -702,7 +760,8 @@ constexpr FieldKind kind_of() {
                          || SetTraits<T>::kIsSet
                          || CompactSetTraits<T>::kIsCompactSet) {
         return FieldKind::DynArray;
-    } else if constexpr (MapTraits<T>::kIsMap) {
+    } else if constexpr (MapTraits<T>::kIsMap
+                         || LegacyMapTraits<T>::kIsLegacyMap) {
         return FieldKind::Map;
     } else if constexpr (OptionalTraits<T>::kIsOptional) {
         return FieldKind::Optional;
@@ -905,6 +964,19 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         f.Count = &map_count_thunk<T>;
         f.Data = &map_values_thunk<T>;
         f.KeyData = &map_keys_thunk<T>;
+        f.KeyKind = scalar_kind_of<K>();
+        f.KeySize = (std::uint16_t)sizeof(K);
+        if constexpr (std::is_enum_v<K>) {
+            f.KeyTypeName = type_name<K>().data();
+            f.KeyTypeNameLength = (std::uint16_t)type_name<K>().size();
+        }
+    } else if constexpr (LegacyMapTraits<T>::kIsLegacyMap) {
+        using K = typename LegacyMapTraits<T>::Key;
+        using V = typename LegacyMapTraits<T>::Value;
+        describe_elements.template operator()<V>();
+        f.Count = &legacy_map_count_thunk<T>;
+        f.ElemAt = &legacy_map_value_thunk<T>;
+        f.KeyAt = &legacy_map_key_thunk<T>;
         f.KeyKind = scalar_kind_of<K>();
         f.KeySize = (std::uint16_t)sizeof(K);
         if constexpr (std::is_enum_v<K>) {
@@ -1511,9 +1583,17 @@ Resolved resolve_path(ClassFields const* cls, char const* path, void* base) {
             case FieldKind::DynArray:
             case FieldKind::Map:
             case FieldKind::Optional: {
-                if (current.Count == nullptr || current.Data == nullptr) return out;
+                if (current.Count == nullptr
+                    || (current.Data == nullptr && current.ElemAt == nullptr)) {
+                    return out;
+                }
                 if (address != nullptr) {
                     if (index >= current.Count(address)) return out;
+                    if (current.ElemAt != nullptr) {
+                        address = current.ElemAt(address, index);
+                        if (address == nullptr) return out;
+                        break;
+                    }
                     void* data = current.Data(address);
                     if (data == nullptr) return out;
                     address = (char*)data + index * current.ElemSize;
@@ -2037,14 +2117,21 @@ extern "C" bool bg3le_meta_map_key(void const* handle, char const* path,
                                 component);
     if (!r.Ok || r.Address == nullptr) return false;
     if (r.Field.Kind != FieldKind::Map) return false;
-    if (r.Field.Count == nullptr || r.Field.KeyData == nullptr) return false;
+    if (r.Field.Count == nullptr
+        || (r.Field.KeyData == nullptr && r.Field.KeyAt == nullptr)) {
+        return false;
+    }
     if (r.Field.KeySize == 0) return false;
     if (index >= r.Field.Count(r.Address)) return false;
 
-    void* keys = r.Field.KeyData(r.Address);
-    if (keys == nullptr) return false;
-
-    *address = (char*)keys + index * r.Field.KeySize;
+    if (r.Field.KeyAt != nullptr) {
+        *address = r.Field.KeyAt(r.Address, index);
+    } else {
+        void* keys = r.Field.KeyData(r.Address);
+        if (keys == nullptr) return false;
+        *address = (char*)keys + index * r.Field.KeySize;
+    }
+    if (*address == nullptr) return false;
     *kind = (std::uint8_t)r.Field.KeyKind;
     *size = r.Field.KeySize;
     return true;

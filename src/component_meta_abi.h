@@ -168,6 +168,11 @@ struct FieldDesc {
     // fresh allocation, abandoning the old buffer rather than freeing it
     // (bg3le cannot know who allocated it). Last, as above.
     bool (*Resize)(void* container, std::size_t count);
+    // Map only, for a map whose entries are nodes rather than two contiguous
+    // runs (LegacyMap, LegacyRefMap): the value and the key of entry index,
+    // used in place of Data and KeyData. Last, as above.
+    void* (*ElemAt)(void const* container, std::size_t index);
+    void* (*KeyAt)(void const* container, std::size_t index);
 };
 
 }  // namespace bg3le

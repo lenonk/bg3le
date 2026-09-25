@@ -10757,12 +10757,21 @@ local read_object
 -- A snapshot array or map, as a userdata over the values read, as
 -- upstream's are userdata. source is where a set came from, for
 -- Ext.Types.Unserialize to write it back.
+-- A map's length is its entry count, as upstream's map proxy reports it;
+-- its keys are not a sequence, so # on the table would say nought.
+local function entry_count(items)
+  local n = 0
+  for _ in next, items do n = n + 1 end
+  return n
+end
+
 local function snapshot_container(items, source, container)
   return Ext._Internal.NewObjectProxy({
     __bg3leContainer = container,
     __index = items,
     __newindex = function(_, k, v) items[k] = v end,
-    __len = function() return #items end,
+    __len = container == "map" and function() return entry_count(items) end
+            or function() return #items end,
     __pairs = function() return next, items, nil end,
     __bg3leSource = source,
   })
