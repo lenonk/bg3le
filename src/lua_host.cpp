@@ -7837,20 +7837,6 @@ function Ext.DumpShallow(v)
   }))
 end
 
--- Modules needing engine reflection are stubbed so a mod gets a specific
--- error instead of "attempt to index a nil value".
-local function stub_index(name)
-  return function(_, key)
-    return function()
-      error(string.format("bg3le: Ext.%s.%s is not implemented yet", name, key), 0)
-    end
-  end
-end
-
-local function stub(name)
-  return setmetatable({}, {__index = stub_index(name)})
-end
-
 Ext.Table = {
   Find = function(tbl, value)
     for k, v in pairs(tbl) do
@@ -8901,10 +8887,10 @@ end
 
 -- ---- Ext.Vars ----
 --
--- Mod and user variables. The registry, the storage and the dirty
--- tracking are real, and persistent ones are written into saves (see
--- CollectSaveExtras); replication to clients is not, so Sync records the
--- intent and says once that nothing leaves the process.
+-- Mod and user variables. Persistent ones are written into saves (see
+-- CollectSaveExtras); ones flagged SyncToClient or SyncToServer cross to the
+-- other Lua context as upstream's replicate: on write, on the tick, or on
+-- Sync. User variables are keyed by entity GUID, the same on both sides.
 Ext.Vars = {}
 
 local mod_variable_defs = {}
@@ -8913,13 +8899,97 @@ local user_variable_defs = {}
 local user_variables = {}
 local dirty_mod = {}
 local dirty_user = {}
-local warned_sync = false
 
-local function warn_sync(what)
-  if warned_sync then return end
-  warned_sync = true
-  Ext.Log.PrintWarning("bg3le: " .. what .. " is local to this process; "
-    .. "variable replication is not implemented")
+do
+  local CHANNEL = "__bg3le_vars__"
+
+  -- Upstream's ParseUserVariableFlags defaults.
+  local DEFAULTS = {Server = true, Client = false, WriteableOnServer = true,
+                    WriteableOnClient = false, Persistent = true,
+                    SyncToClient = false, SyncToServer = false,
+                    SyncOnWrite = false, DontCache = false, SyncOnTick = true}
+
+  local function option(defs, key, name)
+    local d = defs and defs[key]
+    local v = d and d[name]
+    if v == nil then return DEFAULTS[name] end
+    return v
+  end
+  Ext._Internal.VarOption = option
+
+  local function syncs(defs, key, onTick)
+    return option(defs, key, Ext.IsServer() and "SyncToClient" or "SyncToServer")
+       and (not onTick or option(defs, key, "SyncOnTick"))
+  end
+
+  -- Takes what is due from one dirty table; values boxed so nil crosses.
+  local function take(dirty, defsOf, valuesOf, onTick, out)
+    local any = false
+    for owner, keys in pairs(dirty) do
+      local defs = defsOf(owner)
+      for key in pairs(keys) do
+        if syncs(defs, key, onTick) then
+          if owner == "*" then
+            for guid, vars in pairs(user_variables) do
+              if vars[key] ~= nil then
+                out[guid] = out[guid] or {}
+                out[guid][key] = {V = vars[key]}
+                any = true
+              end
+            end
+          else
+            local values = valuesOf(owner)
+            out[owner] = out[owner] or {}
+            out[owner][key] = {V = values and values[key]}
+            any = true
+          end
+          keys[key] = nil
+        elseif not onTick then
+          keys[key] = nil
+        end
+      end
+      if next(keys) == nil then dirty[owner] = nil end
+    end
+    return any
+  end
+
+  local function flush(mod, user, onTick)
+    local payload = {Mod = {}, User = {}}
+    local any = false
+    if mod then
+      any = take(dirty_mod, function(uuid) return mod_variable_defs[uuid] end,
+                 function(uuid) return mod_variables[uuid] end, onTick, payload.Mod) or any
+    end
+    if user then
+      any = take(dirty_user, function() return user_variable_defs end,
+                 function(guid) return user_variables[guid] end, onTick, payload.User) or any
+    end
+    if any then
+      Ext._Internal.PostToOtherContext(CHANNEL, Ext.Json.Stringify(payload), 1)
+    end
+  end
+
+  function Ext._Internal.FlushVars() flush(true, true, true) end
+  function Ext._Internal.FlushVarsOnWrite(defs, key)
+    if option(defs, key, "SyncOnWrite") then flush(true, true, false) end
+  end
+  function Ext._Internal.IsVarChannel(channel) return channel == CHANNEL end
+
+  function Ext._Internal.ApplyVarSync(payload)
+    local ok, data = pcall(Ext.Json.Parse, payload)
+    if not ok or type(data) ~= "table" then return end
+    for uuid, entries in pairs(data.Mod or {}) do
+      mod_variables[uuid] = mod_variables[uuid] or {}
+      for key, box in pairs(entries) do mod_variables[uuid][key] = box.V end
+    end
+    for guid, entries in pairs(data.User or {}) do
+      user_variables[guid] = user_variables[guid] or {}
+      for key, box in pairs(entries) do user_variables[guid][key] = box.V end
+    end
+  end
+
+  function Ext.Vars.SyncModVariables() flush(true, false, false) end
+  function Ext.Vars.SyncUserVariables() flush(false, true, false) end
 end
 
 function Ext.Vars.RegisterModVariable(moduleUuid, name, options)
@@ -8948,9 +9018,16 @@ function Ext.Vars.GetModVariables(moduleUuid)
         error("no mod variable named " .. tostring(key)
               .. " is registered for " .. tostring(moduleUuid), 2)
       end
+      local server = Ext.IsServer()
+      if not Ext._Internal.VarOption(defs, key, server and "WriteableOnServer" or "WriteableOnClient") then
+        Ext.Log.PrintError("Variable class '" .. key .. "' not writeable on "
+                           .. (server and "server" or "client"))
+        return
+      end
       store[key] = value
       dirty_mod[moduleUuid] = dirty_mod[moduleUuid] or {}
       dirty_mod[moduleUuid][key] = true
+      Ext._Internal.FlushVarsOnWrite(defs, key)
     end,
     __pairs = function()
       return next, store, nil
@@ -8958,10 +9035,6 @@ function Ext.Vars.GetModVariables(moduleUuid)
   })
 end
 
-function Ext.Vars.SyncModVariables()
-  warn_sync("Ext.Vars.SyncModVariables")
-  dirty_mod = {}
-end
 
 function Ext.Vars.DirtyModVariables(moduleUuid, key)
   if moduleUuid == nil then
@@ -8988,10 +9061,6 @@ function Ext.Vars.RegisterUserVariable(name, options)
   user_variable_defs[name] = options or {}
 end
 
-function Ext.Vars.SyncUserVariables()
-  warn_sync("Ext.Vars.SyncUserVariables")
-  dirty_user = {}
-end
 
 function Ext.Vars.DirtyUserVariables(entityGuid, key)
   local bucket = entityGuid or "*"
@@ -9000,6 +9069,7 @@ function Ext.Vars.DirtyUserVariables(entityGuid, key)
     for k in pairs(user_variable_defs) do dirty_user[bucket][k] = true end
   else
     dirty_user[bucket][key] = true
+    Ext._Internal.FlushVarsOnWrite(user_variable_defs, key)
   end
 end
 
@@ -9079,6 +9149,8 @@ function Ext._Internal.DrainNetMessages()
         Ext.Log.PrintError("bg3le: a net channel message did not parse: "
                            .. tostring(wrapper))
       end
+    elseif Ext._Internal.IsVarChannel(channel) then
+      Ext._Internal.ApplyVarSync(payload)
     else
       Ext._Internal.FireNetMessage(channel, payload, user)
       Ext._Internal.FireEvent("NetMessage", {Channel = channel,
@@ -10573,6 +10645,8 @@ function Ext._Internal.RunTimers()
   -- Anything the other context sent since the last tick, first: a message is
   -- what a timer or a handler this tick may be waiting on.
   Ext._Internal.DrainNetMessages()
+  -- And the variables written since, which SyncOnTick sends.
+  Ext._Internal.FlushVars()
 
   -- And what the overlay's widgets queued, for the same reason.
   Ext._Internal.ImguiPump()

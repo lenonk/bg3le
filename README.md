@@ -155,6 +155,15 @@ component's declared size with the size the engine recorded, and
   The receiver always gets its own parsed copy, a missing channel or
   handler warns as upstream's does, a failing request handler sends no
   reply, and `Ext.Net.Version()` is the protocol version, 2
+- **Mod and user variables replicate between the contexts** as upstream's do:
+  a variable registered with `SyncToClient` or `SyncToServer` crosses on write
+  (`SyncOnWrite`), at the next tick (`SyncOnTick`, on by default) or on
+  `SyncModVariables`/`SyncUserVariables`, over the same queue as `Ext.Net` on a
+  channel mods never see. Options default as upstream's
+  `ParseUserVariableFlags`, and a write where the variable is not writeable is
+  refused with upstream's message. User variables are keyed by entity GUID,
+  the same on both sides: a table set on the host's `Vars` on the server reads
+  back on the client's entity, and an unflagged one stays server-side
 - **`Ext.Debug.GenerateIdeHelpers`** writes the LuaLS annotations upstream
   writes, to the path upstream writes them to: 20,361 `Osi.*` stubs with
   `@param` and `@return` from the story's own signatures, plus the bare global
