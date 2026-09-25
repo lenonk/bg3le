@@ -522,7 +522,12 @@ component's declared size with the size the engine recorded, and
   a negative result: it fits, with four arbitrary breaks, which is what a
   test with that much freedom does.
   [reference/GLOBAL-SWITCHES.md](reference/GLOBAL-SWITCHES.md).
-  `reference/ext-api-surface.txt` lists them with their shapes
+  `reference/ext-api-surface.txt` lists them with their shapes. For the
+  physics queries there is a lead: upstream goes through Larian's
+  `PhysicsScene` wrapper, which has no symbol, but PhysX is linked into the
+  executable with its own (about 8,000, `PxGetPhysics` and `NpScene`'s queries
+  among them). What is unmapped is how Larian's physics types and groups sit
+  in PhysX's filter data, which upstream's filters and hits are expressed in
 - **Stat `Sync` and `SetPersistence`.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
   enumerations in place; conditions, strings, floats, GUIDs, flag sets and
