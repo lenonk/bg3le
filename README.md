@@ -142,7 +142,10 @@ component's declared size with the size the engine recorded, and
   belongs to it. Mod Configuration Menu loads on both sides and prints its
   `[S]` and `[C]` banners; `Ext.IsClient()`/`Ext.IsServer()` answer for the
   state they are asked in. The console switches with `:client` / `:server` —
-  the LuaDebug protocol has carried a context on every request all along.
+  the LuaDebug protocol has carried a context on every request all along —
+  and `:client` works at the main menu, where it runs on the client's tick.
+  Extender messages go to the log and the console, not to the game's
+  stdout, as upstream's go to their own window.
   Osiris is server-side, as upstream has it, and says so in the client
   context rather than blaming the save. Each context runs on its own
   thread, as upstream's do: the client ticks every client frame and gets
@@ -150,10 +153,7 @@ component's declared size with the size the engine recorded, and
   queued. The client context's bootstraps run
   when the game leaves `LoadModule`, before the main menu is built, as
   upstream's do — so a UI mod's menu changes are in place when the menu
-  appears. `Ext.Utils.GetGameState()` reports the client's real state there. The
-  engine's own repository is still not written, so the game's own interface
-  does not show them; bg3le says so once rather than leaving it to be
-  discovered
+  appears. `Ext.Utils.GetGameState()` reports the client's real state there
 - **The engine's own managers found once and remembered.** Everything located
   by content — `RPGStats`, the mod load order, the four prototype managers —
   has the path from a static pointer to it recorded under the build id, so

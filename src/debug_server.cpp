@@ -282,14 +282,25 @@ void debug_server_start() {
     std::thread(listener).detach();
 }
 
-void debug_server_pump() {
+namespace {
+
+// Once the client ticks on its own thread, its evaluations run there -- at
+// the main menu there is no story thread to run them.
+std::atomic<bool> g_client_pumps{false};
+
+void pump_where(bool clientJobs) {
     for (;;) {
         std::shared_ptr<Job> job;
         {
             std::lock_guard<std::mutex> lock(g_queue_mutex);
-            if (g_queue.empty()) return;
-            job = g_queue.front();
-            g_queue.pop_front();
+            auto it = g_queue.begin();
+            while (it != g_queue.end() && !((*it)->client == clientJobs
+                   || (!clientJobs && !g_client_pumps.load()))) {
+                ++it;
+            }
+            if (it == g_queue.end()) return;
+            job = *it;
+            g_queue.erase(it);
         }
 
         g_pending.fetch_sub(1, std::memory_order_acq_rel);
@@ -306,6 +317,16 @@ void debug_server_pump() {
         }
         g_queue_cv.notify_all();
     }
+}
+
+}  // namespace
+
+void debug_server_pump() { pump_where(false); }
+
+void debug_server_pump_client() {
+    g_client_pumps.store(true);
+    if (g_pending.load(std::memory_order_acquire) == 0) return;
+    pump_where(true);
 }
 
 void statusf(const char* fmt, ...) {

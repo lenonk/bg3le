@@ -10,6 +10,9 @@ void debug_server_start();
 // thread never touches Lua or the engine itself.
 void debug_server_pump();
 
+// The same for client-context evaluations, from the client's own tick.
+void debug_server_pump_client();
+
 // Forwards Lua print() output to the attached client.
 void debug_server_output(const char* text, int severity = 0);
 

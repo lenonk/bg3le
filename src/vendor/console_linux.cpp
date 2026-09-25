@@ -3,7 +3,7 @@
 // The upstream implementation (vendor/bg3se/CoreLib/Console.cpp) drives a
 // Win32 console: AllocConsole, screen buffers, font tables, colour
 // attributes. None of that exists here, so this provides the same interface
-// over stdout, ANSI colour, and bg3le's own log and debugger output.
+// over bg3le's own log and debugger output.
 //
 // The interface is declared by CoreLib/Console.h, by Norbyte and the bg3se
 // contributors (https://github.com/Norbyte/bg3se); this implementation is
@@ -20,18 +20,6 @@
 BEGIN_SE()
 
 namespace {
-
-// Matched to DebugMessageType, so output is readable in a normal terminal.
-const char* colour_for(DebugMessageType type)
-{
-    switch (type) {
-    case DebugMessageType::Error:   return "\x1b[1;31m";
-    case DebugMessageType::Warning: return "\x1b[1;33m";
-    case DebugMessageType::Osiris:  return "\x1b[0;36m";
-    case DebugMessageType::Debug:   return "\x1b[0;90m";
-    default:                        return "";
-    }
-}
 
 // bg3lua expects the severities the debugger protocol defines.
 int severity_for(DebugMessageType type)
@@ -80,19 +68,21 @@ void Console::CloseLogFile()
     logToFile_ = false;
 }
 
-void Console::SetColor(DebugMessageType type)
+// No terminal of its own to colour; see LocalPrint.
+void Console::SetColor(DebugMessageType)
 {
-    std::fputs(colour_for(type), stdout);
 }
 
+// Upstream's console is a window of its own, so none of this reaches the
+// game's stdout there; here it goes to bg3le's log, and Print also sends it
+// to the bg3lua console, which is that window's counterpart.
 void Console::LocalPrint(DebugMessageType type, char const* msg)
 {
     if (silence_ || msg == nullptr) return;
 
-    SetColor(type);
-    std::fputs(msg, stdout);
-    std::fputs("\x1b[0m\n", stdout);
-    std::fflush(stdout);
+    bg3le::logf("%s%s", type == DebugMessageType::Error ? "error: "
+                        : type == DebugMessageType::Warning ? "warning: " : "",
+                msg);
 
     if (logToFile_) {
         logFile_ << msg << std::endl;

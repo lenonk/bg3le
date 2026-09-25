@@ -11658,7 +11658,10 @@ end
 
 
 )LUA";
-    if (luaL_dostring(g_lua, kPrelude) != LUA_OK) {
+    // Named, so tracebacks say "bg3le prelude:917" rather than quoting the
+    // whole source as the chunk name.
+    if ((luaL_loadbuffer(g_lua, kPrelude, std::strlen(kPrelude), "=bg3le prelude")
+         || lua_pcall(g_lua, 0, LUA_MULTRET, 0)) != LUA_OK) {
         logf("lua: prelude failed: %s", lua_tostring(g_lua, -1));
         lua_pop(g_lua, 1);
     }
@@ -11844,6 +11847,7 @@ void lua_client_tick(char const* from, char const* to) {
         lua_pop(g_lua, 2);
     }
     call_internal("RunTimers");
+    debug_server_pump_client();
 }
 
 // Both contexts load mods, each running the bootstrap that belongs to it.
@@ -12012,7 +12016,8 @@ void lua_eval(const char* code, std::string* result, std::string* error) {
 
 void lua_run(const char* code) {
     if (g_lua == nullptr) return;
-    if (luaL_dostring(g_lua, code) != LUA_OK) {
+    if ((luaL_loadbuffer(g_lua, code, std::strlen(code), "=bg3le")
+         || lua_pcall(g_lua, 0, LUA_MULTRET, 0)) != LUA_OK) {
         logf("lua error: %s", lua_tostring(g_lua, -1));
         lua_pop(g_lua, 1);
         return;
