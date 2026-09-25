@@ -4153,21 +4153,51 @@ int l_ai_path_search(lua_State* L) {
     return 1;
 }
 
+extern "C" void* bg3le_resource_bank(std::int32_t typeIndex);
+
+// The ClassDescription bank, as upstream hands to surface actions and functor
+// contexts; null when the static data is not up.
+void* class_description_bank() {
+    void const* meta = bg3le_meta_class("ClassDescription");
+    const char* engineClass = meta != nullptr ? bg3le_meta_engine_class(meta) : nullptr;
+    if (engineClass == nullptr) return nullptr;
+    auto index = ecs::index_of(ecs::Context::ImmutableData, engineClass);
+    return index ? bg3le_resource_bank((std::int32_t)*index) : nullptr;
+}
+
+// Ext._Internal.FunctorParams(type) -> address, or nothing
+extern "C" void* bg3le_functor_params(int type, void* classDescriptions);
+int l_functor_params(lua_State* L) {
+    void* at = bg3le_functor_params((int)luaL_checkinteger(L, 1), class_description_bank());
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.FunctorsExecute(functors, context, single) -> true, or nil and why
+extern "C" bool bg3le_functors_execute(void* functors, void* context, void* world, char const** why);
+extern "C" bool bg3le_functor_execute(void* functor, void* context, void* world, char const** why);
+int l_functors_execute(lua_State* L) {
+    auto* functors = (void*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    auto* context = (void*)(std::uintptr_t)luaL_checkinteger(L, 2);
+    char const* why = nullptr;
+    const bool ok = lua_toboolean(L, 3)
+                        ? bg3le_functor_execute(functors, context, server_container(), &why)
+                        : bg3le_functors_execute(functors, context, server_container(), &why);
+    if (!ok) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 // Ext._Internal.SurfaceActionCreate(type) -> address, or nil and why
 extern "C" void* bg3le_surface_action_create(int type, void* classDescriptions, char const** why);
-extern "C" void* bg3le_resource_bank(std::int32_t typeIndex);
 int l_surface_action_create(lua_State* L) {
-    // The ClassDescription bank, as upstream hands the action.
-    void* classes = nullptr;
-    if (void const* meta = bg3le_meta_class("ClassDescription")) {
-        if (const char* engineClass = bg3le_meta_engine_class(meta)) {
-            if (auto index = ecs::index_of(ecs::Context::ImmutableData, engineClass)) {
-                classes = bg3le_resource_bank((std::int32_t)*index);
-            }
-        }
-    }
     char const* why = nullptr;
-    void* at = bg3le_surface_action_create((int)luaL_checkinteger(L, 1), classes, &why);
+    void* at = bg3le_surface_action_create((int)luaL_checkinteger(L, 1), class_description_bank(), &why);
     if (at == nullptr) {
         lua_pushnil(L);
         if (why == nullptr) return 1;
@@ -4426,6 +4456,24 @@ int l_stats_functor_groups(lua_State* L) {
         lua_setfield(L, -2, "Functors");
 
         lua_rawseti(L, -2, g + 1);
+    }
+    return 1;
+}
+
+// Ext._Internal.FunctorsList(address) -> {address, class, address, class...}
+int l_functors_list(lua_State* L) {
+    auto const* functors = (void const*)(std::uintptr_t)luaL_checkinteger(L, 1);
+    const int count = bg3le_stats_functor_count(functors);
+    lua_createtable(L, count < 0 ? 0 : count * 2, 0);
+    int n = 0;
+    for (int i = 0; i < count; ++i) {
+        void* functor = bg3le_stats_functor_at(functors, i);
+        char const* className = bg3le_stats_functor_class(functor);
+        if (functor == nullptr || className == nullptr) continue;
+        lua_pushinteger(L, (lua_Integer)(std::uintptr_t)functor);
+        lua_rawseti(L, -2, ++n);
+        lua_pushstring(L, className);
+        lua_rawseti(L, -2, ++n);
     }
     return 1;
 }
@@ -6705,6 +6753,12 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "SurfaceActionCreate");
     lua_pushcfunction(g_lua, l_surface_action_execute);
     lua_setfield(g_lua, -2, "SurfaceActionExecute");
+    lua_pushcfunction(g_lua, l_functor_params);
+    lua_setfield(g_lua, -2, "FunctorParams");
+    lua_pushcfunction(g_lua, l_functors_list);
+    lua_setfield(g_lua, -2, "FunctorsList");
+    lua_pushcfunction(g_lua, l_functors_execute);
+    lua_setfield(g_lua, -2, "FunctorsExecute");
     lua_pushcfunction(g_lua, l_level_add_persistent_template);
     lua_setfield(g_lua, -2, "LevelAddPersistentTemplate");
     lua_pushcfunction(g_lua, l_loca_get);
@@ -12014,6 +12068,14 @@ function Ext._Internal.PointedObject(target, class)
           Ext._Internal.AmendObject(loaded, "RefCount", refCount)
         end
       end
+      -- Upstream's FunctorList getter: each functor as its own class.
+      if class == "stats::Functors" then
+        local raw, list = Ext._Internal.FunctorsList(target), {}
+        for i = 1, #raw, 2 do
+          list[#list + 1] = Ext._Internal.PointedObject(raw[i], raw[i + 1])
+        end
+        Ext._Internal.AmendObject(loaded, "FunctorList", list)
+      end
     end
     return loaded
   end
@@ -12857,12 +12919,64 @@ function Ext.Stats.AddEnumerationValue(typeName, enumLabel)
   end
   return value
 end
-Ext.Stats.ExecuteFunctor = needs(
-  "Ext.Stats.ExecuteFunctor needs the engine's functor execution context")
-Ext.Stats.ExecuteFunctors = Ext.Stats.ExecuteFunctor
-Ext.Stats.PrepareFunctorParams = needs(
-  "Ext.Stats.PrepareFunctorParams needs the engine's functor execution "
-  .. "context")
+-- Upstream's functor execution: a context from PrepareFunctorParams, run
+-- through the engine's executor for its type; src/vendor/functor_exec.cpp.
+do
+  local CONTEXT_CLASS = {
+    [1] = "stats::AttackTargetContextData", [2] = "stats::AttackPositionContextData",
+    [3] = "stats::MoveContextData", [4] = "stats::TargetContextData",
+    [5] = "stats::NearbyAttackedContextData", [6] = "stats::NearbyAttackingContextData",
+    [7] = "stats::EquipContextData", [8] = "stats::SourceContextData",
+    [9] = "stats::InterruptContextData",
+  }
+
+  local function address_of(v, what)
+    local meta = getmetatable(v)
+    local id = type(meta) == "table" and meta.__bg3leIdentity or nil
+    if type(id) == "function" then id = id(v) end
+    local hex = type(id) == "string" and (id:match("^p:(%x+)$") or id:match("^o:(%d+):")) or nil
+    if hex == nil then error("bg3le: expected " .. what, 3) end
+    return id:sub(1, 2) == "p:" and tonumber(hex, 16) or tonumber(hex)
+  end
+
+  local function live_view(at, class)
+    return Ext._Internal.NewObjectProxy({
+      __index = function(_, k) return Ext._Internal.PointedObject(at, class)[k] end,
+      __newindex = function(_, k, v) Ext._Internal.PointedObject(at, class)[k] = v end,
+      __pairs = function() return pairs(Ext._Internal.PointedObject(at, class)) end,
+      __bg3leIdentity = string.format("p:%x", at),
+      __name = Ext._Internal.ViewTypeName(class, ""),
+    })
+  end
+
+  function Ext.Stats.PrepareFunctorParams(contextType)
+    local value = contextType
+    if type(contextType) == "string" then
+      value = nil
+      for k, label in pairs(Ext.Enums.FunctorContextType) do
+        if type(k) == "number" and label == contextType then value = k end
+      end
+    end
+    value = math.tointeger(value)
+    local at = value and CONTEXT_CLASS[value] and Ext._Internal.FunctorParams(value)
+    if at == nil then error("Unsupported context type", 2) end
+    return live_view(at, CONTEXT_CLASS[value])
+  end
+
+  local function execute(target, context, single, what)
+    local ok, why = Ext._Internal.FunctorsExecute(address_of(target, what),
+      address_of(context, "a functor context"), single)
+    if not ok then Ext.Utils.PrintError(why) end
+  end
+
+  function Ext.Stats.ExecuteFunctors(functors, context)
+    execute(functors, context, false, "a StatsFunctors")
+  end
+
+  function Ext.Stats.ExecuteFunctor(functor, context)
+    execute(functor, context, true, "a StatsFunctor")
+  end
+end
 
 -- A prototype is the engine's parsed form of a stat: the stats object says
 -- what the .txt said, the prototype is what the engine runs. The spell and

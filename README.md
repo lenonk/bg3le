@@ -334,6 +334,20 @@ component's declared size with the size the engine recorded, and
   engine's own callers also seed its cell searcher with an area, which neither
   upstream's `ExecuteSurfaceAction` nor bg3le's does: in a test, freezing
   that water changed nothing
+- **`Ext.Stats.ExecuteFunctors`, `ExecuteFunctor` and `PrepareFunctorParams`**,
+  through the engine's nine per-context executors
+  (`esv::ExecuteStatsFunctor_*Context`). They have no symbols; they were
+  found from `DealDamageFunctor::ApplyDamage` (reached through the Osiris
+  `ApplyDamage` handler, registered by name), up through the functions that
+  merge hit results, and told apart by what each reads of its context: its
+  Hit and Attack, or its first entity refs, at bg3se's offsets. Their
+  addresses follow `FunctorContextType`'s order. Each is checked by its
+  opening before it is called. A context is upstream's static per type;
+  `ExecuteFunctor` clones the functor into a container of its own, on the
+  engine's `Functors` vtable, since the executors call through it. Fire
+  Bolt's `DealDamage`, run on a spawned rat, took it from 5 HP to 1.
+  `Functors` views now have upstream's `FunctorList`, each functor as its own
+  class
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -619,13 +633,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **8 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **6 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
   the source, because this one was stale at 86 for a while: 3 are
-  `Ext.Entity`'s `Create`, `Destroy` and `SetupTracing`, 3 `Ext.StaticData`'s
-  bank writes and 2 `Ext.Stats`' functor execution.
+  `Ext.Entity`'s `Create`, `Destroy` and `SetupTracing`, and 3
+  `Ext.StaticData`'s bank writes.
   `reference/ext-api-surface.txt` lists them with their shapes
 - **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
