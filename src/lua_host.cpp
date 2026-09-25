@@ -4747,6 +4747,34 @@ int l_stats_create(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.StatsEnumAdd(type, label) -> value, or nil and why
+extern "C" bool bg3le_stats_enum_add(char const* typeName, char const* label, int* valueOut,
+                                     char const** err);
+int l_stats_enum_add(lua_State* L) {
+    int value = 0;
+    char const* err = nullptr;
+    if (!bg3le_stats_enum_add(luaL_checkstring(L, 1), luaL_checkstring(L, 2), &value, &err)) {
+        lua_pushnil(L);
+        lua_pushstring(L, err != nullptr ? err : "failed");
+        return 2;
+    }
+    lua_pushinteger(L, value);
+    return 1;
+}
+
+// Ext._Internal.StatsAttrAdd(list, name, type) -> true, or false and why
+extern "C" bool bg3le_stats_attr_add(char const* listName, char const* modifierName,
+                                     char const* typeName, char const** err);
+int l_stats_attr_add(lua_State* L) {
+    char const* err = nullptr;
+    const bool ok = bg3le_stats_attr_add(luaL_checkstring(L, 1), luaL_checkstring(L, 2),
+                                         luaL_checkstring(L, 3), &err);
+    lua_pushboolean(L, ok);
+    if (ok) return 1;
+    lua_pushstring(L, err != nullptr ? err : "failed");
+    return 2;
+}
+
 // Ext._Internal.StatSync(name) -> true, or nil and why
 extern "C" char const* bg3le_stats_sync(char const* name);
 int l_stat_sync(lua_State* L) {
@@ -6462,6 +6490,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatSync");
     lua_pushcfunction(g_lua, l_stats_create);
     lua_setfield(g_lua, -2, "StatsCreate");
+    lua_pushcfunction(g_lua, l_stats_enum_add);
+    lua_setfield(g_lua, -2, "StatsEnumAdd");
+    lua_pushcfunction(g_lua, l_stats_attr_add);
+    lua_setfield(g_lua, -2, "StatsAttrAdd");
     lua_pushcfunction(g_lua, l_builtin_file);
     lua_setfield(g_lua, -2, "BuiltinFile");
     lua_pushcfunction(g_lua, l_string_key_find);
@@ -12512,12 +12544,25 @@ function Ext.Stats.Create(statName, modifierList, copyFromTemplate, byRef)
   end
   return stat
 end
-Ext.Stats.AddAttribute = needs(
-  "Ext.Stats.AddAttribute needs to extend a modifier list, which is "
-  .. "parsed once at load")
-Ext.Stats.AddEnumerationValue = needs(
-  "Ext.Stats.AddEnumerationValue needs to extend a value list, which is "
-  .. "parsed once at load")
+-- Upstream's structure edits. AddAttribute is only safe before any stats
+-- object exists, and says so after; AddEnumerationValue appends a label.
+function Ext.Stats.AddAttribute(modifierList, modifierName, typeName)
+  local ok, err = Ext._Internal.StatsAttrAdd(tostring(modifierList), tostring(modifierName),
+                                             tostring(typeName))
+  if not ok then
+    for line in tostring(err):gmatch("[^\n]+") do Ext.Log.PrintError(line) end
+  end
+  return ok
+end
+
+function Ext.Stats.AddEnumerationValue(typeName, enumLabel)
+  local value, err = Ext._Internal.StatsEnumAdd(tostring(typeName), tostring(enumLabel))
+  if value == nil then
+    Ext.Log.PrintError(err)
+    return nil
+  end
+  return value
+end
 Ext.Stats.LoadStatsFile = needs(
   "Ext.Stats.LoadStatsFile needs the engine's stat parser")
 Ext.Stats.ExecuteFunctor = needs(

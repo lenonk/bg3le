@@ -468,7 +468,10 @@ component's declared size with the size the engine recorded, and
   engine allocated. The stats list itself is now re-read from its header
   rather than kept from the moment it was found -- found mid-load, it had
   27,821 entries where the finished array holds 23,964, and the tail was
-  stale
+  stale. `AddEnumerationValue` appends a label to an enumeration at the
+  next value, into the bucket the engine's own nodes say it belongs in, and
+  `AddAttribute` extends a modifier list -- refusing, as upstream does, once
+  stats objects exist
 - `Ext.Stats`: 15,754 stats, enumerable and readable by name, through a
   proxy that reads an attribute when it is asked for, as upstream's does.
   Snapshotting all two hundred of them per fetch made a mod's stats pass
@@ -559,13 +562,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **42 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **40 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 42 are
+  the source, because this one was stale at 86 for a while: 24 of the 40 are
   `Ext.Level`'s physics and pathfinding, 3 `Ext.StaticData`'s bank writes,
-  5 `Ext.Stats`' structure edits, stats files and functor execution, 6
+  3 `Ext.Stats`' stats files and functor execution, 6
   `Ext.Template`'s local and cache managers, and 4 `Ext.Entity`'s
   `Create`, `Destroy`, `GetEntitiesOnTile` and `SetupTracing`.
   `reference/ext-api-surface.txt` lists them with their shapes. For the

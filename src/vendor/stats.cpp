@@ -54,6 +54,7 @@
 #include "../log.h"
 #include "cache_lock.h"
 #include "../mem.h"
+#include "engine_containers.h"
 
 extern "C" bool bg3le_scannable_region(char const* line,
                                        unsigned long long* from,
@@ -2777,6 +2778,161 @@ extern "C" bool bg3le_stats_roll_condition_at(void const* object,
         *nameOut = text != nullptr ? text : "";
     }
     if (textOut != nullptr) *textOut = bg3le_stats_attr_condition(condition);
+    return true;
+}
+
+
+// ---- structure edits: upstream's AddEnumerationValue and AddAttribute ----
+
+// A value list's index in ModifierValueLists, or -1.
+int value_list_index(char const* name) {
+    Found const& f = state();
+    void const* wanted = value_list_named(name);
+    if (wanted == nullptr) return -1;
+    for (std::uint32_t i = 0; i < f.ValueLists.Size; ++i) {
+        void const* list = nullptr;
+        if (read_as((char const*)f.ValueLists.Buffer + i * sizeof(void*), &list) && list == wanted) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+// Upstream's AddEnumerationValue: the label, valued at the count before it.
+// RPGEnumeration::Values is a LegacyMap; the new node goes at the head of its
+// bucket, whose rule -- string index or string hash, modulo the table size --
+// is read off the nodes already there rather than assumed.
+extern "C" bool bg3le_stats_enum_add(char const* typeName, char const* label,
+                                     int* valueOut, char const** err) {
+    const CacheLock lock(stats_cache_lock());
+    static std::string why;
+    auto fail = [&](std::string const& message) {
+        why = message;
+        *err = why.c_str();
+        return false;
+    };
+    if (!ready()) return fail("the stats manager is not up yet");
+    void const* list = value_list_named(typeName);
+    if (list == nullptr) return fail(std::string("No such stats value type: ") + typeName);
+    if (property_type(list) != 4) {
+        return fail(std::string("Stats value type is not an enumeration: ") + typeName);
+    }
+
+    struct Map { std::uint32_t HashSize; void** HashTable; std::uint32_t ItemCount; };
+    struct Node { Node* Next; std::uint32_t Key; std::int32_t Value; };
+    auto* map = (Map*)((char*)list + state().ValueNameOffset + 8);
+    Map m{};
+    if (!read_as(map, &m) || m.HashSize == 0 || m.HashSize > (1u << 20) || m.HashTable == nullptr) {
+        return fail("the value list's map could not be read");
+    }
+
+    std::uint32_t id = 0;
+    if (!bg3le_fixed_string_index_of(label, &id) && !bg3le_fixed_string_intern(label, &id)) {
+        return fail("the label could not be interned");
+    }
+
+    std::vector<void*> heads(m.HashSize);
+    if (!safe_read(m.HashTable, heads.data(), heads.size() * sizeof(void*))) {
+        return fail("the value list's map could not be read");
+    }
+    bool byIndex = true, byHash = true;
+    std::uint32_t seen = 0;
+    for (std::uint32_t b = 0; b < m.HashSize; ++b) {
+        auto* node = (Node*)heads[b];
+        for (int guard = 0; node != nullptr && guard < 4096; ++guard) {
+            Node copy{};
+            if (!read_as(node, &copy)) return fail("the value list's map could not be read");
+            if (copy.Key == id) {
+                // Upstream's message names the type, not the label.
+                return fail(std::string("Stats value type already has a value named '") + typeName + "'");
+            }
+            std::uint32_t hash = 0;
+            if (copy.Key % m.HashSize != b) byIndex = false;
+            if (!bg3le_fixed_string_hash(copy.Key, &hash) || hash % m.HashSize != b) byHash = false;
+            ++seen;
+            node = copy.Next;
+        }
+    }
+    std::uint32_t hash = 0;
+    std::uint32_t bucket = 0;
+    if (seen > 0 && byIndex) {
+        bucket = id % m.HashSize;
+    } else if (seen > 0 && byHash && bg3le_fixed_string_hash(id, &hash)) {
+        bucket = hash % m.HashSize;
+    } else {
+        return fail("the value list's buckets follow no rule bg3le can reproduce");
+    }
+
+    auto* node = (Node*)bg3se::GameAllocRaw(sizeof(Node));
+    if (node == nullptr) return fail("out of memory");
+    node->Next = (Node*)heads[bucket];
+    node->Key = id;
+    node->Value = (std::int32_t)m.ItemCount;
+    m.HashTable[bucket] = node;
+    map->ItemCount = m.ItemCount + 1;
+    *valueOut = node->Value;
+    return true;
+}
+
+// Upstream's AddAttribute, which it allows only before any stats object
+// exists; after that, its two messages.
+extern "C" bool bg3le_stats_attr_add(char const* listName, char const* modifierName,
+                                     char const* typeName, char const** err) {
+    static std::string why;
+    auto fail = [&](std::string const& message) {
+        why = message;
+        *err = why.c_str();
+        return false;
+    };
+    {
+        const CacheLock lock(stats_cache_lock());
+        if (ready() && state().Objects.Size > 0) {
+            return fail("It is not safe to modify stats types after stats data files were loaded!\n"
+                        "(Try using the StatsStructureLoaded event)");
+        }
+    }
+    const int list = bg3le_stats_list_handle(listName);
+    if (list < 0) return fail(std::string("No such modifier list: ") + listName);
+    for (std::size_t i = 0, n = bg3le_stats_list_attr_count(listName); i < n; ++i) {
+        char const* existing = nullptr;
+        if (bg3le_stats_list_attr_at(listName, i, &existing, nullptr) && existing != nullptr
+            && std::strcmp(existing, modifierName) == 0) {
+            return fail(std::string("Modifier list already has an attribute named '") + modifierName + "'");
+        }
+    }
+    const CacheLock lock(stats_cache_lock());
+    const int valueList = value_list_index(typeName);
+    if (valueList < 0) return fail(std::string("No such stats value type: ") + typeName);
+
+    Found const& f = state();
+    void const* listObject = nullptr;
+    if (!read_as((char const*)f.Lists.Buffer + (std::size_t)list * sizeof(void*), &listObject)
+        || listObject == nullptr) {
+        return fail("the modifier list could not be read");
+    }
+    std::uint32_t nameId = 0;
+    if (!bg3le_fixed_string_index_of(modifierName, &nameId)
+        && !bg3le_fixed_string_intern(modifierName, &nameId)) {
+        return fail("the attribute name could not be interned");
+    }
+
+    using Manager = bg3se::stats::CNamedElementManager<bg3se::stats::Modifier>;
+    auto* modifier = (bg3se::stats::Modifier*)bg3se::GameAllocRaw(sizeof(bg3se::stats::Modifier));
+    if (modifier == nullptr) return fail("out of memory");
+    std::memset((void*)modifier, 0, sizeof(*modifier));
+    modifier->EnumerationIndex = valueList;
+    modifier->LevelMapIndex = -1;
+    std::memcpy(&modifier->Name, &nameId, sizeof(nameId));
+
+    auto* manager = (char*)listObject + f.AttrsOffset - offsetof(Manager, Values);
+    std::int32_t next = 0;
+    if (!read_as(manager + offsetof(Manager, NextHandle), &next)
+        || !array_append<void*>(manager + offsetof(Manager, Values), modifier)
+        || !fs_map_insert<std::int32_t>(manager + offsetof(Manager, NameToHandle), nameId, next)) {
+        return fail("the modifier list's attributes could not be extended");
+    }
+    const std::int32_t grown = next + 1;
+    std::memcpy(manager + offsetof(Manager, NextHandle), &grown, sizeof(grown));
     return true;
 }
 
