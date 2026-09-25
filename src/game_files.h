@@ -27,4 +27,7 @@ bool game_file_read(char const* relative, std::string* out);
 // Whether the path exists, without reading it.
 bool game_file_exists(char const* relative);
 
+// A file under Mods/ inside an installed mod's archive (src/ext_libs.cpp).
+bool mod_file_read(char const* relative, std::string* out);
+
 }  // namespace bg3le

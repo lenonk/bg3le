@@ -37,7 +37,11 @@ constexpr std::uint64_t kOwnedByBg3le = 0x6267336c65524452ull;  // bg3leRDR
 // upstream gives for a reader that failed to load.
 bg3se::FileReader* make_data_file_reader(std::string_view path) {
     std::string body;
-    if (!game_file_read(std::string(path).c_str(), &body)) return nullptr;
+    // The game's archives, then the mods' own, as the engine's VFS mounts both.
+    const std::string name(path);
+    if (!game_file_read(name.c_str(), &body) && !mod_file_read(name.c_str(), &body)) {
+        return nullptr;
+    }
 
     auto* owned = new std::string(std::move(body));
 

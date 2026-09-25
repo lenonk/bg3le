@@ -386,6 +386,13 @@ instead of dereferencing the missing manager. The bridge,
 `src/vendor/bg3le_noesis_lua.inl`, is included at the end so it can use
 upstream's class cache and custom-type builder.
 
+**`Extender/Client/IMGUI/Vulkan.inl` — the overlay is encoded for the
+swapchain.** Upstream writes ImGui's sRGB colours into the swapchain as they
+are; with the display in HDR the game presents HDR10, and the overlay's
+colours were read as PQ. The swapchain's format and colour space are passed to
+`src/vendor/imgui_colour.cpp`, and each snapshot's vertex colours are
+re-encoded once, after the backend clones the draw lists.
+
 ## vendor/compat — bg3le's own code
 
 Shims that let the upstream sources compile unmodified. They are force-included

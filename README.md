@@ -267,8 +267,11 @@ component's declared size with the size the engine recorded, and
   does; and `OnClick`, `OnChange` and the rest arrive in Lua with their
   arguments, delivered on the tick of the context that registered them
   because a widget fires on a thread that must not touch a Lua state. Fonts
-  come out of the game's own archives, since the engine's file reader cannot
-  be called by name here. On by default, as upstream's is; `BG3LE_IMGUI=0`
+  come out of the game's archives and the mods' own, since the engine's file
+  reader cannot be called by name here. With the display in HDR the game
+  presents an HDR10 swapchain, and the overlay's colours are encoded for it
+  (PQ, at the game's own paper white) rather than written as sRGB, which is
+  what upstream does and what made them read as oversaturated. On by default, as upstream's is; `BG3LE_IMGUI=0`
   turns it off. Enum properties take their labels, `P_BITMASK` flags such
   as `Window.AlwaysAutoResize` are properties, whole arrays can be assigned,
   `UserData` and `Children` behave as upstream's, struct and container

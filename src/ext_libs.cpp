@@ -25,6 +25,7 @@
 #include "lauxlib.h"
 #include "lua.h"
 
+#include "game_files.h"
 #include "log.h"
 #include "pak.h"
 
@@ -41,12 +42,20 @@ std::vector<std::string>& mod_archives();
 std::map<std::string, std::string>& mod_files();
 void scan_mod_archives();
 
-// Where SaveFile writes and LoadFile reads by default, matching upstream's
-// PathRootType::UserProfile.
+// The game's profile directory, PathRootType::UserProfile: Mods and
+// PlayerProfiles are under it.
 std::string profile_root() {
     char const* home = std::getenv("HOME");
     if (home == nullptr) return {};
     return std::string(home) + "/.local/share/Larian Studios/Baldur's Gate 3";
+}
+
+// Where SaveFile writes and LoadFile reads by default: upstream's
+// ToPath("/Script Extender", LocalAppData), so a mod's saved settings are
+// where bg3se keeps them.
+std::string extender_root() {
+    const std::string profile = profile_root();
+    return profile.empty() ? profile : profile + "/Script Extender";
 }
 
 // PathRootType::Data, the game's own install.
@@ -261,7 +270,7 @@ extern "C" int bg3le_ext_load_file(lua_State* L) {
 
     std::string root;
     if (std::strcmp(context, "user") == 0) {
-        root = profile_root();
+        root = extender_root();
     } else if (std::strcmp(context, "data") == 0) {
         root = data_root();
     } else {
@@ -278,22 +287,8 @@ extern "C" int bg3le_ext_load_file(lua_State* L) {
         // packed mod's file is found there -- Mod Configuration Menu
         // reads every other mod's blueprint that way.
         if (std::strcmp(context, "data") != 0) return 0;
-        scan_mod_archives();
-
-        auto const in = mod_files().find(relative);
-        if (in == mod_files().end()) return 0;
-
         std::string contents;
-        bool found = false;
-        pak_read(
-            in->second.c_str(),
-            [&](char const* name) { return std::strcmp(name, relative) == 0; },
-            [&](char const*, char const* data, std::size_t size) {
-                contents.assign(data, size);
-                found = true;
-            });
-        if (!found) return 0;
-
+        if (!mod_file_read(relative, &contents)) return 0;
         lua_pushlstring(L, contents.data(), contents.size());
         return 1;
     }
@@ -318,7 +313,7 @@ extern "C" int bg3le_ext_save_file(lua_State* L) {
     const bool append = lua_toboolean(L, 3) != 0;
 
     std::string path;
-    if (!resolve_under(profile_root(), relative, &path)
+    if (!resolve_under(extender_root(), relative, &path)
         || !make_parents(path)) {
         lua_pushboolean(L, 0);
         return 1;
@@ -678,6 +673,24 @@ extern "C" int bg3le_ext_pak_read(lua_State* L) {
 
     lua_pushlstring(L, contents.data(), contents.size());
     return 1;
+}
+
+// A file under Mods/ in an installed mod's archive, which the engine's
+// virtual file system would have mounted.
+bool mod_file_read(char const* relative, std::string* out) {
+    scan_mod_archives();
+    auto const in = mod_files().find(relative);
+    if (in == mod_files().end()) return false;
+
+    bool found = false;
+    pak_read(
+        in->second.c_str(),
+        [&](char const* name) { return std::strcmp(name, relative) == 0; },
+        [&](char const*, char const* data, std::size_t size) {
+            out->assign(data, size);
+            found = true;
+        });
+    return found;
 }
 
 }  // namespace bg3le

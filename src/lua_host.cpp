@@ -6420,8 +6420,9 @@ end
 
 -- ---- Ext.IO ----
 --
--- LoadFile reads under the profile directory, or the game's Data directory
--- with a context of "data"; SaveFile writes under the profile only. Both
+-- LoadFile reads under the profile's Script Extender directory, as upstream
+-- does, or the game's Data directory with a context of "data"; SaveFile
+-- writes under Script Extender only. Both
 -- refuse a path that climbs out of its root, as upstream's does.
 Ext.IO = {}
 

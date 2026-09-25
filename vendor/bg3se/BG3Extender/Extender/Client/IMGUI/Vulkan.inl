@@ -9,6 +9,12 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <imgui_internal.h>
 
+// bg3le: src/vendor/imgui_colour.cpp encodes the overlay for an HDR swapchain.
+namespace bg3le {
+void imgui_swapchain_format(VkFormat format, VkColorSpaceKHR space);
+void imgui_encode_colours(ImDrawData* data);
+}
+
 BEGIN_SE()
 
 #define VK_HOOK(name) enum class Vk##name##HookTag {}; \
@@ -230,6 +236,7 @@ public:
             vp.DrawDataP.CmdLists[i] = drawList;
             drawLists.push_back(drawList);
         }
+        bg3le::imgui_encode_colours(&vp.DrawDataP);
 
         drawViewport_ = curViewport_;
         IMGUI_FRAME_DEBUG("VK: FinishFrame");
@@ -542,6 +549,7 @@ private:
 
         swapInfo.width_ = pCreateInfo->imageExtent.width;
         swapInfo.height_ = pCreateInfo->imageExtent.height;
+        bg3le::imgui_swapchain_format(pCreateInfo->imageFormat, pCreateInfo->imageColorSpace);
         IMGUI_DEBUG("Swap chain size: %d x %d", swapInfo.width_, swapInfo.height_);
 
         {

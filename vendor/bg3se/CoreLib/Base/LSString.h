@@ -46,7 +46,9 @@ public:
 
     // Fifteen characters and a length byte, or a pointer, a size and a
     // capacity whose top bit says which form this is.
-    static constexpr size_type InlineCapacity = (16 / sizeof(T)) - 1;
+    // The last byte holds the length and the slot before it the terminator,
+    // so fourteen characters fit inline, not fifteen.
+    static constexpr size_type InlineCapacity = (15 / sizeof(T)) - 1;
     static constexpr std::uint8_t HeapFlag = 0x80;
 
     inline LSStringBase() noexcept
