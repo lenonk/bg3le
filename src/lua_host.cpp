@@ -5334,6 +5334,16 @@ int l_resource_bank_keys(lua_State* L) {
     return 1;
 }
 
+extern "C" void* bg3le_boost_prototype(char const* guid);
+
+// Ext._Internal.BoostPrototype(guid) -> address, or nil
+int l_boost_prototype(lua_State* L) {
+    void* found = bg3le_boost_prototype(luaL_checkstring(L, 1));
+    if (found == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)found);
+    return 1;
+}
+
 // Ext._Internal.TakeComponentEvents()
 //   -> { { handle, component short name, "create" | "destroy" }, ... }
 int l_take_component_events(lua_State* L) {
@@ -5745,6 +5755,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ComponentCallbacksProbe");
     lua_pushcfunction(g_lua, l_watch_component_events);
     lua_setfield(g_lua, -2, "WatchComponentEvents");
+    lua_pushcfunction(g_lua, l_boost_prototype);
+    lua_setfield(g_lua, -2, "BoostPrototype");
     lua_pushcfunction(g_lua, l_resource_bank_get);
     lua_setfield(g_lua, -2, "ResourceBankGet");
     lua_pushcfunction(g_lua, l_resource_bank_keys);
@@ -11757,10 +11769,13 @@ Ext.Stats.GetCachedInterrupt =
   cached_prototype("Interrupt", "stats::InterruptPrototype")
 Ext.Stats.GetCachedPassive =
   cached_prototype("Passive", "stats::PassivePrototype")
-Ext.Stats.GetCachedBoost = needs(
-  "Ext.Stats.GetCachedBoost needs the boost prototype manager, whose map "
-  .. "is keyed by GUID rather than by a name that could be checked "
-  .. "against the prototype")
+-- Keyed by GUID, as upstream's is: what a BoostInfo's Prototype holds.
+function Ext.Stats.GetCachedBoost(guid)
+  if type(guid) ~= "string" then return nil end
+  local address = Ext._Internal.BoostPrototype(guid)
+  if address == nil then return nil end
+  return Ext._Internal.ReadObject(address, "stats::BoostPrototype", "", {})
+end
 
 -- ---- the rest of Ext.Entity ----
 

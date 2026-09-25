@@ -176,7 +176,12 @@ component's declared size with the size the engine recorded, and
   is confirmed by the stat type its names belong to. A cached prototype's
   conditions match the stat's for every passive but one and 395 of 416
   interrupts; the rest are the conditions 5eSpells rewrites, which the stat
-  shows and the compiled prototype does not until it is synced
+  shows and the compiled prototype does not until it is synced.
+  `GetCachedBoost` takes the GUID a `BoostInfo`'s `Prototype` holds, as
+  upstream's does, over 4,713 boost prototypes: found from a live boost's
+  GUID and followed back to the manager's static, and checked on each read
+  by prototypes naming their own `BoostType` (a `Disadvantage` is the
+  `Advantage` type under its own name). All 2,363 boosts in a save resolve
 - **An entity-valued field is an entity.** Upstream's push for an
   `EntityHandle` or an `EntityRef` makes an entity proxy, or `nil` for the
   null handle — which is `0xFFC0000000000000`, not all ones. bg3le handed back
@@ -492,13 +497,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **56 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **55 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 56 are
-  `Ext.Level`'s physics and pathfinding, 8 each `Ext.Stats`' creation and
-  functor execution and `Ext.StaticData`'s bank writes and atlas, 6
+  the source, because this one was stale at 86 for a while: 24 of the 55 are
+  `Ext.Level`'s physics and pathfinding, 8 `Ext.StaticData`'s bank writes and
+  atlas, 7 `Ext.Stats`' creation and functor execution, 6
   `Ext.Template`'s local and cache managers, and the rest are singles —
   `Entity.Create`/`Destroy`, `Types.Construct`, and `GlobalSwitches`, whose
   object is findable by its own language string and whose declared layout is
@@ -560,8 +565,6 @@ component's declared size with the size the engine recorded, and
   Naming an unsupported
   field raises rather than returning nil, so a mod cannot mistake a missing
   conversion for a missing value
-- **`GetCachedBoost`**, waiting on an engine structure that has no anchor
-  yet.
 - **Launching.** See [Running](#running)
 
 ## Building
