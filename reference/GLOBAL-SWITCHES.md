@@ -1,5 +1,22 @@
 # Looking for `ls::GlobalSwitches`
 
+**Solved 2026-09-25.** The global is at image+0x7d9d198. The engine's settings
+registration (image+0x3f5bd10) reads 102 of the switch names from their
+string-view table (image+0x78c6ca8) alongside 60 loads of that global, and
+pairing each name with the member it reads gives this build's offset for 46
+declared members. bg3se's layout matches all 46 once a `SoundSetting` is 0x68
+bytes (an eight-byte member before `UpdateProc`) and eight bytes follow
+`SomeSettings`; the camera block, whose values read as the settings they are
+named for (`UpperBound` 10, `LowerBound` -10, `CollisionPitchSearchSteps` 6),
+needed nothing. `src/vendor/global_switches.cpp` checks the loading
+instruction and the language string before trusting the address. The
+language anchor below was right about the object; what defeated the old
+search was the two size differences, which no scoring of booleans or floats
+could have told apart from a wrong base.
+
+The rest of this page is the earlier search, kept for the method.
+
+
 Written 2026-09-24. The object is findable; reading it through bg3se's
 declared layout is not safe, so `Ext.Utils.GetGlobalSwitches` still refuses —
 but it refuses on evidence now, and `src/vendor/global_switches.cpp` is the

@@ -46,6 +46,8 @@ namespace bg3se
             HashSet<FixedString> RTPCs;
             char field_40;
             TranslatedString field_44;
+            // bg3le: eight more bytes before UpdateProc on this build (0x68 a setting).
+            [[bg3::hidden]] uint64_t field_58_bg3le;
             void* UpdateProc;
         };
 
@@ -355,6 +357,8 @@ namespace bg3se
         std::array<CameraGlobalSwitches, 4> CameraSwitches;
         ControlSwitch ControlSwitches;
         SomeSetting SomeSettings[72];
+        // bg3le: eight more bytes before AutoRemoveHotbarSpells on this build.
+        [[bg3::hidden]] uint64_t field_12F0_bg3le;
 
         uint8_t AutoRemoveHotbarSpells;
         uint8_t field_12F1;

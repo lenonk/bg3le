@@ -61,6 +61,7 @@ extern "C" bool bg3le_fixed_string_intern(char const* text,
                                           unsigned int* out);
 extern "C" int bg3le_stats_string_intern(char const* text);
 extern "C" void* bg3le_stats_find(char const* wanted);
+extern "C" void* bg3le_global_switches();
 extern "C" std::size_t bg3le_stats_attr_count(void const* object);
 extern "C" bool bg3le_stats_attr_at(void const* object, std::size_t index,
                                     char const** nameOut,
@@ -914,6 +915,8 @@ void dump_osiris_api(void* self) {
     unsigned func_count = 0;
     get_funcs(self, &funcs, &func_count);
     statusf("StoryLoaded(): %u Osiris functions, %u types", func_count, type_count);
+    // The engine's settings object is up by now; the overlay reads its language.
+    bg3le_global_switches();
 
     char path[4096];
     const char* out = std::getenv("BG3LE_OSI_DUMP");

@@ -283,6 +283,15 @@ not on Linux:
 - `CoreLib/Config.h`
 - `BG3Extender/Extender/BuildInfo.h`
 
+### GlobalSwitches is laid out as this build's
+
+`GameDefinitions/Misc.h` gains two hidden members: an eight-byte field before
+`SoundSetting::UpdateProc`, which makes each of the twelve sound settings
+0x68 bytes as the engine has them, and eight bytes after `SomeSettings`. With
+those, all 46 members whose offset the engine's settings registration reveals
+(`tools/relocs-xref.py`; see `reference/GLOBAL-SWITCHES.md`) sit where bg3se
+declares them. Checked by `tools/check-vendor-patches.py`.
+
 ### One .inl is a translation unit
 
 `BG3Extender.vcxproj` lists `GameDefinitions/Stats/StatsObject.inl` under

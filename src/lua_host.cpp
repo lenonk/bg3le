@@ -9106,31 +9106,12 @@ function Ext.Utils.GetGameState()
   return Ext._Internal.GameState and Ext._Internal.GameState() or "Running"
 end
 
--- The engine's settings object. It has no symbol, so it is searched for by
--- its own contents -- see src/vendor/global_switches.cpp and
--- reference/GLOBAL-SWITCHES.md.
---
--- The search finds the object's language string reliably and cannot confirm
--- the base, because bg3se's declared layout is a Windows reverse-engineering
--- whose offsets are not this build's: two thirds of its members are named
--- field_NN and several of them are types whose size differs here. So this
--- refuses rather than handing back an object whose fields read the wrong
--- bytes, and the log carries the best candidate and the members that
--- disagreed, so the next attempt starts from a measurement.
---
--- If the layout is ever established, nothing else has to change: the address
--- goes through the same field machinery a component or a resource does, and
--- all 148 members become reachable by name.
+-- The engine's ls::GlobalSwitches, live, as upstream's; nil if it is not
+-- where this build keeps it. See src/vendor/global_switches.cpp.
 function Ext.Utils.GetGlobalSwitches()
   local addr = Ext._Internal.GlobalSwitches()
-  if addr == nil then
-    error("bg3le: Ext.Utils.GetGlobalSwitches cannot confirm the engine's "
-          .. "GlobalSwitches object -- bg3se's declared layout does not "
-          .. "describe this build's struct, so reading it would report the "
-          .. "wrong fields. The search and what it measured are in the "
-          .. "extender log and reference/GLOBAL-SWITCHES.md", 2)
-  end
-  return Ext._Internal.ReadObject(addr, "GlobalSwitches", "", {})
+  if addr == nil then return nil end
+  return Ext._Internal.PointedObject(addr, "GlobalSwitches")
 end
 
 -- ---- Ext.Input ----

@@ -13,10 +13,8 @@ A refusal is one of three shapes in src/lua_host.cpp:
     end
     function Ext.X.Y(...)  error("bg3le ...") -- with no path that returns
 
-Ext.Utils.GetGlobalSwitches is added by hand: it refuses only when the search
-for the object cannot confirm it, so it has a return path and the third rule
-does not see it. That is the only one, and a new conditional refusal would
-want adding here too.
+A refusal that only happens on some path has a return path too, so the third
+rule does not see it; one would want adding by hand. There are none now.
 """
 
 import os
@@ -51,7 +49,6 @@ def refusing_names(text):
             continue
         names.add(name)
 
-    names.add("Ext.Utils.GetGlobalSwitches")
     return names
 
 
