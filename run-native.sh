@@ -135,8 +135,12 @@ else
     launch=("$SNIPER_DIR/run" -- "${game[@]}")
 fi
 
+# HDR=1 with HEADLESS=1 offers the game an HDR10 swapchain, as KWin does on
+# the desktop, so the overlay's HDR encoding can be checked headless.
 if [ "${HEADLESS:-0}" = "1" ]; then
-    launch=(gamescope --backend headless -W 1280 -H 720 -- "${launch[@]}")
+    hdr=()
+    [ "${HDR:-0}" = "1" ] && hdr=(--hdr-enabled --hdr-debug-force-support)
+    launch=(gamescope --backend headless -W 1280 -H 720 "${hdr[@]}" -- "${launch[@]}")
 fi
 
 # GameMode is off unless asked for, because it does not work here and says so

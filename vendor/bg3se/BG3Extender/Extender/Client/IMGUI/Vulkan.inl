@@ -9,10 +9,14 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <imgui_internal.h>
 
-// bg3le: src/vendor/imgui_colour.cpp encodes the overlay for an HDR swapchain.
+// bg3le: src/vendor/imgui_hdr.cpp composites the overlay onto an HDR swapchain.
 namespace bg3le {
-void imgui_swapchain_format(VkFormat format, VkColorSpaceKHR space);
-void imgui_encode_colours(ImDrawData* data);
+void hdr_swapchain_created(VkDevice device, VkPhysicalDevice physical,
+                           VkSwapchainCreateInfoKHR const* info,
+                           VkImage const* images, std::uint32_t count);
+void hdr_swapchain_released();
+VkRenderPass hdr_overlay_pass();
+void hdr_record(VkCommandBuffer cmd, std::uint32_t index, ImDrawData* draw);
 }
 
 BEGIN_SE()
@@ -156,7 +160,8 @@ public:
             }
         };
         // init_info.RenderPass = presentRenderPass_;
-        init_info.RenderPass = swapchain_.renderPass_;
+        init_info.RenderPass = bg3le::hdr_overlay_pass() != VK_NULL_HANDLE
+            ? bg3le::hdr_overlay_pass() : swapchain_.renderPass_;
         ImGui_ImplVulkan_Init(&init_info);
         ImGui_ImplVulkan_CreateFontsTexture();
 
@@ -236,7 +241,6 @@ public:
             vp.DrawDataP.CmdLists[i] = drawList;
             drawLists.push_back(drawList);
         }
-        bg3le::imgui_encode_colours(&vp.DrawDataP);
 
         drawViewport_ = curViewport_;
         IMGUI_FRAME_DEBUG("VK: FinishFrame");
@@ -522,6 +526,7 @@ private:
 
     void releaseSwapChain(SwapchainInfo& swapchain)
     {
+        bg3le::hdr_swapchain_released();
         for (auto& image : swapchain.images_) {
             vkFreeCommandBuffers(device_, swapchain.commandPool_, 1, &image.commandBuffer);
             vkDestroySemaphore(device_, image.uiDoneSemaphore, nullptr);
@@ -549,7 +554,6 @@ private:
 
         swapInfo.width_ = pCreateInfo->imageExtent.width;
         swapInfo.height_ = pCreateInfo->imageExtent.height;
-        bg3le::imgui_swapchain_format(pCreateInfo->imageFormat, pCreateInfo->imageColorSpace);
         IMGUI_DEBUG("Swap chain size: %d x %d", swapInfo.width_, swapInfo.height_);
 
         {
@@ -681,6 +685,8 @@ private:
                     VK_CHECK(vkCreateFramebuffer(device_, &fbinfo, NULL, &imInfo.framebuffer));
                 }
             }
+
+            bg3le::hdr_swapchain_created(device_, physicalDevice_, pCreateInfo, images.data(), numSwapImages);
         }
     }
 
@@ -722,11 +728,14 @@ private:
         bbBarrier.srcAccessMask = VK_ACCESS_ALL_READ_BITS;
         bbBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
-        vkCmdPipelineBarrier(image.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
-            NULL,
-            0, NULL,
-            1, &bbBarrier);
+        const bool bg3leHdr = bg3le::hdr_overlay_pass() != VK_NULL_HANDLE;
+        if (!bg3leHdr) {
+            vkCmdPipelineBarrier(image.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
+                NULL,
+                0, NULL,
+                1, &bbBarrier);
+        }
 
         uint32_t ringIdx = 0;
 
@@ -743,7 +752,9 @@ private:
         submitInfo.pSignalSemaphores = &image.uiDoneSemaphore;
         submitInfo.signalSemaphoreCount = 1;
 
-        {
+        if (bg3leHdr) {
+            bg3le::hdr_record(image.commandBuffer, pPresentInfo->pImageIndices[0], &vp.DrawDataP);
+        } else {
             VkClearValue clearval = {};
             VkRenderPassBeginInfo rpbegin = {
                 VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -759,22 +770,22 @@ private:
                 &clearval,
             };
             vkCmdBeginRenderPass(image.commandBuffer, &rpbegin, VK_SUBPASS_CONTENTS_INLINE);
+
+            ImGui_ImplVulkan_RenderDrawData(&vp.DrawDataP, image.commandBuffer);
+
+            vkCmdEndRenderPass(image.commandBuffer);
+
+            std::swap(bbBarrier.srcQueueFamilyIndex, bbBarrier.dstQueueFamilyIndex);
+            std::swap(bbBarrier.oldLayout, bbBarrier.newLayout);
+            bbBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            bbBarrier.dstAccessMask = VK_ACCESS_ALL_READ_BITS;
+
+            vkCmdPipelineBarrier(image.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
+                NULL,
+                0, NULL,
+                1, &bbBarrier);
         }
-
-        ImGui_ImplVulkan_RenderDrawData(&vp.DrawDataP, image.commandBuffer);
-
-        vkCmdEndRenderPass(image.commandBuffer);
-
-        std::swap(bbBarrier.srcQueueFamilyIndex, bbBarrier.dstQueueFamilyIndex);
-        std::swap(bbBarrier.oldLayout, bbBarrier.newLayout);
-        bbBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        bbBarrier.dstAccessMask = VK_ACCESS_ALL_READ_BITS;
-
-        vkCmdPipelineBarrier(image.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
-            NULL,
-            0, NULL,
-            1, &bbBarrier);
 
         VK_CHECK(vkEndCommandBuffer(image.commandBuffer));
 

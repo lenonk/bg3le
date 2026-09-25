@@ -140,9 +140,9 @@ CHECKS = [
     ("Ext.UI.GetRoot uses the View and the bridge is included",
      lambda: "bg3le::noesis_root()" in text("BG3Extender/Lua/Libs/ClientUI/Module.inl")
              and "#include <bg3le_noesis_lua.inl>" in text("BG3Extender/Lua/Libs/ClientUI/Module.inl")),
-    ("the Vulkan overlay is encoded for the swapchain",
-     lambda: "bg3le::imgui_encode_colours(&vp.DrawDataP);" in text("BG3Extender/Extender/Client/IMGUI/Vulkan.inl")
-             and "bg3le::imgui_swapchain_format(" in text("BG3Extender/Extender/Client/IMGUI/Vulkan.inl")),
+    ("the Vulkan overlay is composited onto an HDR swapchain",
+     lambda: "bg3le::hdr_record(image.commandBuffer" in text("BG3Extender/Extender/Client/IMGUI/Vulkan.inl")
+             and "bg3le::hdr_swapchain_created(" in text("BG3Extender/Extender/Client/IMGUI/Vulkan.inl")),
     ("icon atlases register their resident texture",
      lambda: "reinterpret_cast<TextureDescriptor*>(atlas->Texture)" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")
              and "bool Resident{ false };" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.h")),

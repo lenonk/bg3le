@@ -192,7 +192,7 @@ list(APPEND VENDOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/translated_strings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/statics.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/imgui_overlay.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/imgui_colour.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/imgui_hdr.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/global_switches.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/extender_globals.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/imgui_api.cpp

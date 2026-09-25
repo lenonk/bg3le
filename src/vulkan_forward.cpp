@@ -120,10 +120,21 @@ extern "C" VkResult vkCreateInstance(VkInstanceCreateInfo const* info,
     return next(info, alloc, out);
 }
 
-BG3LE_FORWARD(VkResult, vkCreateDevice,
-              (VkPhysicalDevice phys, VkDeviceCreateInfo const* info,
-               VkAllocationCallbacks const* alloc, VkDevice* out),
-              (phys, info, alloc, out))
+// The physical device the game renders with, for the swapchain check below.
+static VkPhysicalDevice g_physical = VK_NULL_HANDLE;
+
+extern "C" VkResult vkCreateDevice(VkPhysicalDevice phys,
+                                   VkDeviceCreateInfo const* info,
+                                   VkAllocationCallbacks const* alloc,
+                                   VkDevice* out) {
+    using Fn = VkResult (*)(VkPhysicalDevice, VkDeviceCreateInfo const*,
+                            VkAllocationCallbacks const*, VkDevice*);
+    static const Fn next = real<Fn>("vkCreateDevice");
+    g_physical = phys;
+    const Fn take = hooked<Fn>(next);
+    if (take != nullptr && take != (Fn)&vkCreateDevice) return take(phys, info, alloc, out);
+    return next(phys, info, alloc, out);
+}
 
 BG3LE_FORWARD(void, vkDestroyDevice,
               (VkDevice dev, VkAllocationCallbacks const* alloc),
@@ -134,10 +145,35 @@ BG3LE_FORWARD(VkResult, vkCreatePipelineCache,
                VkAllocationCallbacks const* alloc, VkPipelineCache* out),
               (dev, info, alloc, out))
 
-BG3LE_FORWARD(VkResult, vkCreateSwapchainKHR,
-              (VkDevice dev, VkSwapchainCreateInfoKHR const* info,
-               VkAllocationCallbacks const* alloc, VkSwapchainKHR* out),
-              (dev, info, alloc, out))
+// An HDR swapchain is also made copyable, which the overlay's compositor
+// needs to read the game's frame (src/vendor/imgui_hdr.cpp).
+extern "C" VkResult vkCreateSwapchainKHR(VkDevice dev,
+                                         VkSwapchainCreateInfoKHR const* info,
+                                         VkAllocationCallbacks const* alloc,
+                                         VkSwapchainKHR* out) {
+    using Fn = VkResult (*)(VkDevice, VkSwapchainCreateInfoKHR const*,
+                            VkAllocationCallbacks const*, VkSwapchainKHR*);
+    static const Fn next = real<Fn>("vkCreateSwapchainKHR");
+    using Caps = VkResult (*)(VkPhysicalDevice, VkSurfaceKHR, VkSurfaceCapabilitiesKHR*);
+    static const Caps caps = real<Caps>("vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+
+    VkSwapchainCreateInfoKHR copy = *info;
+    const bool hdr = info->imageColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT
+        || info->imageColorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+    if (hdr && bg3le::imgui_overlay_wanted() && caps != nullptr
+        && g_physical != VK_NULL_HANDLE
+        && (info->imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0) {
+        VkSurfaceCapabilitiesKHR have{};
+        if (caps(g_physical, info->surface, &have) == VK_SUCCESS
+            && (have.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0) {
+            copy.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        }
+    }
+
+    const Fn take = hooked<Fn>(next);
+    if (take != nullptr && take != (Fn)&vkCreateSwapchainKHR) return take(dev, &copy, alloc, out);
+    return next(dev, &copy, alloc, out);
+}
 
 BG3LE_FORWARD(void, vkDestroySwapchainKHR,
               (VkDevice dev, VkSwapchainKHR chain,
