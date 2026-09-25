@@ -40,6 +40,7 @@ namespace bg3le { void install_entity_trace_hook(); }
 namespace bg3le {
 void install_path_override_hook();
 }
+extern "C" void bg3le_note_game_server(void* server);
 #include "stackdump.h"
 #include "mem.h"
 #include "log.h"
@@ -426,6 +427,7 @@ using UpdateMessagesProc = void (*)(void*);
 UpdateMessagesProc g_orig_update_messages = nullptr;
 
 void update_messages_hook(void* self) {
+    bg3le_note_game_server(self);
     debug_server_note_story_thread();
     debug_server_pump();
     lua_tick();

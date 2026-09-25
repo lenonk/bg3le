@@ -1520,7 +1520,24 @@ struct ClassFields {
     // Whether upstream's property map has a Construct: default-constructible
     // and not a Noesis object (LuaObjectProxies.cpp's GetConstructor).
     bool IsConstructible;
+    // Upstream's Construct and ProxyDestroy for a component (GetProxyDestructor).
+    void (*Construct)(void*);
+    void (*ProxyDestroy)(void**);
 };
+
+template <class T>
+void construct_thunk(void* at) {
+    new (at) T();
+}
+
+template <class T>
+void proxy_destroy_thunk(void** at) {
+    if (*at) {
+        static_cast<T*>(*at)->~T();
+        GameFree(*at);
+        *at = nullptr;
+    }
+}
 
 template <class T>
 constexpr bool constructible() {
@@ -1769,6 +1786,18 @@ inline constexpr ClassFields kClassFields{
     is_component_class<T>(),
     resource_type_of<T>(),
     constructible<T>(),
+    [] {
+        if constexpr (constructible<T>() && !std::is_abstract_v<T>) return &construct_thunk<T>;
+        else return (void (*)(void*))nullptr;
+    }(),
+    [] {
+        if constexpr (is_proxy_component<T>() && std::is_default_constructible_v<T>
+                      && !std::is_trivially_destructible_v<T>) {
+            return &proxy_destroy_thunk<T>;
+        } else {
+            return (void (*)(void**))nullptr;
+        }
+    }(),
 };
 
 // Every class table, collected the way upstream collects its own.
@@ -2203,6 +2232,39 @@ extern "C" std::size_t bg3le_meta_component_stride(void const* handle) {
 extern "C" bool bg3le_meta_component_is_proxy(void const* handle) {
     if (handle == nullptr) return false;
     return static_cast<ClassFields const*>(handle)->IsProxy;
+}
+
+// Upstream's Construct, into zeroed memory as CreateComponentRaw leaves it.
+extern "C" bool bg3le_meta_construct(void const* handle, void* at) {
+    auto const* cls = static_cast<ClassFields const*>(handle);
+    if (cls == nullptr || cls->Construct == nullptr || at == nullptr) return false;
+    std::memset(at, 0, cls->Size);
+    cls->Construct(at);
+    return true;
+}
+
+// Fills a new component's slot as upstream's CreateComponentRaw does: a
+// proxy's slot gets a pointer to a fresh object. The component, or null.
+extern "C" void* bg3le_meta_construct_component(void const* handle, void* slot) {
+    auto const* cls = static_cast<ClassFields const*>(handle);
+    if (cls == nullptr || cls->Construct == nullptr || slot == nullptr) return nullptr;
+    void* at = slot;
+    if (cls->IsProxy) {
+        at = GameAllocRaw(cls->Size);
+        if (at == nullptr) return nullptr;
+        *(void**)slot = at;
+    }
+    std::memset(at, 0, cls->Size);
+    cls->Construct(at);
+    return at;
+}
+
+extern "C" std::size_t bg3le_meta_class_size(void const* handle) {
+    return handle != nullptr ? static_cast<ClassFields const*>(handle)->Size : 0;
+}
+
+extern "C" void* bg3le_meta_proxy_destroy(void const* handle) {
+    return handle != nullptr ? (void*)static_cast<ClassFields const*>(handle)->ProxyDestroy : nullptr;
 }
 
 extern "C" bool bg3le_meta_class_constructible(void const* handle) {

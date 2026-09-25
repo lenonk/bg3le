@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Counts the Ext.* entry points that refuse rather than answer.
+"""Counts the Ext.* entry points and entity methods that refuse rather than answer.
 
 The README quotes this number, and a number in prose rots: it said 86 for
 some time after the real figure had fallen to 59. So it is derived from the
@@ -13,8 +13,9 @@ A refusal is one of three shapes in src/lua_host.cpp:
     end
     function Ext.X.Y(...)  error("bg3le ...") -- with no path that returns
 
-A refusal that only happens on some path has a return path too, so the third
-rule does not see it; one would want adding by hand. There are none now.
+The same shapes on entity_methods count too, as entity:Name, and a function
+may be indented (inside a do block). A refusal that only happens on some path
+has a return path too, so the third rule does not see it.
 """
 
 import os
@@ -29,6 +30,13 @@ def refusing_names(text):
     names = set()
 
     names |= set(re.findall(r"(Ext\.[A-Za-z_.]+)\s*=\s*needs\(", text))
+    names |= set("entity:" + n for n in
+                 re.findall(r"entity_methods\.([A-Za-z_]+)\s*=\s*needs\(", text))
+    for m in re.finditer(
+            r"for _, name in ipairs\(\{([^{}]*?)\}\) do\n"
+            r"\s*entity_methods\[name\]\s*=\s*needs\(", text):
+        for name in re.findall(r'"([^"]+)"', m.group(1)):
+            names.add("entity:" + name)
 
     # The list body must not contain a brace and the assignment must follow
     # immediately, or the match runs away across the file.
@@ -40,10 +48,12 @@ def refusing_names(text):
             names.add("Ext.%s.%s" % (module, name))
 
     for m in re.finditer(
-            r"^function (Ext\.[A-Za-z_.]+)\(([^)]*)\)\n(.*?)\n^end$",
+            r"^([ \t]*)function (Ext\.[A-Za-z_.]+|entity_methods:[A-Za-z_]+)"
+            r"\(([^)]*)\)\n(.*?)\n^\1end$",
             text, re.M | re.S):
-        name, body = m.group(1), m.group(3)
-        if 'error("bg3le' not in body:
+        name, body = m.group(2).replace("entity_methods:", "entity:"), m.group(4)
+        # An error at the body level, not one behind an argument check.
+        if not re.search(r"^" + re.escape(m.group(1)) + r'  error\("bg3le', body, re.M):
             continue
         if re.search(r"^\s*return\b", body, re.M):
             continue
@@ -59,10 +69,10 @@ def main():
     by_module = {}
     for name in sorted(names):
         parts = name.split(".")
-        module = parts[1] if len(parts) > 2 else "(top level)"
-        by_module.setdefault(module, []).append(parts[-1])
+        module = "entity" if name.startswith("entity:") else (parts[1] if len(parts) > 2 else "(top level)")
+        by_module.setdefault(module, []).append(name.split(":")[-1].split(".")[-1])
 
-    print("%d of Ext.* refuse rather than answer" % len(names))
+    print("%d of Ext.* and entity methods refuse rather than answer" % len(names))
     print()
     for module in sorted(by_module, key=lambda k: (-len(by_module[k]), k)):
         entries = sorted(set(by_module[module]))

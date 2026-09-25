@@ -973,6 +973,69 @@ extern "C" std::uint64_t bg3le_entity_create(void* container) {
     return world->Deferred()->CreateEntityImmediate().Handle;
 }
 
+// Upstream's CreateComponentRaw (deferred, through the thread's command
+// buffer) or CreateComponentImmediateRaw (the immediate cache): the slot the
+// component goes in, which for a proxy holds a pointer to it.
+extern "C" void* bg3le_entity_component_add(void* container, std::uint64_t handle,
+                                            std::uint16_t type, std::uint16_t inlineSize,
+                                            void* dtor, bool immediate) {
+    auto* world = bg3le::world_from_container(container);
+    if (world == nullptr || bg3le_engine_thread_index() < 0 || !bg3le_game_allocator_ready()) return nullptr;
+    const bg3se::EntityHandle entity{handle};
+    const bg3se::ecs::ComponentTypeIndex typeId{type};
+    if (immediate) {
+        void* slot = nullptr;
+        return world->Cache != nullptr && world->Cache->PrepareAddComponent(entity, typeId, slot) ? slot : nullptr;
+    }
+    bg3se::ecs::ComponentFrameStorageIndex index;
+    return world->Deferred()->CreateComponentRaw(entity, typeId, inlineSize, index, dtor);
+}
+
+// Upstream's RemoveComponent and RemoveComponentImmediate.
+extern "C" bool bg3le_entity_component_remove(void* container, std::uint64_t handle,
+                                              std::uint16_t type, std::uint16_t inlineSize,
+                                              void* dtor, bool immediate) {
+    auto* world = bg3le::world_from_container(container);
+    if (world == nullptr || bg3le_engine_thread_index() < 0 || !bg3le_game_allocator_ready()) return false;
+    const bg3se::EntityHandle entity{handle};
+    const bg3se::ecs::ComponentTypeIndex typeId{type};
+    if (immediate) return world->Cache != nullptr && world->Cache->RemoveComponent(entity, typeId);
+    world->Deferred()->RemoveComponent(entity, typeId, inlineSize, dtor);
+    return true;
+}
+
+// This frame's command-buffer changes for an entity, as upstream's WasAdded,
+// WasRemoved and the current-frame lists read them: each component change's
+// type and, for an addition, the component (dereferenced when proxy[i]).
+// Returns the count, or -1 with no change record; flags gets the entity's.
+extern "C" int bg3le_entity_ecb_changes(void* container, std::uint64_t handle,
+                                        std::uint16_t* types, void** components,
+                                        bool (*isProxy)(std::uint16_t), int max,
+                                        std::uint32_t* flags) {
+    auto* world = bg3le::world_from_container(container);
+    *flags = 0;
+    if (world == nullptr || bg3le_engine_thread_index() < 0) return -1;
+    auto ecb = world->Deferred();
+    auto change = ecb->Data.GetEntityChange(bg3se::EntityHandle{handle});
+    if (!change) return -1;
+    *flags = (std::uint32_t)change->Flags;
+    int n = 0;
+    for (std::uint32_t i = 0; i < change->Store.size() && n < max; ++i) {
+        auto const& comp = change->Store[i];
+        types[n] = (std::uint16_t)comp.ComponentTypeId;
+        void* component = nullptr;
+        if (comp.Index) {
+            component = ecb->GetComponentChange(comp.ComponentTypeId, comp.Index);
+            if (component != nullptr && isProxy((std::uint16_t)comp.ComponentTypeId)) {
+                component = bg3se::ecs::DereferenceProxyComponent(component);
+            }
+            if (component == nullptr) component = (void*)1;  // added, unreadable
+        }
+        components[n++] = component;
+    }
+    return n;
+}
+
 extern "C" bool bg3le_entity_destroy(void* container, std::uint64_t handle) {
     auto* world = bg3le::world_from_container(container);
     if (world == nullptr || bg3le_engine_thread_index() < 0 || !bg3le_game_allocator_ready()) return false;

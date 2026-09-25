@@ -2277,6 +2277,168 @@ int l_object_map_edit(lua_State* L) {
     return map_edit(L, meta, base, luaL_checkstring(L, 3), 4, lua_toboolean(L, 5) != 0);
 }
 
+// Entity component edits and this frame's command-buffer changes, as
+// upstream's EntityProxyMetatable methods.
+extern "C" void* bg3le_entity_component_add(void* container, std::uint64_t handle,
+                                            std::uint16_t type, std::uint16_t inlineSize,
+                                            void* dtor, bool immediate);
+extern "C" bool bg3le_entity_component_remove(void* container, std::uint64_t handle,
+                                              std::uint16_t type, std::uint16_t inlineSize,
+                                              void* dtor, bool immediate);
+extern "C" int bg3le_entity_ecb_changes(void* container, std::uint64_t handle,
+                                        std::uint16_t* types, void** components,
+                                        bool (*isProxy)(std::uint16_t), int max,
+                                        std::uint32_t* flags);
+extern "C" void* bg3le_meta_construct_component(void const* handle, void* slot);
+extern "C" void* bg3le_meta_proxy_destroy(void const* handle);
+
+// The component's meta and type index, for a name upstream's ExtComponentType
+// accepts; one-frame components are not created or removed this way.
+bool component_type(char const* name, void const** meta, std::uint16_t* type) {
+    *meta = bg3le_meta_component(name);
+    if (*meta == nullptr || bg3le_meta_component_is_one_frame(*meta)) return false;
+    const char* engineName = bg3le_meta_engine_class(*meta);
+    if (engineName == nullptr) return false;
+    const auto index = component_index(engineName);
+    if (!index.has_value()) return false;
+    *type = (std::uint16_t)*index;
+    return true;
+}
+
+// Ext._Internal.EntityComponentAdd(handle, name, immediate) -> address, class, or nil
+int l_entity_component_add(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    void const* meta = nullptr;
+    std::uint16_t type = 0;
+    if (!component_type(luaL_checkstring(L, 2), &meta, &type)) return 0;
+    const bool proxy = bg3le_meta_component_is_proxy(meta);
+    void* slot = bg3le_entity_component_add(
+        world_container(), handle, type, (std::uint16_t)bg3le_meta_component_stride(meta),
+        proxy ? bg3le_meta_proxy_destroy(meta) : nullptr, lua_toboolean(L, 3) != 0);
+    void* component = slot != nullptr ? bg3le_meta_construct_component(meta, slot) : nullptr;
+    if (component == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)component);
+    lua_pushstring(L, bg3le_meta_class_name(meta));
+    return 2;
+}
+
+// Ext._Internal.EntityComponentRemove(handle, name, immediate) -> bool
+int l_entity_component_remove(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    void const* meta = nullptr;
+    std::uint16_t type = 0;
+    if (!component_type(luaL_checkstring(L, 2), &meta, &type)) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    const bool proxy = bg3le_meta_component_is_proxy(meta);
+    lua_pushboolean(L, bg3le_entity_component_remove(
+        world_container(), handle, type, (std::uint16_t)bg3le_meta_component_stride(meta),
+        proxy ? bg3le_meta_proxy_destroy(meta) : nullptr, lua_toboolean(L, 3) != 0));
+    return 1;
+}
+
+// Ext._Internal.EntityEcbChanges(handle) -> { {Name, Address or true or false}, ... },
+// flags; nil without a change record. Unmapped component types are skipped.
+int l_entity_ecb_changes(lua_State* L) {
+    const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
+    constexpr int kMax = 512;
+    std::uint16_t types[kMax];
+    void* components[kMax];
+    std::uint32_t flags = 0;
+    auto shortName = [](std::uint16_t type) -> char const* {
+        auto name = ecs::name_of(ecs::Context::Component, type);
+        if (!name) return nullptr;
+        void const* meta = bg3le_meta_component(name->c_str());
+        return meta != nullptr ? bg3le_meta_short_name(meta) : nullptr;
+    };
+    const int n = bg3le_entity_ecb_changes(
+        world_container(), handle, types, components,
+        [](std::uint16_t type) {
+            auto name = ecs::name_of(ecs::Context::Component, type);
+            void const* meta = name ? bg3le_meta_component(name->c_str()) : nullptr;
+            return meta != nullptr && bg3le_meta_component_is_proxy(meta);
+        },
+        kMax, &flags);
+    if (n < 0) return 0;
+    lua_createtable(L, n, 0);
+    int at = 0;
+    for (int i = 0; i < n; ++i) {
+        char const* name = shortName(types[i]);
+        if (name == nullptr) continue;
+        lua_createtable(L, 3, 0);
+        lua_pushstring(L, name);
+        lua_rawseti(L, -2, 1);
+        {
+            auto engine = ecs::name_of(ecs::Context::Component, types[i]);
+            void const* meta = engine ? bg3le_meta_component(engine->c_str()) : nullptr;
+            char const* cls = meta != nullptr ? bg3le_meta_class_name(meta) : nullptr;
+            if (cls != nullptr) {
+                lua_pushstring(L, cls);
+                lua_rawseti(L, -2, 3);
+            }
+        }
+        if (components[i] == nullptr) lua_pushboolean(L, 0);
+        else if (components[i] == (void*)1) lua_pushboolean(L, 1);
+        else lua_pushinteger(L, (lua_Integer)(std::uintptr_t)components[i]);
+        lua_rawseti(L, -2, 2);
+        lua_rawseti(L, -2, ++at);
+    }
+    lua_pushinteger(L, flags);
+    return 2;
+}
+
+// Ext._Internal.EntityNetId(handle) -> the entity's NetId, or nil
+extern "C" bool bg3le_entity_net_id(void* container, std::uint64_t handle, bool server,
+                                    std::uint64_t* out);
+int l_entity_net_id(lua_State* L) {
+    std::uint64_t id = 0;
+    if (!bg3le_entity_net_id(world_container(), static_cast<std::uint64_t>(luaL_checkinteger(L, 1)),
+                             !in_client_state(), &id)) {
+        return 0;
+    }
+    lua_pushinteger(L, (lua_Integer)id);
+    return 1;
+}
+
+// Ext._Internal.UiObject(what, playerId) -> address, class; upstream's
+// GetCursorControl, GetDragDrop and GetPickingHelper.
+extern "C" void* bg3le_cursor_control();
+extern "C" void* bg3le_drag_drop(void* container, std::uint16_t playerId);
+extern "C" void* bg3le_picking_helper(void* system, std::uint16_t playerIndex);
+extern "C" bool bg3le_system_probe(void* container, std::int32_t index, void** system,
+                                   std::int32_t* ownIndex, void** update, std::uint32_t* count);
+std::optional<std::int32_t> system_index(char const* name);
+int l_ui_object(lua_State* L) {
+    if (!in_client_state()) return 0;
+    const std::string what = luaL_checkstring(L, 1);
+    const auto player = (std::uint16_t)luaL_optinteger(L, 2, 1);
+    void* at = nullptr;
+    char const* cls = nullptr;
+    if (what == "CursorControl") {
+        at = bg3le_cursor_control();
+        cls = "ecl::CursorControl";
+    } else if (what == "DragDrop") {
+        at = bg3le_drag_drop(world_container(), player);
+        cls = "ecl::PlayerDragData";
+    } else if (what == "PickingHelper") {
+        const auto index = system_index("ecl::PickingHelperManager");
+        void* system = nullptr;
+        void* update = nullptr;
+        std::int32_t own = -1;
+        std::uint32_t count = 0;
+        if (index.has_value()
+            && bg3le_system_probe(world_container(), *index, &system, &own, &update, &count)) {
+            at = bg3le_picking_helper(system, player);
+        }
+        cls = "ecl::PlayerPickingHelper";
+    }
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    lua_pushstring(L, cls);
+    return 2;
+}
+
 // Ext._Internal.FieldInfo(component, path) -> kind, elemKind, elemCount
 //
 // Type information only, so it needs no entity. A dynamic array's length is
@@ -7361,6 +7523,16 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "TypeInfoEach");
     lua_pushcfunction(g_lua, l_type_info_names);
     lua_setfield(g_lua, -2, "TypeInfoNames");
+    lua_pushcfunction(g_lua, l_ui_object);
+    lua_setfield(g_lua, -2, "UiObject");
+    lua_pushcfunction(g_lua, l_entity_net_id);
+    lua_setfield(g_lua, -2, "EntityNetId");
+    lua_pushcfunction(g_lua, l_entity_component_add);
+    lua_setfield(g_lua, -2, "EntityComponentAdd");
+    lua_pushcfunction(g_lua, l_entity_component_remove);
+    lua_setfield(g_lua, -2, "EntityComponentRemove");
+    lua_pushcfunction(g_lua, l_entity_ecb_changes);
+    lua_setfield(g_lua, -2, "EntityEcbChanges");
     lua_pushcfunction(g_lua, l_map_edit);
     lua_setfield(g_lua, -2, "MapEdit");
     lua_pushcfunction(g_lua, l_object_map_edit);
@@ -10377,11 +10549,16 @@ if Ext._Internal.IsClientState() then
 
   function Ext.UI.EnableErrorReporting(enable) end
 
-  for _, name in ipairs({"GetStateMachine", "GetPickingHelper",
-                         "GetCursorControl", "GetDragDrop"}) do
-    Ext.UI[name] = function()
-      error("bg3le: Ext.UI." .. name .. " needs an engine manager that is "
-            .. "not located yet", 2)
+  -- Upstream's engine getters; nil where the object is not there.
+  function Ext.UI.GetStateMachine()
+    error("bg3le: Ext.UI.GetStateMachine needs the GameUI's state machine, which is not located on this build", 2)
+  end
+  for name, what in pairs({GetPickingHelper = "PickingHelper",
+                           GetCursorControl = "CursorControl", GetDragDrop = "DragDrop"}) do
+    Ext.UI[name] = function(player)
+      local at, cls = I.UiObject(what, player)
+      if at == nil then return nil end
+      return Ext._Internal.PointedObject(at, cls)
     end
   end
 
@@ -11404,23 +11581,67 @@ function entity_methods:OnChanged(component, handler, flags)
                                        false, flags)
 end
 
--- These go through the calling thread's entity command buffer, which
--- upstream picks with ls::ThreadRegistry::RequestThreadIndex; nothing in
--- this build names it. GetNetId needs the server's replication authority,
--- which has no anchor yet.
-local kCommandBuffer = "needs the calling thread's entity command buffer, "
-  .. "which is chosen by ls::ThreadRegistry::RequestThreadIndex -- a "
-  .. "function this build has no symbol for"
-for _, name in ipairs({"CreateComponent", "CreateComponentImmediate",
-                       "RemoveComponent", "RemoveComponentImmediate",
-                       "GetAddedComponentsCurrentFrame",
-                       "GetRemovedComponentsCurrentFrame", "WasAdded",
-                       "WasRemoved", "WasEntityAdded", "WasEntityRemoved"}) do
-  entity_methods[name] = needs("entity:" .. name .. " " .. kCommandBuffer)
+-- Upstream's component edits and current-frame queries, through the
+-- calling thread's entity command buffer or the immediate cache.
+do
+  local function create(self, name, immediate)
+    local addr, class = Ext._Internal.EntityComponentAdd(handle_of(self), tostring(name), immediate)
+    if addr == nil then
+      Ext.Log.PrintError("Unable to construct components of this type: " .. tostring(name))
+      return nil
+    end
+    return Ext._Internal.PointedObject(addr, class)
+  end
+  function entity_methods:CreateComponent(name) return create(self, name, false) end
+  function entity_methods:CreateComponentImmediate(name) return create(self, name, true) end
+  function entity_methods:RemoveComponent(name)
+    return Ext._Internal.EntityComponentRemove(handle_of(self), tostring(name), false)
+  end
+  function entity_methods:RemoveComponentImmediate(name)
+    return Ext._Internal.EntityComponentRemove(handle_of(self), tostring(name), true)
+  end
+
+  -- The first change of that type decides, as upstream's loop does.
+  local function change_of(self, name)
+    for _, c in ipairs(Ext._Internal.EntityEcbChanges(handle_of(self)) or {}) do
+      if c[1] == name then return c[2] end
+    end
+    return nil
+  end
+  function entity_methods:WasAdded(name)
+    local c = change_of(self, name)
+    return c ~= nil and c ~= false
+  end
+  function entity_methods:WasRemoved(name) return change_of(self, name) == false end
+
+  -- ecs::EntityChangeFlags: Create 1, Destroy 2.
+  local function has_flag(self, bit)
+    local _, flags = Ext._Internal.EntityEcbChanges(handle_of(self))
+    return flags ~= nil and flags & bit == bit
+  end
+  function entity_methods:WasEntityAdded() return has_flag(self, 1) end
+  function entity_methods:WasEntityRemoved() return has_flag(self, 2) end
+
+  function entity_methods:GetAddedComponentsCurrentFrame()
+    local out = {}
+    for _, c in ipairs(Ext._Internal.EntityEcbChanges(handle_of(self)) or {}) do
+      if math.type(c[2]) == "integer" then
+        out[c[1]] = Ext._Internal.PointedObject(c[2], c[3] or c[1])
+      end
+    end
+    return out
+  end
+  function entity_methods:GetRemovedComponentsCurrentFrame()
+    local out = {}
+    for _, c in ipairs(Ext._Internal.EntityEcbChanges(handle_of(self)) or {}) do
+      if c[2] == false then out[#out + 1] = c[1] end
+    end
+    return out
+  end
 end
-entity_methods.GetNetId = needs("entity:GetNetId needs the server's "
-  .. "replication authority (EoCServer.GameServer.Replication), which "
-  .. "bg3le has not found")
+function entity_methods:GetNetId()
+  return Ext._Internal.EntityNetId(handle_of(self))
+end
 
 -- entity.Vars: the entity's user variables, as upstream's holder.
 local function user_var_option(defs, key, option, default)
