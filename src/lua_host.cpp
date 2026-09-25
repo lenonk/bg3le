@@ -1,5 +1,6 @@
 #include "lua_host.h"
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <cerrno>
@@ -2643,6 +2644,54 @@ int l_set_dump(lua_State* L) {
     return 0;
 }
 
+// A set of anything but FixedStrings -- GUIDs, entities, integers -- written
+// as a field of that kind is, into a buffer handed over whole.
+int assign_scalar_set(lua_State* L, Subject const& subject,
+                      const char* className, const char* path, int tableIdx,
+                      FieldKind elemKind) {
+    const std::size_t stride = field_kind_size(elemKind);
+    if (stride == 0 || elemKind == FieldKind::Pointer
+        || elemKind == FieldKind::ConditionId) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s.%s is a set of %s, which bg3le cannot write",
+                        className, path, field_kind_name(elemKind));
+        return 2;
+    }
+    const lua_Integer count = luaL_len(L, tableIdx);
+    std::vector<unsigned char> bytes(stride * (std::size_t)(count > 0 ? count : 0));
+    // An enum's labels are taken, as a field of one takes them.
+    const std::string element = std::string(path) + "[0]";
+    std::size_t kept = 0;
+    for (lua_Integer i = 1; i <= count; ++i) {
+        lua_rawgeti(L, tableIdx, i);
+        enum_arg_in_place(L, lua_gettop(L), subject.Meta, element.c_str());
+        unsigned char* at = &bytes[kept * stride];
+        const bool ok = write_field(L, lua_gettop(L), at, elemKind);
+        lua_pop(L, 1);
+        if (!ok) {
+            lua_pushnil(L);
+            lua_pushfstring(L, "%s.%s: entry %d is not a %s", className, path,
+                            (int)i, field_kind_name(elemKind));
+            return 2;
+        }
+        // A key given twice is one key, as upstream's insert makes it.
+        bool seen = false;
+        for (std::size_t j = 0; j < kept && !seen; ++j) {
+            seen = std::memcmp(&bytes[j * stride], at, stride) == 0;
+        }
+        if (!seen) ++kept;
+    }
+    if (!bg3le_meta_set_assign(subject.Meta, path, subject.Base,
+                               kept == 0 ? nullptr : bytes.data(), kept, stride)) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s.%s is not a set bg3le can replace", className,
+                        path);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 // Replaces a hash set of FixedStrings, which is what a spell list is.
 // Elements cannot be written one at a time -- the table's hashes would
 // still point at the old keys -- so the set is rebuilt whole.
@@ -2660,6 +2709,18 @@ int l_set_dump(lua_State* L) {
 int assign_set(lua_State* L, Subject const& subject, const char* className,
                const char* path, int tableIdx) {
     luaL_checktype(L, tableIdx, LUA_TTABLE);
+
+    std::uint32_t fieldOffset = 0;
+    std::uint16_t fieldSize = 0;
+    std::uint8_t fieldKind = 0;
+    std::uint8_t elemKind = 0;
+    std::uint16_t elemCount = 0;
+    bg3le_meta_field(subject.Meta, path, &fieldOffset, &fieldSize, &fieldKind,
+                     &elemKind, &elemCount);
+    if ((FieldKind)elemKind != FieldKind::FixedString) {
+        return assign_scalar_set(L, subject, className, path, tableIdx,
+                                 (FieldKind)elemKind);
+    }
 
     std::vector<unsigned int> ids;
     const lua_Integer count = luaL_len(L, tableIdx);
@@ -2685,7 +2746,8 @@ int assign_set(lua_State* L, Subject const& subject, const char* className,
                             "could not be made", className, path, name);
             return 2;
         }
-        ids.push_back(id);
+        // A key given twice is one key, as upstream's insert makes it.
+        if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
         lua_pop(L, 1);
     }
 
@@ -5251,8 +5313,43 @@ int l_new_entity_proxy(lua_State* L) {
 
 extern "C" bool bg3le_meta_is_vector(void const* handle, char const* path);
 
+// Ext._Internal.IsHashSet(component or class, path) -> boolean
+extern "C" bool bg3le_meta_is_set(void const* handle, char const* path);
+int l_is_hash_set(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    void const* meta = bg3le_meta_component(name);
+    if (meta == nullptr) meta = bg3le_meta_class(name);
+    lua_pushboolean(L, bg3le_meta_is_set(meta, luaL_checkstring(L, 2)));
+    return 1;
+}
+
+// Ext._Internal.EnumKey(component or class, path, value) -> the value, with
+// an enum label turned into its number, so a set compares either spelling.
+int l_enum_key(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    const char* path = luaL_checkstring(L, 2);
+    lua_settop(L, 3);
+    void const* meta = bg3le_meta_component(name);
+    if (meta == nullptr) meta = bg3le_meta_class(name);
+    if (meta != nullptr && lua_type(L, 3) == LUA_TSTRING) {
+        const char* wanted = lua_tostring(L, 3);
+        const char* label = nullptr;
+        std::uint64_t value = 0;
+        bool isBitmask = false;
+        for (std::size_t i = 0;
+             bg3le_meta_enum_label(meta, path, i, &label, &value, &isBitmask); ++i) {
+            if (std::strcmp(label, wanted) == 0) {
+                lua_pushinteger(L, (lua_Integer)value);
+                return 1;
+            }
+        }
+    }
+    return 1;
+}
+
 // Ext._Internal.IsVector(class or component, path) -> whether the field is a
 // glm vector or matrix, which reads as a plain table
+
 int l_is_vector(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     void const* meta = bg3le_meta_component(name);
@@ -5981,6 +6078,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "NewObjectProxy");
     lua_pushcfunction(g_lua, l_is_vector);
     lua_setfield(g_lua, -2, "IsVector");
+    lua_pushcfunction(g_lua, l_is_hash_set);
+    lua_setfield(g_lua, -2, "IsHashSet");
+    lua_pushcfunction(g_lua, l_enum_key);
+    lua_setfield(g_lua, -2, "EnumKey");
     lua_pushcfunction(g_lua, l_entity_proxy_handle);
     lua_setfield(g_lua, -2, "EntityProxyHandle");
     lua_pushcfunction(g_lua, l_entity_component_names);
@@ -7550,30 +7651,15 @@ function Ext.Types.Unserialize(object, values)
     error("Ext.Types.Unserialize expects a table", 2)
   end
 
-  -- A view that knows where it came from is written back to the engine.
-  -- Without this a mod editing a spell list filled in a copy and the game
-  -- never saw it, which is worse than refusing: 5eSpells' whole reason
-  -- for existing is adding and removing spells, and it reported success
-  -- every time.
-  -- An array view -- which is how a hash set reads -- can only be written
-  -- whole, and a failure there is reported rather than fallen back on: the
-  -- per-key loop would fill the Lua copy and return success, which is the
-  -- silent no-op this exists to stop.
-  --
-  -- A view over a struct's fields is not a set and carries its source under
-  -- __bg3leObject instead. That one takes the loop, and the loop reaches the
-  -- engine because assigning a field on it writes through.
+  -- A container that can be written whole (a set, an object's array) is,
+  -- and a failure is reported: 5eSpells adds and removes spells this way.
+  -- Anything else takes the per-key loop, which writes through.
   local meta = getmetatable(object)
-  local source = meta and meta.__bg3leSource
-  if source ~= nil then
-    local ok, err = Ext._Internal.ObjectSetSet(source.addr, source.class,
-                                               source.path, values)
-    if ok then
-      for k in pairs(object) do object[k] = nil end
-      for k, v in pairs(values) do object[k] = v end
-      return object
-    end
-    error("bg3le: " .. tostring(err), 2)
+  local assign = type(meta) == "table" and meta.__bg3leAssign
+  if assign then
+    local ok, err = pcall(assign, values)
+    if not ok then error(err, 2) end
+    return object
   end
 
   -- Through the same setter an assignment uses, with one difference that
@@ -7599,6 +7685,10 @@ end
 
 function Ext.Types.GetHashSetValueAt(object, index)
   if not Ext._Internal.Walkable(object) then return nil end
+  local meta = getmetatable(object)
+  if type(meta) == "table" and meta.__bg3leSetAt then
+    return meta.__bg3leSetAt(index + 1)
+  end
   return object[index + 1]
 end
 
@@ -9434,6 +9524,71 @@ local make_fields
 local make_map
 local make_array
 
+-- Upstream's set proxy: set[x] is whether x is in the set, set[x] = true or
+-- false inserts or removes it, # counts it and pairs yields its keys in order.
+-- Each change rewrites the whole set, which is the one write bg3le can make
+-- to a hash set without desynchronising its buckets.
+-- owner and path name the set, so an enum key compares by label or number.
+function Ext._Internal.HashSetView(elemKind, owner, path, read_keys, write_keys,
+                                   identity)
+  local element = path .. "[0]"
+  local function key_of(v)
+    if v == nil then return nil end
+    if elemKind == "entity" then return Ext._Internal.EntityProxyHandle(v) end
+    if elemKind == "guid" then return type(v) == "string" and v:lower() or nil end
+    if elemKind == "string" then return tostring(v) end
+    v = Ext._Internal.EnumKey(owner, element, v)
+    return math.tointeger(v) or v
+  end
+  local function find(keys, v)
+    local want = key_of(v)
+    if want == nil then return nil end
+    for i = 1, #keys do
+      if key_of(keys[i]) == want then return i end
+    end
+    return nil
+  end
+  return Ext._Internal.NewObjectProxy({
+    __bg3leContainer = "array",
+    __bg3leIdentity = identity,
+    __bg3leAssign = write_keys,
+    __bg3leSetAt = function(i) return read_keys()[i] end,
+    __index = function(_, v) return find(read_keys(), v) ~= nil end,
+    __newindex = function(_, v, present)
+      local keys = read_keys()
+      local at = find(keys, v)
+      if present then
+        if at ~= nil then return end
+        keys[#keys + 1] = v
+      else
+        if at == nil then return end
+        table.remove(keys, at)
+      end
+      write_keys(keys)
+    end,
+    __len = function() return #read_keys() end,
+    __pairs = function(self)
+      local keys = read_keys()
+      return function(_, k)
+        local i = (k or 0) + 1
+        if keys[i] == nil then return nil end
+        return i, keys[i]
+      end, self, nil
+    end,
+  })
+end
+
+-- Upstream's erase and push_back, as arr[i] = nil and arr[#arr + 1] = v: the
+-- list one shorter or longer, for the array to be assigned whole.
+function Ext._Internal.ResizedList(current, n, i, v)
+  local list = {}
+  for j = 1, n do
+    if j ~= i then list[#list + 1] = current(j) end
+  end
+  if v ~= nil then list[#list + 1] = v end
+  return list
+end
+
 -- Reads whatever is at a path, whichever kind it turns out to be.
 --
 -- One dispatch, because there were three: the component view, an array
@@ -9450,6 +9605,28 @@ read_path = function(handle, comp, path)
     error("bg3le: " .. comp .. "." .. path .. " does not resolve", 0)
   end
 
+  if kind == "array" and Ext._Internal.IsHashSet(comp, path) then
+    local _, elemKind = Ext._Internal.FieldInfo(comp, path)
+    local function read_keys()
+      local n, err = Ext._Internal.ArrayInfo(handle, comp, path)
+      if n == nil then
+        error("bg3le: cannot size " .. comp .. "." .. path .. ": "
+              .. tostring(err), 0)
+      end
+      local keys = {}
+      for i = 0, n - 1 do
+        keys[i + 1] = read_path(handle, comp, path .. "[" .. i .. "]")
+      end
+      return keys
+    end
+    local function write_keys(keys)
+      local ok, err = Ext._Internal.SetSet(handle, comp, path, keys)
+      if not ok then error("bg3le: " .. tostring(err), 0) end
+    end
+    return Ext._Internal.HashSetView(elemKind, comp, path, read_keys, write_keys, function()
+      return "c:" .. handle .. ":" .. comp .. ":" .. path
+    end)
+  end
   -- A glm vector is a plain table, as upstream pushes it.
   if kind == "array" and not Ext._Internal.IsVector(comp, path) then
     return make_array(handle, comp, path)
@@ -9546,7 +9723,14 @@ make_array = function(handle, comp, path)
       return element(i)
     end,
     __newindex = function(_, i, v)
-      local ok, err = Ext._Internal.SetField(handle, comp, element_path(i), v)
+      local n = length()
+      local ok, err
+      if type(i) == "number" and ((v == nil and i >= 1 and i <= n) or i == n + 1) then
+        ok, err = Ext._Internal.SetField(handle, comp, path,
+          Ext._Internal.ResizedList(element, n, i, v))
+      else
+        ok, err = Ext._Internal.SetField(handle, comp, element_path(i), v)
+      end
       if not ok then error("bg3le: " .. tostring(err), 0) end
     end,
     __len = length,
@@ -11001,15 +11185,17 @@ local function entry_count(items)
   return n
 end
 
-local function snapshot_container(items, source, container)
+-- write(k, v) takes an element write to the engine; assign(values), for
+-- Ext.Types.Unserialize, the whole container.
+local function snapshot_container(items, container, write, assign)
   return Ext._Internal.NewObjectProxy({
     __bg3leContainer = container,
     __index = items,
-    __newindex = function(_, k, v) items[k] = v end,
+    __newindex = function(_, k, v) write(k, v) end,
     __len = container == "map" and function() return entry_count(items) end
             or function() return #items end,
     __pairs = function() return next, items, nil end,
-    __bg3leSource = source,
+    __bg3leAssign = assign,
   })
 end
 
@@ -11047,20 +11233,57 @@ local function read_object_path(addr, class, path, kind)
   end
 
   if kind == "array" and not Ext._Internal.IsVector(class, path) then
-    local count = Ext._Internal.ObjectArrayInfo(addr, class, path)
-    local items = {}
-    for i = 0, (count or 0) - 1 do
-      local element = path .. "[" .. i .. "]"
-      items[i + 1] = read_object_path(addr, class, element,
-                                      Ext._Internal.ObjectFieldInfo(
-                                        class, element))
+    local function read_items(items)
+      local count = Ext._Internal.ObjectArrayInfo(addr, class, path)
+      for i = #items, 1, -1 do items[i] = nil end
+      for i = 0, (count or 0) - 1 do
+        local element = path .. "[" .. i .. "]"
+        items[i + 1] = read_object_path(addr, class, element,
+                                        Ext._Internal.ObjectFieldInfo(
+                                          class, element))
+      end
+      return items
     end
-    -- Where it came from, so Ext.Types.Unserialize can write it back
-    -- rather than filling in a copy nothing reads. A hash set -- a spell
-    -- list, say -- is the case that matters: it reads as an array of its
-    -- keys and can only be written whole.
-    return snapshot_container(items, {addr = addr, class = class, path = path},
-                              "array")
+    local function assign(values)
+      local ok, err
+      if Ext._Internal.IsHashSet(class, path) then
+        ok, err = Ext._Internal.ObjectSetSet(addr, class, path, values)
+      else
+        ok, err = Ext._Internal.ObjectSetField(addr, class, path, values, true)
+      end
+      if not ok then error("bg3le: " .. tostring(err), 0) end
+    end
+
+    -- A hash set -- a spell list, say -- behaves as upstream's set proxy,
+    -- read live so a write is seen at once.
+    if Ext._Internal.IsHashSet(class, path) then
+      local _, elemKind = Ext._Internal.ObjectFieldInfo(class, path)
+      return Ext._Internal.HashSetView(elemKind, class, path,
+        function() return read_items({}) end, assign)
+    end
+
+    local items = read_items({})
+    local function write(k, v)
+      local n = #items
+      if type(k) ~= "number" or k < 1 or k > n + 1 or (k == n + 1 and v == nil) then
+        error("bg3le: " .. class .. "." .. path .. " index " .. tostring(k)
+              .. " is out of range 1.." .. n, 0)
+      end
+      local ok, err
+      if v == nil or k == n + 1 then
+        ok, err = Ext._Internal.ObjectSetField(addr, class, path,
+          Ext._Internal.ResizedList(function(j) return items[j] end, n, k, v))
+      else
+        ok, err = Ext._Internal.ObjectSetField(addr, class,
+                                               path .. "[" .. (k - 1) .. "]", v)
+      end
+      if not ok then error("bg3le: " .. tostring(err), 0) end
+      read_items(items)
+    end
+    return snapshot_container(items, "array", write, function(values)
+      assign(values)
+      read_items(items)
+    end)
   end
 
   -- Keyed by the map's own keys; an unreadable key gets make_map's
@@ -11068,7 +11291,7 @@ local function read_object_path(addr, class, path, kind)
   if kind == "map" then
     local count = Ext._Internal.ObjectArrayInfo(addr, class, path)
     if count == nil then return "<unreadable>" end
-    local items = {}
+    local items, slots = {}, {}
     for i = 0, count - 1 do
       local k, keyKind = Ext._Internal.ObjectMapKey(addr, class, path, i)
       if keyKind == "entity" then k = Ext._Internal.EntityValue(k) end
@@ -11080,8 +11303,23 @@ local function read_object_path(addr, class, path, kind)
       local element = path .. "[" .. i .. "]"
       items[k] = read_object_path(addr, class, element,
                                   Ext._Internal.ObjectFieldInfo(class, element))
+      slots[k] = i
     end
-    return snapshot_container(items, nil, "map")
+    -- As a component's map: an existing key's value writes through, and a
+    -- new key is refused rather than kept in the copy.
+    local function write(k, v)
+      local i = slots[k]
+      if i == nil then
+        error("bg3le: " .. class .. "." .. path .. " has no key "
+              .. tostring(k) .. "; adding one is not supported", 0)
+      end
+      local element = path .. "[" .. i .. "]"
+      local ok, err = Ext._Internal.ObjectSetField(addr, class, element, v)
+      if not ok then error("bg3le: " .. tostring(err), 0) end
+      items[k] = read_object_path(addr, class, element,
+                                  Ext._Internal.ObjectFieldInfo(class, element))
+    end
+    return snapshot_container(items, "map", write, nil)
   end
 
   local value, err = Ext._Internal.ObjectGetField(addr, class, path)
@@ -11210,9 +11448,7 @@ function read_object(addr, class, prefix, out)
         return name, Ext._Internal.CustomMemberValue(self, viewType, name)
       end, self, nil
     end,
-    -- Where it came from. Under its own name rather than __bg3leSource,
-    -- which marks an array that may be a set: a field view is not one, and
-    -- Ext.Types.Unserialize has to be able to tell the two apart.
+    -- Where it came from, for bg3le's own decoding.
     __bg3leObject = {addr = addr, class = class, path = prefix},
     -- The snapshot itself, so bg3le's own decoding can amend it. Assigning
     -- a field writes to the engine now, which is right for a mod and wrong

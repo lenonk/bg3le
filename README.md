@@ -412,9 +412,15 @@ component's declared size with the size the engine recorded, and
   keys are all drawn from the 121 static data type indices the symbol table
   already names is that manager rather than a coincidence. Resources are
   writable, which is what a mod that edits spell lists needs: a resource's
-  fields write through, a `HashSet<FixedString>` is replaced whole by
-  `Ext.Types.Unserialize` or by plain assignment, and both string kinds can
-  be assigned. Replacing a set means rebuilding its hash table, and doing
+  fields, array elements and map values write through (an array also takes
+  upstream's `arr[#arr + 1] = v` and `arr[i] = nil`), and a hash set behaves
+  as upstream's set proxy — `list.Spells["Target_Light"]` is whether it holds
+  that spell, assigning `true` or `nil` adds or removes it, `pairs` and
+  `Ext.Types.GetHashSetValueAt` walk it — or is replaced whole by
+  `Ext.Types.Unserialize` or by plain assignment. That holds for sets of
+  GUIDs, entities, integers and enums (by label or number) as well as
+  FixedStrings, on components as well as resources. Every change to a set
+  rebuilds its hash table, and doing
   that through bg3se's own container methods took the game down twice — the
   offsets, the hash rule and the two things not to call are in
   `reference/STATIC-DATA-WRITES.md`. Types are named by upstream's

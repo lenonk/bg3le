@@ -2539,6 +2539,14 @@ extern "C" bool bg3le_meta_map_key(void const* handle, char const* path,
     return true;
 }
 
+// Whether the field at path is a hash set: the one container with Assign.
+extern "C" bool bg3le_meta_is_set(void const* handle, char const* path) {
+    if (handle == nullptr || path == nullptr) return false;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
+                                nullptr);
+    return r.Ok && r.Field.Kind == FieldKind::DynArray && r.Field.Assign != nullptr;
+}
+
 // Whether the field at path is a glm vector or matrix.
 extern "C" bool bg3le_meta_is_vector(void const* handle, char const* path) {
     if (handle == nullptr || path == nullptr) return false;
