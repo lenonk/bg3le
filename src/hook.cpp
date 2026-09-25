@@ -4,6 +4,7 @@
 #include <link.h>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -44,37 +45,52 @@ bool find_text(Elf64_Addr* addr, std::size_t* size) {
 
 
 // A 12-byte absolute jump, placed near the executable's text so a rel32 call
-// can reach it: movabs rax, target; jmp rax.
-void* make_trampoline(std::uintptr_t anchor, void* target) {
-    const long page = ::sysconf(_SC_PAGESIZE);
+// can reach it: movabs rax, target; jmp rax. Stubs share pages, since each
+// page claimed near .text is one fewer for the next hook.
+void* make_trampoline(std::uintptr_t anchor, std::size_t text_size, void* target) {
+    static std::mutex lock;
+    static unsigned char* page_at = nullptr;
+    static std::size_t used = 0;
+    constexpr std::size_t kStub = 16;
+    const auto page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    std::lock_guard<std::mutex> guard(lock);
 
-    // Walk outwards from the anchor until an mmap lands within rel32 range.
-    for (std::uintptr_t delta = 0x100000; delta < 0x40000000; delta *= 2) {
-        for (int sign = -1; sign <= 1; sign += 2) {
-            auto hint = reinterpret_cast<void*>(
-                (anchor + sign * static_cast<std::intptr_t>(delta)) & ~(std::uintptr_t)(page - 1));
-            void* mem = ::mmap(hint, page, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (mem == MAP_FAILED) continue;
-
-            const auto distance = reinterpret_cast<std::intptr_t>(mem) -
-                                  static_cast<std::intptr_t>(anchor);
-            if (distance > INT32_MAX || distance < INT32_MIN) {
-                ::munmap(mem, page);
-                continue;
+    if (page_at == nullptr || used + kStub > page) {
+        page_at = nullptr;
+        // Every site in .text must reach the page, not just its start.
+        const std::intptr_t reach = INT32_MAX - static_cast<std::intptr_t>(text_size) - 0x10000;
+        for (std::intptr_t delta = 0x100000; delta < reach && page_at == nullptr; delta += 0x1000000) {
+            for (int sign = -1; sign <= 1 && page_at == nullptr; sign += 2) {
+                const std::uintptr_t base = sign < 0 ? anchor : anchor + text_size;
+                auto hint = reinterpret_cast<void*>(
+                    (base + sign * delta) & ~static_cast<std::uintptr_t>(page - 1));
+                void* mem = ::mmap(hint, page, PROT_READ | PROT_WRITE | PROT_EXEC,
+                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (mem == MAP_FAILED) continue;
+                const auto at = reinterpret_cast<std::intptr_t>(mem);
+                const auto lo = static_cast<std::intptr_t>(anchor);
+                const auto hi = lo + static_cast<std::intptr_t>(text_size);
+                if (hi - at > INT32_MAX - 0x10000 || at - lo > INT32_MAX - 0x10000) {
+                    ::munmap(mem, page);
+                    continue;
+                }
+                page_at = static_cast<unsigned char*>(mem);
+                used = 0;
             }
-
-            auto* code = static_cast<unsigned char*>(mem);
-            code[0] = 0x48;  // movabs rax, imm64
-            code[1] = 0xB8;
-            std::memcpy(code + 2, &target, 8);
-            code[10] = 0xFF;  // jmp rax
-            code[11] = 0xE0;
-            ::mprotect(mem, page, PROT_READ | PROT_EXEC);
-            return mem;
         }
+        if (page_at == nullptr) return nullptr;
     }
-    return nullptr;
+
+    unsigned char* code = page_at + used;
+    used += kStub;
+    ::mprotect(page_at, page, PROT_READ | PROT_WRITE | PROT_EXEC);
+    code[0] = 0x48;  // movabs rax, imm64
+    code[1] = 0xB8;
+    std::memcpy(code + 2, &target, 8);
+    code[10] = 0xFF;  // jmp rax
+    code[11] = 0xE0;
+    ::mprotect(page_at, page, PROT_READ | PROT_EXEC);
+    return code;
 }
 
 }  // namespace
@@ -98,7 +114,7 @@ std::size_t hook_call_sites(std::uintptr_t func_offset, void* replacement,
         return 0;
     }
 
-    void* tramp = make_trampoline(bias + text_addr, replacement);
+    void* tramp = make_trampoline(bias + text_addr, text_size, replacement);
     if (tramp == nullptr) {
         logf("hook: no trampoline within rel32 range of .text");
         return 0;

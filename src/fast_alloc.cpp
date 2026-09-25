@@ -152,19 +152,24 @@ void fast_alloc_install() {
         return;
     }
 
+    // Free first: its hook passes foreign blocks on, so it is safe alone. An
+    // allocate hook without it hands the engine blocks it cannot free.
     void* original = nullptr;
-    const std::size_t a = hook_call_sites(kTempAlloc,
-                                          reinterpret_cast<void*>(&alloc_hook),
-                                          &original);
-    if (a > 0) g_real_alloc = reinterpret_cast<AllocProc>(original);
-
     const std::size_t f = hook_call_sites(kTempFree,
                                           reinterpret_cast<void*>(&free_hook),
                                           &original);
     if (f > 0) g_real_free = reinterpret_cast<FreeProc>(original);
+    if (f == 0) {
+        statusf("fast alloc: NOT active (no free call sites patched)");
+        return;
+    }
 
-    if (a == 0 || f == 0) {
-        statusf("fast alloc: NOT active (patched %zu alloc / %zu free sites)", a, f);
+    const std::size_t a = hook_call_sites(kTempAlloc,
+                                          reinterpret_cast<void*>(&alloc_hook),
+                                          &original);
+    if (a > 0) g_real_alloc = reinterpret_cast<AllocProc>(original);
+    if (a == 0) {
+        statusf("fast alloc: NOT active (no allocate call sites patched)");
         return;
     }
     // Two counts, not a ratio: the old wording read "77/80 sites" as though
