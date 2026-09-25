@@ -142,26 +142,56 @@ struct VectorTraits<Array<T>> {
     using Elem = T;
 };
 
-// Arrays read through size() and data() but not rebuilt here: a LegacyArray
-// carries its own vtable, which a rebuilt one would take from this library,
-// and neither StaticArray nor std::vector has an engine-side grow.
+// A LegacyArray is an Array<T> behind a vtable; upstream resizes it through
+// that base, and so does this.
 template <class T>
-struct ReadOnlyVectorTraits {
+struct LegacyArrayTraits {
     static constexpr bool kIs = false;
     using Elem = void;
 };
 template <class T>
-struct ReadOnlyVectorTraits<LegacyArray<T>> {
+struct LegacyArrayTraits<LegacyArray<T>> {
     static constexpr bool kIs = true;
     using Elem = T;
 };
+
+// Arrays written in place but never resized: StaticArray has no grow, and a
+// std::vector's buffer belongs to whichever allocator its owner uses.
 template <class T>
-struct ReadOnlyVectorTraits<StaticArray<T>> {
+struct FixedVectorTraits {
+    static constexpr bool kIs = false;
+    using Elem = void;
+};
+template <class T>
+struct FixedVectorTraits<StaticArray<T>> {
     static constexpr bool kIs = true;
     using Elem = T;
 };
 template <class T, class A>
-struct ReadOnlyVectorTraits<std::vector<T, A>> {
+struct FixedVectorTraits<std::vector<T, A>> {
+    static constexpr bool kIs = true;
+    using Elem = T;
+};
+
+template <class T>
+struct BitArrayTraits {
+    static constexpr bool kIs = false;
+};
+template <class TWord, unsigned Words>
+struct BitArrayTraits<BitArray<TWord, Words>> {
+    static constexpr bool kIs = true;
+    static constexpr unsigned kBits = BitArray<TWord, Words>::NumBits;
+    static_assert(kBits <= 0xffff);
+};
+
+// Queue, a ring buffer: read in order through operator[], never written.
+template <class T>
+struct QueueTraits {
+    static constexpr bool kIs = false;
+    using Elem = void;
+};
+template <class T>
+struct QueueTraits<Queue<T>> {
     static constexpr bool kIs = true;
     using Elem = T;
 };
@@ -242,7 +272,8 @@ constexpr bool kComplete<T, std::void_t<decltype(sizeof(T))>> = true;
 
 // CompactSet (and TrackedCompactSet, MiniCompactSet) is laid out as an
 // Array is and reads the same way, through size() and data(). Its resize()
-// sets the capacity rather than the length, so it is read-only here.
+// sets the capacity rather than the length; compact_set_resize_thunk sets
+// both.
 template <class T>
 struct CompactSetTraits {
     static constexpr bool kIsCompactSet = false;
@@ -291,6 +322,42 @@ bool array_resize_thunk(void* container, std::size_t count) {
     fresh->resize((typename A::size_type)count);
     std::memcpy(container, raw, sizeof(A));
     return true;
+}
+
+template <class A>
+bool legacy_array_resize_thunk(void* container, std::size_t count) {
+    using E = typename LegacyArrayTraits<A>::Elem;
+    return array_resize_thunk<Array<E>>(static_cast<Array<E>*>(static_cast<A*>(container)),
+                                        count);
+}
+
+// Reallocate default-constructs every element up to the capacity, as
+// Array::resize does; the old buffer is left where it is.
+template <class S>
+bool compact_set_resize_thunk(void* container, std::size_t count) {
+    using TSize = decltype(S::Size);
+    if (!bg3le_game_allocator_ready() || count > (1u << 20)
+        || count > (std::size_t)std::numeric_limits<TSize>::max()) {
+        return false;
+    }
+    alignas(S) unsigned char raw[sizeof(S)];
+    auto* fresh = new (raw) S();
+    fresh->Reallocate((TSize)count);
+    fresh->Size = (TSize)count;
+    std::memcpy(container, raw, sizeof(S));
+    return true;
+}
+
+template <class Q>
+std::size_t queue_count_thunk(void const* container) {
+    return static_cast<Q const*>(container)->size();
+}
+
+template <class Q>
+void* queue_elem_thunk(void const* container, std::size_t index) {
+    auto* q = const_cast<Q*>(static_cast<Q const*>(container));
+    if (index >= q->size()) return nullptr;
+    return &(*q)[(typename Q::size_type)index];
 }
 
 template <class A>
@@ -918,6 +985,8 @@ constexpr FieldKind kind_of() {
         return FieldKind::Version;
     } else if constexpr (std::is_same_v<T, EntityOrVec3Variant>) {
         return FieldKind::EntityOrVec3;
+    } else if constexpr (BitArrayTraits<T>::kIs) {
+        return FieldKind::BitArray;
     } else if constexpr (ArrayTraits<T>::kIsArray) {
         return FieldKind::ScalarArray;
     } else if constexpr (GlmTraits<T>::kIsGlm) {
@@ -928,7 +997,9 @@ constexpr FieldKind kind_of() {
             return FieldKind::Unsupported;
         }
     } else if constexpr (VectorTraits<T>::kIsVector
-                         || ReadOnlyVectorTraits<T>::kIs
+                         || LegacyArrayTraits<T>::kIs
+                         || FixedVectorTraits<T>::kIs
+                         || QueueTraits<T>::kIs
                          || SetTraits<T>::kIsSet
                          || CompactSetTraits<T>::kIsCompactSet) {
         return FieldKind::DynArray;
@@ -945,10 +1016,10 @@ constexpr FieldKind kind_of() {
         return FieldKind::Pointer;
     } else if constexpr (std::is_pointer_v<T>) {
         // To a described class, or to anything else that converts: a set, a
-        // map, a string. A pointer to a pointer does not.
+        // map, a string, another pointer.
         using P = std::remove_cv_t<std::remove_pointer_t<T>>;
-        if constexpr (std::is_class_v<P> || (kComplete<P> && !std::is_pointer_v<P>
-                                              && !std::is_void_v<P>)) {
+        if constexpr (std::is_class_v<P> || (kComplete<P> && !std::is_void_v<P>
+                                              && kind_of<P>() != FieldKind::Unsupported)) {
             return FieldKind::Pointer;
         } else {
             return FieldKind::Unsupported;
@@ -1116,7 +1187,32 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         describe_elements.template operator()<E>();
         f.Count = &array_count_thunk<T>;
         f.Data = &array_data_thunk<T>;
+        if constexpr (std::is_default_constructible_v<E>
+                      && std::is_move_constructible_v<E>) {
+            f.Resize = &compact_set_resize_thunk<T>;
+        }
+    } else if constexpr (LegacyArrayTraits<T>::kIs) {
+        using E = typename LegacyArrayTraits<T>::Elem;
+        describe_elements.template operator()<E>();
+        f.Count = &array_count_thunk<T>;
+        f.Data = &array_data_thunk<T>;
+        if constexpr (std::is_default_constructible_v<E>
+                      && std::is_move_constructible_v<E>) {
+            f.Resize = &legacy_array_resize_thunk<T>;
+        }
+    } else if constexpr (FixedVectorTraits<T>::kIs) {
+        using E = typename FixedVectorTraits<T>::Elem;
+        describe_elements.template operator()<E>();
+        f.Count = &array_count_thunk<T>;
+        f.Data = &array_data_thunk<T>;
+    } else if constexpr (QueueTraits<T>::kIs) {
+        using E = typename QueueTraits<T>::Elem;
+        describe_elements.template operator()<E>();
+        f.Count = &queue_count_thunk<T>;
+        f.ElemAt = &queue_elem_thunk<T>;
         f.ReadOnly = true;
+    } else if constexpr (BitArrayTraits<T>::kIs) {
+        f.ElemCount = (std::uint16_t)BitArrayTraits<T>::kBits;
     } else if constexpr (SetTraits<T>::kIsSet) {
         using E = typename SetTraits<T>::Elem;
         describe_elements.template operator()<E>();
@@ -1159,12 +1255,6 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         f.ReadOnly = true;
     } else if constexpr (std::is_same_v<T, Version>
                          || std::is_same_v<T, EntityOrVec3Variant>) {
-        f.ReadOnly = true;
-    } else if constexpr (ReadOnlyVectorTraits<T>::kIs) {
-        using E = typename ReadOnlyVectorTraits<T>::Elem;
-        describe_elements.template operator()<E>();
-        f.Count = &array_count_thunk<T>;
-        f.Data = &array_data_thunk<T>;
         f.ReadOnly = true;
     } else if constexpr (std::is_same_v<T, StatsExpressionRef>) {
         // A StatsExpressionRef is its StatsExpressionPooled*, and upstream
@@ -2343,6 +2433,22 @@ extern "C" int bg3le_meta_array_length(void const* handle, char const* path,
     return 0;
 }
 
+// Element kinds a whole-array assignment can write one by one. Anything else
+// would be left default-constructed, a null pointer included.
+static bool element_assignable(FieldKind kind) {
+    switch (kind) {
+        case FieldKind::Bool: case FieldKind::Int8: case FieldKind::Uint8:
+        case FieldKind::Int16: case FieldKind::Uint16: case FieldKind::Int32:
+        case FieldKind::Uint32: case FieldKind::Int64: case FieldKind::Uint64:
+        case FieldKind::Float: case FieldKind::Double: case FieldKind::Guid:
+        case FieldKind::Entity: case FieldKind::FixedString:
+        case FieldKind::LSString: case FieldKind::ComponentHandle:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Resizes a DynArray field for a whole-array assignment and returns where
 // its elements now are; the caller writes them one by one.
 extern "C" bool bg3le_meta_array_resize(void const* handle, char const* path,
@@ -2353,10 +2459,15 @@ extern "C" bool bg3le_meta_array_resize(void const* handle, char const* path,
     const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
                                 component);
     if (!r.Ok || r.Address == nullptr || r.Field.Kind != FieldKind::DynArray
-        || r.Field.Resize == nullptr || r.Field.ReadOnly) {
+        || r.Field.ReadOnly || r.Field.Data == nullptr
+        || (count != 0 && !element_assignable(r.Field.ElemKind))) {
         return false;
     }
-    if (!r.Field.Resize(r.Address, count)) return false;
+    if (r.Field.Resize == nullptr) {
+        if (r.Field.Count == nullptr || r.Field.Count(r.Address) != count) return false;
+    } else if (!r.Field.Resize(r.Address, count)) {
+        return false;
+    }
     *data = r.Field.Data(r.Address);
     *elemSize = r.Field.ElemSize;
     *elemKind = (std::uint8_t)r.Field.ElemKind;
@@ -3143,6 +3254,7 @@ extern "C" char const* bg3le_meta_kind_name(std::uint8_t kind) {
         case FieldKind::Text: return "string";
         case FieldKind::Version: return "version";
         case FieldKind::EntityOrVec3: return "entityorvec3";
+        case FieldKind::BitArray: return "bitarray";
         default: return "unsupported";
     }
 }

@@ -1396,6 +1396,7 @@ enum class FieldKind : std::uint8_t {
     Int32, Uint32, Int64, Uint64, Guid, Entity, FixedString, LSString,
     ScalarArray, Struct, DynArray, Map, Optional, Variant, Inherit,
     ComponentHandle, ConditionId, Pointer, Text, Version, EntityOrVec3,
+    BitArray,
 };
 
 extern "C" const char* bg3le_meta_kind_name(std::uint8_t kind);
@@ -1573,6 +1574,17 @@ bool push_field(lua_State* L, const void* address, FieldKind kind,
             lua_rawseti(L, -2, 3);
             lua_pushinteger(L, (lua_Integer)(raw & 0x7fffffff));
             lua_rawseti(L, -2, 4);
+            return true;
+        }
+        case FieldKind::BitArray: {
+            // Upstream's push: one boolean per bit.
+            std::vector<unsigned char> bits((elemCount + 7) / 8);
+            if (!safe_read(address, bits.data(), bits.size())) return false;
+            lua_createtable(L, elemCount, 0);
+            for (std::uint16_t i = 0; i < elemCount; ++i) {
+                lua_pushboolean(L, (bits[i / 8] >> (i % 8)) & 1);
+                lua_rawseti(L, -2, i + 1);
+            }
             return true;
         }
         case FieldKind::EntityOrVec3: {
@@ -1755,6 +1767,17 @@ bool write_field(lua_State* L, int index, void* address, FieldKind kind,
         case FieldKind::ConditionId:
             luaL_error(L, "Setting ConditionId values is not supported");
             return false;
+        case FieldKind::BitArray: {
+            if (!lua_istable(L, index)) return false;
+            std::vector<unsigned char> bits((elemCount + 7) / 8);
+            for (std::uint16_t i = 0; i < elemCount; ++i) {
+                lua_rawgeti(L, index, i + 1);
+                if (lua_toboolean(L, -1)) bits[i / 8] |= (unsigned char)(1u << (i % 8));
+                lua_pop(L, 1);
+            }
+            std::memcpy(address, bits.data(), bits.size());
+            return true;
+        }
         case FieldKind::ScalarArray: {
             const std::size_t stride = field_kind_size(elemKind);
             if (stride == 0 || !lua_istable(L, index)) return false;
@@ -2136,8 +2159,8 @@ int l_set_field(lua_State* L) {
     if (readOnly) {
         lua_pushnil(L);
         lua_pushfstring(L,
-            "%s.%s is read-only: it is a hash set, and writing a key in place "
-            "would leave the table's hashes stale", name, path);
+            "%s.%s is read-only (a hash set's keys, a queue, or a value "
+            "upstream only reads)", name, path);
         return 2;
     }
 
@@ -2744,8 +2767,8 @@ int l_object_set_field(lua_State* L) {
     if (readOnly) {
         lua_pushnil(L);
         lua_pushfstring(L,
-            "%s.%s is read-only: it is a hash set, and writing a key in "
-            "place would leave the table's hashes stale", className, path);
+            "%s.%s is read-only (a hash set's keys, a queue, or a value "
+            "upstream only reads)", className, path);
         return 2;
     }
 
@@ -9723,7 +9746,7 @@ make_fields = function(handle, comp, prefix, fields, identity)
       local ok, err = Ext._Internal.SetField(handle, comp, path, value)
       -- A hash set is the one field a plain write refuses on purpose: its
       -- keys cannot be written in place. A table is the whole set.
-      if not ok and type(value) == "table" then
+      if not ok and type(value) == "table" and tostring(err):find("is read-only", 1, true) then
         ok, err = Ext._Internal.SetSet(handle, comp, path, value)
       end
       if not ok then error("bg3le: " .. tostring(err), 0) end
@@ -11145,7 +11168,7 @@ function read_object(addr, class, prefix, out)
         addr, class, path, value, Ext._Internal.Unserializing == true)
       -- As on a component: a hash set refuses a plain write, and a table is
       -- the whole set.
-      if not ok and type(value) == "table" then
+      if not ok and type(value) == "table" and tostring(err2):find("is read-only", 1, true) then
         ok, err2 = Ext._Internal.ObjectSetSet(addr, class, path, value)
       end
       if not ok then error("bg3le: " .. tostring(err2), 0) end

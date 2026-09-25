@@ -85,6 +85,8 @@ enum class FieldKind : std::uint8_t {
     // EntityOrVec3Variant: a position when its type byte is set, else an
     // entity.
     EntityOrVec3,
+    // BitArray: a table of ElemCount booleans, read and written whole.
+    BitArray,
 };
 
 struct FieldDesc;
