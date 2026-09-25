@@ -294,6 +294,16 @@ component's declared size with the size the engine recorded, and
   manager's 512 levels live, and the second appends to the parent level's
   `ActiveLevelTemplates`, in place while it has room and otherwise into a
   fresh engine allocation. Like upstream, both exist only on the server
+- **`Ext.Level`'s physics queries**, all eleven raycasts, sweeps and overlap
+  tests, through the current level's `PhysicsSceneBase` on either side. Its
+  virtuals are called as bg3se declares them, which this ABI lays out in the
+  same order (two destructor slots, both cylinder sweeps stubbed, as the scene
+  is checked for before any call), except that `TestBox` and `TestSphere` are
+  one name overloaded in Larian's source and come in the opposite order; those
+  two are called by slot. `TestBox` gets its position before its extents, as
+  the engine reads them: upstream passes them swapped, which here hands PhysX
+  a box with negative half-extents and crashes. Results are upstream's
+  thread-local hit objects, reused rather than freed
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -579,20 +589,16 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **31 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **20 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 22 of the 31 are
-  `Ext.Level`'s physics, pathfinding, tiles and surface actions, 3 `Ext.StaticData`'s bank writes,
-  2 `Ext.Stats`' functor execution, and 4 `Ext.Entity`'s
+  the source, because this one was stale at 86 for a while: 11 of the 20 are
+  `Ext.Level`'s pathfinding, tiles and surface actions, 3
+  `Ext.StaticData`'s bank writes, 2 `Ext.Stats`' functor execution, and 4
+  `Ext.Entity`'s
   `Create`, `Destroy`, `GetEntitiesOnTile` and `SetupTracing`.
-  `reference/ext-api-surface.txt` lists them with their shapes. For the
-  physics queries there is a lead: upstream goes through Larian's
-  `PhysicsScene` wrapper, which has no symbol, but PhysX is linked into the
-  executable with its own (about 8,000, `PxGetPhysics` and `NpScene`'s queries
-  among them). What is unmapped is how Larian's physics types and groups sit
-  in PhysX's filter data, which upstream's filters and hits are expressed in
+  `reference/ext-api-surface.txt` lists them with their shapes
 - **Stat writes and `Sync`, all but a passive's rebuild.** Every attribute kind upstream
   writes is written, the way its `Object::Set*` writes it: integers and
   enumerations in place; conditions, strings, floats, GUIDs, flag sets and

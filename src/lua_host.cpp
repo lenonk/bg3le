@@ -4043,6 +4043,25 @@ int l_level_add_persistent_template(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.PhysicsQuery(op, client, 11 floats, type, include, exclude,
+// context) -> hit, address; or nothing without a physics scene
+extern "C" int bg3le_physics_query(int op, bool client, float const* v, std::uint32_t type,
+                                   std::uint32_t include, std::uint32_t exclude, int context,
+                                   void** out);
+int l_physics_query(lua_State* L) {
+    float v[11];
+    for (int i = 0; i < 11; ++i) v[i] = (float)luaL_checknumber(L, 3 + i);
+    void* out = nullptr;
+    const int hit = bg3le_physics_query(
+        (int)luaL_checkinteger(L, 1), lua_toboolean(L, 2) != 0, v,
+        (std::uint32_t)luaL_checkinteger(L, 14), (std::uint32_t)luaL_checkinteger(L, 15),
+        (std::uint32_t)luaL_checkinteger(L, 16), (int)luaL_checkinteger(L, 17), &out);
+    if (hit < 0) return 0;
+    lua_pushboolean(L, hit);
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)out);
+    return 2;
+}
+
 // Ext._Internal.TemplateIds() -> every template id
 int l_template_ids(lua_State* L) {
     const std::size_t count = bg3le_templates_count();
@@ -6522,6 +6541,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "TemplatesIn");
     lua_pushcfunction(g_lua, l_level_data_manager);
     lua_setfield(g_lua, -2, "LevelDataManager");
+    lua_pushcfunction(g_lua, l_physics_query);
+    lua_setfield(g_lua, -2, "PhysicsQuery");
     lua_pushcfunction(g_lua, l_level_add_persistent_template);
     lua_setfield(g_lua, -2, "LevelAddPersistentTemplate");
     lua_pushcfunction(g_lua, l_loca_get);
@@ -13248,15 +13269,64 @@ end
 --
 -- Raycasts, sweeps and pathfinding all go through the level's physics
 -- scene and pathfinder.
-for _, name in ipairs({"RaycastAll", "RaycastAny", "RaycastClosest",
-                       "SweepBoxAll", "SweepBoxClosest", "SweepCapsuleAll",
-                       "SweepCapsuleClosest", "SweepSphereAll",
-                       "SweepSphereClosest", "TestBox", "TestSphere",
-                       "GetHeightsAt", "GetTileDebugInfo",
-                       "GetEntitiesOnTile"}) do
+-- The physics scene's queries, as upstream's: through the current level's
+-- scene, whose virtuals src/vendor/level.cpp calls as bg3se declares them.
+-- A hit is upstream's thread-local result, overwritten by the next query.
+local function query_vec(v, what)
+  if type(v) ~= "table" then error("bg3le: " .. what .. " must be a vec3 table", 3) end
+  return v[1] or 0.0, v[2] or 0.0, v[3] or 0.0
+end
+
+local function query_flags(enum, v)
+  if v == nil then return 0 end
+  if type(v) == "number" then return math.tointeger(v) or 0 end
+  local labels = Ext.Enums[enum]
+  local function value_of(label)
+    if type(label) == "number" then return math.tointeger(label) or 0 end
+    for k, l in pairs(labels) do
+      if type(k) == "number" and l == label then return k end
+    end
+    error("bg3le: " .. tostring(label) .. " is not a " .. enum .. " label", 4)
+  end
+  if type(v) == "string" then return value_of(v) end
+  local out = 0
+  for _, label in ipairs(v) do out = out | value_of(label) end
+  return out
+end
+
+-- op, and whether it answers a hit, all hits, or a boolean.
+local function query(op, shape, src, dst, ext, radius, halfHeight, ptype, incl, excl, context)
+  local sx, sy, sz = query_vec(src, "the source")
+  local dx, dy, dz = 0.0, 0.0, 0.0
+  if dst ~= nil then dx, dy, dz = query_vec(dst, "the destination") end
+  local ex, ey, ez = 0.0, 0.0, 0.0
+  if ext ~= nil then ex, ey, ez = query_vec(ext, "the extents") end
+  local hit, at = Ext._Internal.PhysicsQuery(op, Ext._Internal.IsClientState(),
+    sx, sy, sz, dx, dy, dz, ex, ey, ez, radius or 0.0, halfHeight or 0.0,
+    query_flags("PhysicsType", ptype), query_flags("PhysicsGroupFlags", incl),
+    query_flags("PhysicsGroupFlags", excl), math.tointeger(context) or 0)
+  if hit == nil then error("No level loaded - physics scene unavailable", 3) end
+  if shape == "any" then return hit end
+  if not hit then return nil end
+  return Ext._Internal.PointedObject(at, shape == "all" and "phx::PhysicsHitAll" or "phx::PhysicsHit")
+end
+
+local L = Ext.Level
+function L.RaycastClosest(s, d, t, i, e, c) return query(0, "one", s, d, nil, 0, 0, t, i, e, c) end
+function L.RaycastAll(s, d, t, i, e, c) return query(1, "all", s, d, nil, 0, 0, t, i, e, c) end
+function L.RaycastAny(s, d, t, i, e, c) return query(2, "any", s, d, nil, 0, 0, t, i, e, c) end
+function L.SweepSphereClosest(s, d, r, t, i, e, c) return query(3, "one", s, d, nil, r, 0, t, i, e, c) end
+function L.SweepCapsuleClosest(s, d, r, h, t, i, e, c) return query(4, "one", s, d, nil, r, h, t, i, e, c) end
+function L.SweepBoxClosest(s, d, x, t, i, e, c) return query(5, "one", s, d, x, 0, 0, t, i, e, c) end
+function L.SweepSphereAll(s, d, r, t, i, e, c) return query(6, "all", s, d, nil, r, 0, t, i, e, c) end
+function L.SweepCapsuleAll(s, d, r, h, t, i, e, c) return query(7, "all", s, d, nil, r, h, t, i, e, c) end
+function L.SweepBoxAll(s, d, x, t, i, e, c) return query(8, "all", s, d, x, 0, 0, t, i, e, c) end
+function L.TestBox(p, x, t, i, e) return query(9, "all", p, nil, x, 0, 0, t, i, e, 0) end
+function L.TestSphere(p, r, t, i, e) return query(10, "all", p, nil, nil, r, 0, t, i, e, 0) end
+
+for _, name in ipairs({"GetHeightsAt", "GetTileDebugInfo", "GetEntitiesOnTile"}) do
   Ext.Level[name] = needs(
-    "Ext.Level." .. name .. " needs the level's physics scene, which "
-    .. "bg3le has not located")
+    "Ext.Level." .. name .. " needs the level's AI grid layout")
 end
 
 for _, name in ipairs({"FindPath", "BeginPathfinding",
