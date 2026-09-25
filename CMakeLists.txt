@@ -182,6 +182,7 @@ list(APPEND VENDOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stats_functors.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/loca.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/templates.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/level.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/prototypes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_sync.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/stat_create.cpp

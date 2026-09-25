@@ -289,6 +289,11 @@ component's declared size with the size the engine recorded, and
   only. This replaced a memory scan for template-shaped objects, which took
   seconds on the warming thread and could not say which manager a template
   was in
+- **`Ext.Level.GetLevelInfo` and `AddActivePersistentLevelTemplate`**, through
+  the same level manager, as upstream: the first reads the level data
+  manager's 512 levels live, and the second appends to the parent level's
+  `ActiveLevelTemplates`, in place while it has room and otherwise into a
+  fresh engine allocation. Like upstream, both exist only on the server
 - **Root templates read as upstream presents them.** Most of a template is
   `OverrideableProperty<T>` — a value and a flag saying whether this
   template overrides the one it inherits — and upstream presents each as a
@@ -574,12 +579,12 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **33 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **31 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 33 are
-  `Ext.Level`'s physics and pathfinding, 3 `Ext.StaticData`'s bank writes,
+  the source, because this one was stale at 86 for a while: 22 of the 31 are
+  `Ext.Level`'s physics, pathfinding, tiles and surface actions, 3 `Ext.StaticData`'s bank writes,
   2 `Ext.Stats`' functor execution, and 4 `Ext.Entity`'s
   `Create`, `Destroy`, `GetEntitiesOnTile` and `SetupTracing`.
   `reference/ext-api-surface.txt` lists them with their shapes. For the

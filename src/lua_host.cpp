@@ -4016,6 +4016,33 @@ int l_templates_in(lua_State* L) {
     return 2;
 }
 
+// Ext._Internal.LevelDataManager() -> address, or nothing
+extern "C" void* bg3le_level_data_manager();
+int l_level_data_manager(lua_State* L) {
+    void* at = bg3le_level_data_manager();
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+
+// Ext._Internal.LevelAddPersistentTemplate(parent, sub, instance) -> count, or nil and why
+extern "C" std::uint32_t bg3le_level_add_persistent_template(char const* parent,
+                                                              char const* subLevel,
+                                                              char const* instance,
+                                                              char const** why);
+int l_level_add_persistent_template(lua_State* L) {
+    char const* why = nullptr;
+    const std::uint32_t count = bg3le_level_add_persistent_template(
+        luaL_checkstring(L, 1), luaL_checkstring(L, 2), luaL_checkstring(L, 3), &why);
+    if (count == 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, why != nullptr ? why : "failed");
+        return 2;
+    }
+    lua_pushinteger(L, count);
+    return 1;
+}
+
 // Ext._Internal.TemplateIds() -> every template id
 int l_template_ids(lua_State* L) {
     const std::size_t count = bg3le_templates_count();
@@ -6493,6 +6520,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "TemplateFindIn");
     lua_pushcfunction(g_lua, l_templates_in);
     lua_setfield(g_lua, -2, "TemplatesIn");
+    lua_pushcfunction(g_lua, l_level_data_manager);
+    lua_setfield(g_lua, -2, "LevelDataManager");
+    lua_pushcfunction(g_lua, l_level_add_persistent_template);
+    lua_setfield(g_lua, -2, "LevelAddPersistentTemplate");
     lua_pushcfunction(g_lua, l_loca_get);
     lua_setfield(g_lua, -2, "Loca");
     lua_pushcfunction(g_lua, l_loca_keys);
@@ -13235,11 +13266,28 @@ for _, name in ipairs({"FindPath", "BeginPathfinding",
     "Ext.Level." .. name .. " needs the engine's pathfinder")
 end
 
-for _, name in ipairs({"CreateSurfaceAction", "ExecuteSurfaceAction",
-                       "AddActivePersistentLevelTemplate", "GetLevelInfo"}) do
-  Ext.Level[name] = needs(
-    "Ext.Level." .. name .. " needs the server level manager, which "
-    .. "bg3le has not located")
+-- Upstream's server-only four; the last two through the level manager.
+if not Ext._Internal.IsClientState() then
+  for _, name in ipairs({"CreateSurfaceAction", "ExecuteSurfaceAction"}) do
+    Ext.Level[name] = needs(
+      "Ext.Level." .. name .. " needs the engine's surface action factory")
+  end
+
+  function Ext.Level.GetLevelInfo(levelName)
+    local at = Ext._Internal.LevelDataManager()
+    if at == nil or type(levelName) ~= "string" then return nil end
+    return Ext._Internal.PointedObject(at, "LevelDataManager").Levels[levelName]
+  end
+
+  function Ext.Level.AddActivePersistentLevelTemplate(parentLevel, subLevelName, instanceId)
+    local count, why = Ext._Internal.LevelAddPersistentTemplate(
+      tostring(parentLevel), tostring(subLevelName), tostring(instanceId))
+    if count == nil then
+      Ext.Utils.PrintError("Tried to add persistent level to parent level '"
+        .. tostring(parentLevel) .. "': " .. why)
+    end
+    return count
+  end
 end
 
 -- ---- Ext.Server* and Ext.Client* ----
