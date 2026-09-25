@@ -391,6 +391,10 @@ component's declared size with the size the engine recorded, and
   object. Where Windows has an `SRWLOCK` the Linux engine has a glibc
   `pthread_rwlock_t`, 48 bytes wider, which is what put every field after
   one in the wrong place; bg3le's `SRWLOCK` is that type now
+- `Ext.StaticData.GetIconUVs`, `GetIconAtlas` and `GetTextureAtlasManager`,
+  upstream's reads of `ls::gTextureAtlasMap`: an icon's UVs, its atlas (path,
+  texture, sizes and every icon in it) and the whole map, 34 atlases and
+  6,406 icons
 - `Ext.StaticData.Get`/`GetAll` against the engine's GUID resource manager.
   It has no symbol, so it is found by fingerprint: the manager is one
   `HashMap<StaticDataTypeIndex, GuidResourceBankBase*>`, and a table whose
@@ -497,13 +501,13 @@ component's declared size with the size the engine recorded, and
 
 ## What is left
 
-- **55 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
+- **52 of `Ext.*` refuse rather than answer.** Every name bg3se exposes is
   present — `tools/api-coverage.lua` reports 715 of 715 — but the ones
   needing machinery bg3le does not have raise instead of returning a
   plausible wrong answer. `tools/count-refusals.py` derives the number from
-  the source, because this one was stale at 86 for a while: 24 of the 55 are
-  `Ext.Level`'s physics and pathfinding, 8 `Ext.StaticData`'s bank writes and
-  atlas, 7 `Ext.Stats`' creation and functor execution, 6
+  the source, because this one was stale at 86 for a while: 24 of the 52 are
+  `Ext.Level`'s physics and pathfinding, 5 `Ext.StaticData`'s bank writes
+  and source lists, 7 `Ext.Stats`' creation and functor execution, 6
   `Ext.Template`'s local and cache managers, and the rest are singles —
   `Entity.Create`/`Destroy`, `Types.Construct`, and `GlobalSwitches`, whose
   object is findable by its own language string and whose declared layout is

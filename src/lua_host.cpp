@@ -5351,6 +5351,26 @@ int l_boost_prototype(lua_State* L) {
     return 1;
 }
 
+extern "C" void* bg3le_texture_atlas_map();
+extern "C" void* bg3le_icon_atlas(char const* icon);
+extern "C" void* bg3le_icon_uvs(char const* icon);
+
+// Ext._Internal.TextureAtlasMap() / IconAtlas(icon) / IconUVs(icon) -> address
+int push_address_or_nothing(lua_State* L, void* at) {
+    if (at == nullptr) return 0;
+    lua_pushinteger(L, (lua_Integer)(std::uintptr_t)at);
+    return 1;
+}
+int l_texture_atlas_map(lua_State* L) {
+    return push_address_or_nothing(L, bg3le_texture_atlas_map());
+}
+int l_icon_atlas(lua_State* L) {
+    return push_address_or_nothing(L, bg3le_icon_atlas(luaL_checkstring(L, 1)));
+}
+int l_icon_uvs(lua_State* L) {
+    return push_address_or_nothing(L, bg3le_icon_uvs(luaL_checkstring(L, 1)));
+}
+
 // Ext._Internal.TakeComponentEvents()
 //   -> { { handle, component short name, "create" | "destroy" }, ... }
 int l_take_component_events(lua_State* L) {
@@ -5762,6 +5782,12 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "ComponentCallbacksProbe");
     lua_pushcfunction(g_lua, l_watch_component_events);
     lua_setfield(g_lua, -2, "WatchComponentEvents");
+    lua_pushcfunction(g_lua, l_texture_atlas_map);
+    lua_setfield(g_lua, -2, "TextureAtlasMap");
+    lua_pushcfunction(g_lua, l_icon_atlas);
+    lua_setfield(g_lua, -2, "IconAtlas");
+    lua_pushcfunction(g_lua, l_icon_uvs);
+    lua_setfield(g_lua, -2, "IconUVs");
     lua_pushcfunction(g_lua, l_boost_prototype);
     lua_setfield(g_lua, -2, "BoostPrototype");
     lua_pushcfunction(g_lua, l_resource_bank_get);
@@ -12117,10 +12143,22 @@ for _, name in ipairs({"ClearResourceBank", "SyncResourceBank", "Create"}) do
     .. "bg3le reads but does not modify")
 end
 
-for _, name in ipairs({"GetIconAtlas", "GetIconUVs", "GetTextureAtlasManager"}) do
-  Ext.StaticData[name] = needs(
-    "Ext.StaticData." .. name .. " needs the texture atlas manager, which "
-    .. "bg3le has not located")
+-- Upstream's reads of ls::gTextureAtlasMap; nil where upstream's would be.
+function Ext.StaticData.GetTextureAtlasManager()
+  local at = Ext._Internal.TextureAtlasMap()
+  return at and Ext._Internal.ReadObject(at, "TextureAtlasMap", "", {}) or nil
+end
+
+function Ext.StaticData.GetIconAtlas(icon)
+  if type(icon) ~= "string" then return nil end
+  local at = Ext._Internal.IconAtlas(icon)
+  return at and Ext._Internal.ReadObject(at, "TextureAtlas", "", {}) or nil
+end
+
+function Ext.StaticData.GetIconUVs(icon)
+  if type(icon) ~= "string" then return nil end
+  local at = Ext._Internal.IconUVs(icon)
+  return at and Ext._Internal.ReadObject(at, "UVValues", "", {}) or nil
 end
 
 Ext.StaticData.GetByModId = needs(

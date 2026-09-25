@@ -144,3 +144,29 @@ void extender_set_global_switches(void* engineSwitches) {
 }
 
 }  // namespace bg3le
+
+// Ext.StaticData's icon atlases, as upstream's GetTextureAtlasManager,
+// GetIconAtlas and GetIconUVs read ls::gTextureAtlasMap. Null when the map
+// is not up yet or the icon is not in it.
+namespace {
+bg3se::TextureAtlasMap* atlas_map() {
+    auto** slot = bg3se::gStaticSymbols != nullptr
+                      ? bg3se::gStaticSymbols->ls__gTextureAtlasMap : nullptr;
+    return slot != nullptr ? *slot : nullptr;
+}
+}  // namespace
+
+extern "C" void* bg3le_texture_atlas_map() { return atlas_map(); }
+
+extern "C" void* bg3le_icon_atlas(char const* icon) {
+    auto* map = atlas_map();
+    if (map == nullptr || icon == nullptr) return nullptr;
+    return map->IconMap.get_or_default(bg3se::FixedString(icon));
+}
+
+extern "C" void* bg3le_icon_uvs(char const* icon) {
+    auto* atlas = static_cast<bg3se::TextureAtlas*>(bg3le_icon_atlas(icon));
+    if (atlas == nullptr) return nullptr;
+    return atlas->Icons.get_or_default(bg3se::FixedString(icon));
+}
+
