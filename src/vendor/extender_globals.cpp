@@ -48,8 +48,38 @@
 
 #include "../hook.h"
 #include "../log.h"
+#include "../mem.h"
+#include <cstring>
 
 extern "C" bool bg3le_settings_flag(char const* key, bool fallback);
+
+// ls::ThreadRegistry::RequestThreadIndex, which this build inlines: the
+// index lives in a thread-local int at fs:-0x24d28, as the FixedString
+// lookup at image+0x2b82497 reads it (checked before use), and an engine
+// thread has one by the time it runs Lua. -1 for a thread without one; the
+// engine's own registration also installs a thread-exit hook, so bg3le does
+// not register threads itself.
+extern "C" int bg3le_engine_thread_index() {
+    static int usable = -1;
+    if (usable < 0) {
+        constexpr unsigned char kRead[] = {0x64, 0x44, 0x8b, 0x34, 0x25, 0xd8, 0xb2, 0xfd, 0xff};
+        unsigned char held[sizeof(kRead)] = {};
+        usable = bg3le::safe_read((void const*)(bg3le::load_bias() + 0x2b82497), held, sizeof(held))
+                     && std::memcmp(held, kRead, sizeof(kRead)) == 0;
+        if (!usable) bg3le::logf("threads: the thread-index read is not where this build has it");
+    }
+    if (!usable) return -1;
+    std::uintptr_t tp = 0;
+    __asm__("mov %%fs:0, %0" : "=r"(tp));
+    std::int32_t index = -1;
+    std::memcpy(&index, (void const*)(tp - 0x24d28), sizeof(index));
+    return index;
+}
+
+static std::uint32_t request_thread_index() {
+    const int index = bg3le_engine_thread_index();
+    return index < 0 ? 0 : (std::uint32_t)index;
+}
 
 namespace bg3le {
 
@@ -95,6 +125,7 @@ void extender_globals_init() {
     // Upstream's ToPath checks each entry, so one the engine has not filled
     // yet reads as unset rather than as garbage.
     constexpr std::uintptr_t kPathRoots = 0x7d9cd60;
+    bg3se::gStaticSymbols->ls__ThreadRegistry__RequestThreadIndex = &request_thread_index;
     bg3se::gStaticSymbols->ls__PathRoots =
         reinterpret_cast<bg3se::STDString**>(bg3le::load_bias() + kPathRoots);
 

@@ -131,6 +131,17 @@ void crash_handler(int sig, siginfo_t* info, void* context) {
             const auto pc = (std::uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
             const auto sp = (std::uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
             describe("pc", pc);
+            auto const& g = uc->uc_mcontext.gregs;
+            logf("crash:   rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx",
+                 (unsigned long long)g[REG_RAX], (unsigned long long)g[REG_RBX],
+                 (unsigned long long)g[REG_RCX], (unsigned long long)g[REG_RDX],
+                 (unsigned long long)g[REG_RSI], (unsigned long long)g[REG_RDI]);
+            logf("crash:   r8 %llx r9 %llx r10 %llx r11 %llx r12 %llx r13 %llx r14 %llx r15 %llx rbp %llx",
+                 (unsigned long long)g[REG_R8], (unsigned long long)g[REG_R9],
+                 (unsigned long long)g[REG_R10], (unsigned long long)g[REG_R11],
+                 (unsigned long long)g[REG_R12], (unsigned long long)g[REG_R13],
+                 (unsigned long long)g[REG_R14], (unsigned long long)g[REG_R15],
+                 (unsigned long long)g[REG_RBP]);
             for (int i = 0; i < 6; ++i) {
                 std::uintptr_t word = 0;
                 std::memcpy(&word, reinterpret_cast<void*>(sp + 8 * i), 8);

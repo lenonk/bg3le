@@ -17,6 +17,8 @@
 
 // Utils.h first: upstream relies on its own translation units pulling the
 // logging macros in before the Lua headers.
+#include <cstring>
+#include "../mem.h"
 #include <Extender/Shared/Utils.h>
 
 #include <GameDefinitions/EntitySystem.h>
@@ -942,5 +944,23 @@ extern "C" bool bg3le_system_probe(void* container, std::int32_t index, void** s
     *ownIndex = (std::int32_t)entry.SystemIndex0;
     *update = (void*)entry.UpdateProc;
     return true;
+}
+
+
+extern "C" int bg3le_engine_thread_index();
+
+// Upstream's Ext.Entity.Create and Destroy, through the calling thread's
+// entity command buffer as upstream's go. 0 / false when the thread has no
+// engine thread index, which would pick someone else's buffer.
+extern "C" std::uint64_t bg3le_entity_create(void* container) {
+    auto* world = bg3le::world_from_container(container);
+    if (world == nullptr || bg3le_engine_thread_index() < 0 || !bg3le_game_allocator_ready()) return 0;
+    return world->Deferred()->CreateEntityImmediate().Handle;
+}
+
+extern "C" bool bg3le_entity_destroy(void* container, std::uint64_t handle) {
+    auto* world = bg3le::world_from_container(container);
+    if (world == nullptr || bg3le_engine_thread_index() < 0 || !bg3le_game_allocator_ready()) return false;
+    return world->Deferred()->DestroyEntity(bg3se::EntityHandle{handle});
 }
 

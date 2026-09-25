@@ -4775,6 +4775,36 @@ int l_stats_attr_add(lua_State* L) {
     return 2;
 }
 
+// Ext._Internal.EntityCreate() -> handle, or nil and why
+extern "C" std::uint64_t bg3le_entity_create(void* container);
+extern "C" bool bg3le_entity_destroy(void* container, std::uint64_t handle);
+extern "C" int bg3le_engine_thread_index();
+int l_entity_create(lua_State* L) {
+    if (bg3le_engine_thread_index() < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "this thread has no engine thread index, so no command buffer of its own");
+        return 2;
+    }
+    const std::uint64_t handle = bg3le_entity_create(world_container());
+    if (handle == 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "the entity world is not available");
+        return 2;
+    }
+    lua_pushinteger(L, (lua_Integer)handle);
+    return 1;
+}
+
+// Ext._Internal.EntityDestroy(entity) -> boolean
+int l_entity_destroy(lua_State* L) {
+    std::uint64_t handle = 0;
+    if (!entity_proxy_handle(L, 1, &handle)) {
+        return luaL_error(L, "Ext.Entity.Destroy expects an entity");
+    }
+    lua_pushboolean(L, bg3le_entity_destroy(world_container(), handle));
+    return 1;
+}
+
 // Ext._Internal.StatSync(name) -> true, or nil and why
 extern "C" char const* bg3le_stats_sync(char const* name);
 int l_stat_sync(lua_State* L) {
@@ -6490,6 +6520,10 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatSync");
     lua_pushcfunction(g_lua, l_stats_create);
     lua_setfield(g_lua, -2, "StatsCreate");
+    lua_pushcfunction(g_lua, l_entity_create);
+    lua_setfield(g_lua, -2, "EntityCreate");
+    lua_pushcfunction(g_lua, l_entity_destroy);
+    lua_setfield(g_lua, -2, "EntityDestroy");
     lua_pushcfunction(g_lua, l_stats_enum_add);
     lua_setfield(g_lua, -2, "StatsEnumAdd");
     lua_pushcfunction(g_lua, l_stats_attr_add);
@@ -12892,10 +12926,17 @@ function Ext.Entity.GetEntitiesAroundPosition(position, radius)
 end
 Ext.Entity.GetEntitiesOnTile = needs(
   "Ext.Entity.GetEntitiesOnTile needs the level's tile grid")
+-- Upstream's Create allocates a handle through bg3se's own copy of the
+-- engine's per-thread handle generator. Tried here (Ext._Internal.EntityCreate):
+-- the entity is created and alive, but the calling thread's generator starts
+-- empty, bg3se's growth of it is not what this build's engine expects, and the
+-- engine regrows it with one page -- so destroying the entity faults in the
+-- engine. Refused until the engine's own allocation is called instead.
 Ext.Entity.Create = needs(
-  "Ext.Entity.Create needs the ECS entity allocator")
+  "Ext.Entity.Create needs the engine's own handle allocation; bg3se's "
+  .. "reimplementation of it does not match this build's generator")
 Ext.Entity.Destroy = needs(
-  "Ext.Entity.Destroy needs the ECS entity allocator")
+  "Ext.Entity.Destroy needs entities Ext.Entity.Create can make safely")
 Ext.Entity.SetupTracing = needs(
   "Ext.Entity.SetupTracing needs the ECS change journal")
 Ext.Entity.EnableTracing = Ext.Entity.SetupTracing
