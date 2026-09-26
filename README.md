@@ -75,9 +75,6 @@ structure was found, and what was measured, is in
 
 - Flatpak Steam is not supported by the installer yet: its sandbox cannot
   see `~/.local/share/bg3le`.
-- **Loading saves several times in one game run can crash.** Something
-  overwrites part of the engine's string table, and a later string lookup
-  crashes on it. Until it is found, restart the game every few loads.
 - Two deliberate differences: a `require` after a mod has finished loading
   still works (upstream errors), and `Ext.Enums` entries are labels rather
   than `EnumValue` objects.

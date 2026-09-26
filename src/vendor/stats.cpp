@@ -1165,6 +1165,25 @@ extern "C" std::size_t bg3le_stats_count() {
     return ready() ? state().Objects.Size : 0;
 }
 
+// Whether the stats are new since StatsLoaded last fired, and records them as
+// fired if so. Upstream fires it only when the engine loads stats; a save
+// load keeps them, and firing again let 5eSpells append to the same Boosts
+// on every load until one outgrew the string table. A reload re-creates
+// every Object, so the first one's address is the identity.
+extern "C" bool bg3le_stats_take_loaded(bool client) {
+    const CacheLock lock(stats_cache_lock());
+    if (!ready()) return false;
+    static void const* fired[2] = {nullptr, nullptr};  // per context
+    void const* first = object_at(0);
+    void const*& last = fired[client ? 1 : 0];
+    if (first == nullptr || first == last) return false;
+    if (last != nullptr) {
+        logf("stats: the engine rebuilt its stats (first object %p, was %p)", first, last);
+    }
+    last = first;
+    return true;
+}
+
 extern "C" void* bg3le_stats_at(std::size_t index) {
     const CacheLock lock(stats_cache_lock());
     return (void*)object_at(index);

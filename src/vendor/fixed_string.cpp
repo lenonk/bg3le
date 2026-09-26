@@ -41,6 +41,7 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <mutex>
 
 #include "../log.h"
 #include "cache_lock.h"
@@ -1053,6 +1054,101 @@ extern "C" void bg3le_fixed_string_pin(std::uint32_t index) {
     if (refs->load(std::memory_order_relaxed) < kInternRefCount) {
         refs->fetch_add(kInternRefCount, std::memory_order_relaxed);
     }
+}
+
+// The longest text the engine's table holds, or 0 if not known yet. Each
+// sub-table is a size class; past the last one the engine's CreateFromString
+// computes a sub-table that does not exist and crashes on what it reads.
+extern "C" std::size_t bg3le_fixed_string_max_length() {
+    static std::atomic<std::size_t> cached{0};
+    const std::size_t known = cached.load(std::memory_order_relaxed);
+    if (known != 0) return known;
+
+    void const* table = bg3le_string_table();
+    if (table == nullptr) return 0;
+    std::size_t longest = 0;
+    for (std::size_t i = 0; i < kSubTableCount; ++i) {
+        void const* st = sub_table(table, i);
+        if (read_at<std::int32_t>(st, offsetof(SubTable, TableIndex)) != (std::int32_t)i) break;
+        const auto entrySize = read_at<std::uint64_t>(st, offsetof(SubTable, EntrySize));
+        if (entrySize > sizeof(Header) + 1) longest = entrySize - sizeof(Header) - 1;
+    }
+    cached.store(longest, std::memory_order_relaxed);
+    return longest;
+}
+
+// Tripwire for a stray write into the sub-table headers
+// (BG3LE_STRTAB_TRIPWIRE=1): true the first time damage is seen, logged
+// with `where`. Legitimate bucket-array moves are logged but not damage.
+extern "C" bool bg3le_strtab_check(char const* where) {
+    struct Fields {
+        std::int32_t TableIndex;
+        std::uint64_t EntrySize;
+        std::uint32_t EntriesPerBucket;
+        std::uint32_t NumBuckets;
+        std::uint64_t Buckets;
+    };
+    static std::mutex mutex;
+    static Fields last[16];
+    static std::size_t count = 0;
+    static bool reported = false;
+    static void const* table = nullptr;
+
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (reported) return false;
+    if (table == nullptr) {
+        table = bg3le_string_table();
+        if (table == nullptr) return false;
+    }
+
+    auto read = [](void const* st) {
+        Fields f{};
+        f.TableIndex = read_at<std::int32_t>(st, offsetof(SubTable, TableIndex));
+        f.EntrySize = read_at<std::uint64_t>(st, offsetof(SubTable, EntrySize));
+        f.EntriesPerBucket = read_at<std::uint32_t>(st, offsetof(SubTable, EntriesPerBucket));
+        f.NumBuckets = read_at<std::uint32_t>(st, offsetof(SubTable, NumBuckets));
+        f.Buckets = read_at<std::uint64_t>(st, offsetof(SubTable, Buckets));
+        return f;
+    };
+
+    if (count == 0) {
+        while (count < 16) {
+            const Fields f = read(sub_table(table, count));
+            if (f.TableIndex != (std::int32_t)count) break;
+            last[count++] = f;
+        }
+        logf("strtab tripwire: armed over %zu sub-tables at %p", count, table);
+        return false;
+    }
+
+    for (std::size_t i = 0; i < count; ++i) {
+        const Fields f = read(sub_table(table, i));
+        const Fields& was = last[i];
+        const bool pointerOk = f.Buckets >= 0x10000 && f.Buckets < 0x800000000000ull
+                               && (f.Buckets & 7) == 0;
+        const bool damaged = f.TableIndex != (std::int32_t)i || !pointerOk
+                             || f.EntrySize != was.EntrySize
+                             || f.EntriesPerBucket != was.EntriesPerBucket
+                             || f.NumBuckets > 0x10000 || f.NumBuckets < was.NumBuckets;
+        if (damaged) {
+            logf("strtab tripwire: sub-table %zu damaged, seen at %s: index %d, entry size %#lx "
+                 "(was %#lx), per bucket %u (was %u), buckets %u (was %u), bucket array %#lx "
+                 "(was %#lx)",
+                 i, where, f.TableIndex, (unsigned long)f.EntrySize,
+                 (unsigned long)was.EntrySize, f.EntriesPerBucket, was.EntriesPerBucket,
+                 f.NumBuckets, was.NumBuckets, (unsigned long)f.Buckets,
+                 (unsigned long)was.Buckets);
+            reported = true;
+            return true;
+        }
+        if (f.Buckets != was.Buckets || f.NumBuckets != was.NumBuckets) {
+            logf("strtab tripwire: sub-table %zu grew at %s: buckets %u -> %u, array %#lx -> %#lx",
+                 i, where, was.NumBuckets, f.NumBuckets, (unsigned long)was.Buckets,
+                 (unsigned long)f.Buckets);
+        }
+        last[i] = f;
+    }
+    return false;
 }
 
 }  // namespace bg3le

@@ -4903,6 +4903,13 @@ int l_stats_count(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.StatsTakeLoaded() -> whether StatsLoaded is owed
+extern "C" bool bg3le_stats_take_loaded(bool client);
+int l_stats_take_loaded(lua_State* L) {
+    lua_pushboolean(L, bg3le_stats_take_loaded(in_client_state()) ? 1 : 0);
+    return 1;
+}
+
 // Ext._Internal.StatsNameAt(index) -> name
 int l_stats_name_at(lua_State* L) {
     const auto i = (std::size_t)luaL_checkinteger(L, 1);
@@ -7104,12 +7111,41 @@ void lua_init() {
     logf("lua: server and client contexts built");
 }
 
+// BG3LE_STRTAB_TRIPWIRE=1: the engine string table is checked after every C
+// function Lua calls, and the first damage is logged with the call and stack.
+extern "C" bool bg3le_strtab_check(char const* where);
+
+bool strtab_tripwire_on() {
+    static const bool on = std::getenv("BG3LE_STRTAB_TRIPWIRE") != nullptr;
+    return on;
+}
+
+void strtab_tripwire_hook(lua_State* L, lua_Debug* ar) {
+    if (ar->event != LUA_HOOKRET) return;
+    if (lua_getinfo(L, "nS", ar) == 0 || ar->what == nullptr || std::strcmp(ar->what, "C") != 0) {
+        return;
+    }
+    char where[160];
+    std::snprintf(where, sizeof(where), "return from C function %s (%s)",
+                  ar->name != nullptr ? ar->name : "?",
+                  L == g_client_lua ? "client" : "server");
+    if (bg3le_strtab_check(where)) {
+        luaL_traceback(L, L, "strtab tripwire: Lua stack", 0);
+        logf("%s", lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+}
+
 void build_state(bool client) {
     lua_State* L = luaL_newstate();
     if (L == nullptr) {
         logf("lua: luaL_newstate failed for the %s context",
              client ? "client" : "server");
         return;
+    }
+    if (strtab_tripwire_on()) {
+        bg3le_strtab_check("state build");
+        lua_sethook(L, strtab_tripwire_hook, LUA_MASKRET, 0);
     }
 
     // Recorded before the build, so anything the prelude asks about the
@@ -7511,6 +7547,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StatsRollConditions");
     lua_pushcfunction(g_lua, l_stat_origin);
     lua_setfield(g_lua, -2, "StatOrigin");
+    lua_pushcfunction(g_lua, l_stats_take_loaded);
+    lua_setfield(g_lua, -2, "StatsTakeLoaded");
     lua_pushcfunction(g_lua, l_stats_count);
     lua_setfield(g_lua, -2, "StatsCount");
     lua_pushcfunction(g_lua, l_stats_name_at);
@@ -12490,9 +12528,11 @@ local function stat_write(self, key, value, raw)
     end
     raw = Ext._Internal.StatsStringIntern(value)
     if raw == nil then
+      local shown = #value > 80 and (value:sub(1, 80) .. "...") or value
       error(string.format(
-        "bg3le could not give %q a string-table entry and a pool slot; see "
-        .. "the string table and stats lines in the extender log", value), 3)
+        "bg3le could not give %s's %d-character value %q a string-table entry "
+        .. "and a pool slot; see the strings and stats lines in the extender log",
+        key, #value, shown), 3)
     end
   else  -- condition
     if type(value) ~= "string" then
@@ -13869,7 +13909,11 @@ function Ext._Internal.LoadMods()
   -- After every mod's bootstrap, as upstream does: a mod subscribes in
   -- its bootstrap and expects to be called once everything is up.
   Ext._Internal.FireEvent("SessionLoaded")
-  if Ext.Stats.Get ~= nil and Ext._Internal.StatsCount() > 0 then
+  -- Only for stats the engine has loaded since the last one, as upstream
+  -- fires it from RPGStats::Load: a save load keeps the stats, and a mod's
+  -- stats pass run twice appends twice.
+  if Ext.Stats.Get ~= nil and Ext._Internal.StatsCount() > 0
+     and Ext._Internal.StatsTakeLoaded() then
     Ext._Internal.FireEvent("StatsLoaded")
   end
 end
@@ -15427,6 +15471,7 @@ extern "C" bool bg3le_with_client_lua(void (*fn)(lua_State*, void*), void* user)
 }
 
 void lua_tick() {
+    if (strtab_tripwire_on()) bg3le_strtab_check("server tick");
     if (g_reset_pending) {
         g_reset_pending = false;
         lua_reset(true);
@@ -15458,6 +15503,7 @@ void lua_tick() {
 bool story_ready();  // src/preload.cpp
 
 void lua_client_tick(char const* from, char const* to) {
+    if (strtab_tripwire_on()) bg3le_strtab_check("client tick");
     // Ext.Debug.Reset at the menu, where there is no server tick to do it:
     // the client's mods reload now, the server's with the next story.
     if (g_reset_pending && !story_ready()) {

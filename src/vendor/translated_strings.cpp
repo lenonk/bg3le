@@ -35,6 +35,7 @@
 extern "C" bool bg3le_game_allocator_ready();
 
 extern "C" bool bg3le_fixed_string_create(char const* text, std::uint32_t* out);
+extern "C" std::size_t bg3le_fixed_string_max_length();
 extern "C" void bg3le_fixed_string_pin(std::uint32_t index);
 extern "C" char const* bg3le_fixed_string(std::uint32_t index,
                                           std::uint32_t* length);
@@ -292,7 +293,18 @@ extern "C" bool bg3le_engine_strings_install() {
 // The reference is never released.
 extern "C" bool bg3le_fixed_string_create(char const* text, std::uint32_t* out) {
     if (g_create == nullptr || text == nullptr) return false;
-    const CreateView view{text, static_cast<std::uint32_t>(std::strlen(text))};
+    const std::size_t length = std::strlen(text);
+    // Past the largest size class the engine crashes rather than failing.
+    const std::size_t longest = bg3le_fixed_string_max_length();
+    if (longest != 0 && length > longest) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 8) {
+            logf("strings: refused a %zu-character FixedString; the engine holds at most %zu "
+                 "(\"%.60s...\")", length, longest, text);
+        }
+        return false;
+    }
+    const CreateView view{text, static_cast<std::uint32_t>(length)};
     *out = g_create(&view);
     return *out != 0xffffffffu;
 }
