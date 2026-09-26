@@ -432,6 +432,11 @@ std::unordered_map<std::string, DbEntry>& database() {
     return entries;
 }
 
+// Whether database() holds this story's function objects. Cleared whenever
+// it is replaced: a second story load brought back unbound entries while
+// this stayed set, and every story procedure read as missing.
+bool g_defs_bound = false;
+
 // Osiris' node list, which is what a story-defined function is actually
 // reached through: a procedure is run by inserting a tuple into its node,
 // not by calling the engine's dispatch.
@@ -1447,15 +1452,14 @@ std::uint64_t intern_string(char const* text, bool guid) {
 // walk still has to happen, just not during the level load. The first
 // call pays the ~0.4s; a session where no mod calls Osiris never does.
 bool bind_defs() {
-    static bool bound = false;
-    if (bound) return true;
+    if (g_defs_bound) return true;
 
     // The signature walk fills these in as it goes, so when it ran this
     // run there is nothing to do: walking a second time cost half a
     // second of the level load before this check existed.
     for (auto const& entry : database()) {
         if (entry.second.Def != 0) {
-            bound = true;
+            g_defs_bound = true;
             return true;
         }
     }
@@ -1498,7 +1502,7 @@ bool bind_defs() {
         if (it->second.Types.empty()) it->second.Types = entry.second.Types;
     }
 
-    bound = true;
+    g_defs_bound = true;
     logf("osiris: bound %zu function objects (%zu the cache did not have)",
          live.size(), added);
     return true;
@@ -1694,6 +1698,7 @@ bool load_cached_signatures(char const* story,
     if (hits == 0) return false;
 
     database() = std::move(loaded);
+    g_defs_bound = false;
     *applied = hits;
     logf("osiris: %zu signatures from %s, no walk needed", database().size(),
          path.c_str());
@@ -1816,6 +1821,7 @@ std::size_t load_out_param_counts(std::vector<Function>* functions,
 
     std::unordered_map<std::string, DbEntry>& by_name = database();
     by_name.clear();
+    g_defs_bound = false;
     g_visited = 0;
     for (std::size_t i = 0; i < kBuckets; ++i) {
         const std::uintptr_t slot = holder + 0x10 + i * kSlotStride;
