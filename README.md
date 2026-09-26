@@ -129,7 +129,7 @@ loaded inside the Steam runtime container cannot rely on host libraries.
 
 ## Running
 
-Build, exit Steam, and install:
+Build, then install:
 
     ./install.py              # or --dry-run to see what it would change
 
@@ -137,7 +137,8 @@ That copies the library, the console client and a launch wrapper into
 `~/.local/share/bg3le` and puts the wrapper in front of `%command%` in the
 game's Steam launch options, keeping whatever was there. The next launch from
 Steam loads bg3le. Steam has to be closed because it rewrites
-`localconfig.vdf` from memory when it exits; the original is kept beside it as
+`localconfig.vdf` from memory when it exits, so if it is running the installer
+asks before stopping it. The original is kept beside it as
 `localconfig.vdf.bg3le-backup`. `./install.py --uninstall` takes the wrapper
 back out and removes `~/.local/share/bg3le`. Running the installer again
 updates the library in place.

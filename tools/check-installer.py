@@ -88,8 +88,14 @@ for root in install.steam_roots():
     for path in install.local_configs(root):
         with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
             real = f.read()
-        text, old, new = install.set_launch_options(real, add)
-        back, _, _ = install.set_launch_options(text, install.remove_wrapper)
+        # Out and back in when bg3le is already installed there.
+        real_add = lambda o: install.add_wrapper(
+            o, os.path.join(install.data_home(), "bg3le", "bin", install.WRAPPER_NAME))
+        _, old, _ = install.set_launch_options(real, lambda o: o)
+        steps = ((install.remove_wrapper, real_add) if install.WRAPPER_NAME in old
+                 else (real_add, install.remove_wrapper))
+        text, _, _ = install.set_launch_options(real, steps[0])
+        back, _, _ = install.set_launch_options(text, steps[1])
         check("round trip leaves %s as it was" % os.path.basename(os.path.dirname(
             os.path.dirname(path))), back == real, True)
 

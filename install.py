@@ -4,7 +4,8 @@
 Copies the library, the console client and the launch wrapper into
 ~/.local/share/bg3le and adds the wrapper to the game's Steam launch options,
 so the next launch from Steam loads bg3le. Steam has to be closed: it rewrites
-localconfig.vdf from memory when it exits.
+localconfig.vdf from memory when it exits, so when it is running the installer
+asks before stopping it.
 
     ./install.py              install, or update an existing install
     ./install.py --uninstall  take the launch option out and remove ~/.local/share/bg3le
@@ -15,8 +16,10 @@ import argparse
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 
 APP_ID = "1086940"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -196,6 +199,47 @@ def steam_running():
         return False
 
 
+def stop_steam(roots):
+    """Asks Steam to exit the way `steam -shutdown` does; True once it has."""
+    cmd = None
+    for root in roots:
+        script = os.path.join(root, "steam.sh")
+        if os.access(script, os.X_OK):
+            cmd = [script, "-shutdown"]
+            break
+    if cmd is None and shutil.which("steam"):
+        cmd = ["steam", "-shutdown"]
+    if cmd is None:
+        return False
+    subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if not steam_running():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def ensure_steam_stopped(roots):
+    """False when Steam stays running; True if it was stopped here."""
+    print("Steam is running. It has to be closed first: it rewrites its config "
+          "when it exits, which would undo the change.")
+    if not sys.stdin.isatty():
+        sys.exit("install: exit Steam (Steam > Exit), then run this again.")
+    try:
+        answer = input("Stop Steam now? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "yes"):
+        sys.exit("install: nothing changed. Exit Steam, then run this again.")
+    print("Stopping Steam...")
+    if not stop_steam(roots):
+        sys.exit("install: Steam did not exit. Close it (Steam > Exit), then run "
+                 "this again.")
+    return True
+
+
 def flatpak_steam():
     return os.path.isdir(os.path.expanduser(
         "~/.var/app/com.valvesoftware.Steam/.local/share/Steam/userdata"))
@@ -268,9 +312,10 @@ def main():
     if not configs:
         sys.exit("install: no Steam user has a localconfig.vdf yet; start Steam once "
                  "and log in")
+    stopped = False
     if steam_running() and not args.dry_run:
-        sys.exit("install: Steam is running. Exit Steam (Steam > Exit), then run this "
-                 "again; Steam rewrites its config on exit and would undo the change.")
+        stopped = ensure_steam_stopped(roots)
+    restart = "\nSteam was stopped; start it again." if stopped else ""
 
     if args.uninstall:
         print("Steam launch options:")
@@ -279,7 +324,7 @@ def main():
         print("Removing %s" % target)
         if not args.dry_run:
             shutil.rmtree(target, ignore_errors=True)
-        print("bg3le removed." if not args.dry_run else "Dry run: nothing changed.")
+        print(("bg3le removed." + restart) if not args.dry_run else "Dry run: nothing changed.")
         return
 
     files = [
@@ -298,7 +343,7 @@ def main():
             copy_atomic(src, dst, mode)
     print("Steam launch options:")
     edit_configs(configs, lambda old: add_wrapper(old, wrapper), args.dry_run)
-    print("Done: the next launch from Steam loads bg3le." if not args.dry_run
+    print(("Done: the next launch from Steam loads bg3le." + restart) if not args.dry_run
           else "Dry run: nothing changed.")
 
 
