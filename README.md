@@ -73,7 +73,8 @@ structure was found, and what was measured, is in
 
 ## Known gaps
 
-- **No installer yet.** See [Running](#running).
+- Flatpak Steam is not supported by the installer yet: its sandbox cannot
+  see `~/.local/share/bg3le`.
 - Two deliberate differences: a `require` after a mod has finished loading
   still works (upstream errors), and `Ext.Enums` entries are labels rather
   than `EnumValue` objects.
@@ -128,15 +129,26 @@ loaded inside the Steam runtime container cannot rely on host libraries.
 
 ## Running
 
-**There is no install or launch story yet.** bg3le is a shared library that
-has to be loaded into `bin/bg3` before the engine starts, and arranging that
-is an unsolved problem, not a documented step. The native build ships only
-through Steam, so that is the one install it has to serve, ideally without the
-player editing launch options by hand. Until that exists, running it means
-knowing how to preload a library into a process inside the Steam runtime
-container.
+Build, exit Steam, and install:
 
-`run-native.sh` is the development harness rather than that story. It runs the
+    ./install.py              # or --dry-run to see what it would change
+
+That copies the library, the console client and a launch wrapper into
+`~/.local/share/bg3le` and puts the wrapper in front of `%command%` in the
+game's Steam launch options, keeping whatever was there. The next launch from
+Steam loads bg3le. Steam has to be closed because it rewrites
+`localconfig.vdf` from memory when it exits; the original is kept beside it as
+`localconfig.vdf.bg3le-backup`. `./install.py --uninstall` takes the wrapper
+back out and removes `~/.local/share/bg3le`. Running the installer again
+updates the library in place.
+
+The wrapper, `installer/bg3le-launch`, rewrites only the game's own argument
+in Steam's command, so the preload reaches `bin/bg3` inside the runtime
+container and nothing else in the chain. It records the last launch in
+`~/.local/share/bg3le/launch.log`; if bg3le does not appear, that says whether
+the wrapper found the game.
+
+`run-native.sh` is the development harness. It runs the
 game inside the Steam runtime container by default, and `SNIPER=0` runs it
 straight on the host — the native binary needs only `libssl.so.1.1` and
 `libcrypto.so.1.1`, which `compat-libs/` supplies. Running outside the
@@ -162,7 +174,7 @@ capture in `reference/` was taken against game `v4.73.98.727`, recorded in
 
 ## Contributing
 
-Patches welcome. Five checks want running before a pull request, all of which
+Patches welcome. Six checks want running before a pull request, all of which
 work without the game:
 
     ./tools/check-symbols.sh        # nothing references an undefined bg3le symbol
@@ -170,6 +182,7 @@ work without the game:
     python3 tools/check-views.py    # the container views, and JSON escaping
     python3 client/tools/check-output.py   # the console's terminal handling
     python3 client/tools/check-prompt.py   # prompt width against readline's idea of it
+    python3 tools/check-installer.py       # launch-option edits and the wrapper
 
 `check-symbols.sh` is the one that matters most: the library links with
 undefined symbols allowed, because it has to interpose the engine's own, so a

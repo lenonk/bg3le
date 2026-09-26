@@ -1,0 +1,45 @@
+#!/bin/sh
+# Steam launch-option wrapper installed by install.py:
+#   "<root>/bin/bg3le-launch" %command%
+#
+# Steam's command is the reaper, the runtime container's entry point and then
+# the game. Only the game's own argument is rewritten, to run this script
+# again inside the container with --inject, so the preload reaches bin/bg3
+# and nothing else in the chain (gamescope breaks with it, see run-native.sh).
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+
+if [ "$1" = "--inject" ]; then
+    shift
+    # Appended, so the Steam overlay's own preload stays.
+    LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$root/lib/libbg3le.so"
+    export LD_PRELOAD
+    exec "$@"
+fi
+
+found=
+for arg do
+    shift
+    if [ -z "$found" ]; then
+        case "$arg" in
+            */bin/bg3)
+                found=$arg
+                set -- "$@" "$root/bin/bg3le-launch" --inject "$arg"
+                continue
+                ;;
+        esac
+    fi
+    set -- "$@" "$arg"
+done
+
+# The last launch, for when bg3le does not appear.
+{
+    if [ -n "$found" ]; then
+        echo "bg3le: preloading into $found"
+    else
+        echo "bg3le: no bin/bg3 in the command, running it unchanged"
+    fi
+    printf '%s\n' "$@"
+} > "$root/launch.log" 2>/dev/null
+
+exec "$@"
