@@ -554,17 +554,34 @@ struct StringPool {
     std::uintptr_t Table = 0;  // what GetStr and AddStr want as `this`
     std::uintptr_t Records = 0;
     std::size_t Count = 0;
+    std::uintptr_t Slot = 0;   // libOsiris' global the table was found in
+    bool Indirect = false;     // the global holds Table rather than being it
 };
 
 StringPool g_strings;
 
+// The table as libOsiris' global holds it now. Keeping the address read at
+// the first search crashed AddStr after loading a second save.
+std::uintptr_t table_now() {
+    if (g_strings.Slot == 0) return 0;
+    std::uintptr_t table = g_strings.Slot;
+    if (g_strings.Indirect && (!peek(g_strings.Slot, &table) || table < 0x1000)) return 0;
+    if (table != g_strings.Table) {
+        logf("osiris: string table moved from %#lx to %#lx", (unsigned long)g_strings.Table,
+             (unsigned long)table);
+        g_strings.Table = table;
+    }
+    return table;
+}
+
 bool pool_now(std::uintptr_t* records, std::size_t* count) {
-    if (g_strings.Table == 0) return false;
+    const std::uintptr_t table = table_now();
+    if (table == 0) return false;
 
     std::uintptr_t object = 0;
     std::uintptr_t begin = 0;
     std::uintptr_t end = 0;
-    if (!peek(g_strings.Table, &object) || object < 0x1000) return false;
+    if (!peek(table, &object) || object < 0x1000) return false;
     if (!peek(object + kPoolRecords, &begin)) return false;
     if (!peek(object + kPoolRecordsEnd, &end)) return false;
     if (begin < 0x1000 || end <= begin) return false;
@@ -686,8 +703,11 @@ bool find_string_table() {
         if (peek(at, &indirect) && indirect >= 0x1000
             && pool_from(indirect, &found)) {
             g_strings = found;
+            g_strings.Slot = at;
+            g_strings.Indirect = true;
         } else if (pool_from(at, &found)) {
             g_strings = found;
+            g_strings.Slot = at;
         } else {
             continue;
         }
@@ -1434,7 +1454,12 @@ AddStrProc add_str() {
 }
 
 std::uint64_t intern_string(char const* text, bool guid) {
-    if (g_strings.Table == 0 || text == nullptr || text[0] == '\0') return 0;
+    if (text == nullptr || text[0] == '\0') return 0;
+
+    // A table whose record array does not read is not one to hand AddStr.
+    std::uintptr_t records = 0;
+    std::size_t count = 0;
+    if (!pool_now(&records, &count)) return 0;
 
     AddStrProc proc = add_str();
     if (proc == nullptr) return 0;
@@ -2349,7 +2374,7 @@ RemoveStrProc remove_str() {
 }
 
 void release_string(std::uint64_t handle) {
-    if (g_strings.Table == 0 || (handle & kStringIndexMask) == 0) return;
+    if (table_now() == 0 || (handle & kStringIndexMask) == 0) return;
 
     RemoveStrProc proc = remove_str();
     if (proc != nullptr) proc(reinterpret_cast<void*>(g_strings.Table), handle);
