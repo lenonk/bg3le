@@ -570,24 +570,32 @@ bool pool_now(std::uintptr_t* records, std::size_t* count) {
 }
 
 // A record's text: NUL-terminated printable ASCII. Osiris holds
-// identifiers and GUIDs, so this is a tight test, and it is only ever
-// applied to a few hundred records at once.
+// identifiers and GUIDs, so this is a tight test.
 bool record_text(std::uintptr_t at, std::string* out) {
     if (at < 0x1000) return false;
 
-    // One read of a fixed window rather than a byte at a time: a string
-    // that runs past it is not one of Osiris'.
-    char window[72] = {};
-    if (!peek(at, &window)) return false;
-
-    for (std::size_t i = 0; i < sizeof(window); ++i) {
-        const unsigned char c = (unsigned char)window[i];
-        if (c == 0) {
-            if (i == 0) return false;
-            if (out != nullptr) out->assign(window, i);
-            return true;
+    // Read in chunks that stop at page ends, so a short string near an
+    // unmapped page still reads. A 72-byte window used to drop every name
+    // of 72 characters or more, a tenth of DB_Dead.
+    constexpr std::size_t kMaxText = 1024;
+    std::string text;
+    while (text.size() < kMaxText) {
+        const std::uintptr_t cursor = at + text.size();
+        const std::size_t room = 4096 - (cursor & 4095);
+        char chunk[64] = {};
+        const std::size_t n = room < sizeof(chunk) ? room : sizeof(chunk);
+        if (!safe_read(reinterpret_cast<void const*>(cursor), chunk, n)) return false;
+        for (std::size_t i = 0; i < n; ++i) {
+            const unsigned char c = (unsigned char)chunk[i];
+            if (c == 0) {
+                if (text.empty() && i == 0) return false;
+                text.append(chunk, i);
+                if (out != nullptr) *out = std::move(text);
+                return true;
+            }
+            if (c < 0x20 || c > 0x7e) return false;
         }
-        if (c < 0x20 || c > 0x7e) return false;
+        text.append(chunk, n);
     }
     return false;
 }
@@ -2401,7 +2409,11 @@ bool encode_arg(char const* key, std::size_t i, std::uint16_t declared,
         const std::uint64_t handle = intern_string(
             arg.text.c_str(), base == kTypeGuidString);
         if (handle == 0) {
-            if (why != nullptr) *why = "a string argument could not be interned";
+            if (why != nullptr) {
+                *why = std::string("argument ") + std::to_string(i + 1) + " of " + key
+                       + (arg.text.empty() ? " is an empty string"
+                                           : " could not be interned");
+            }
             return false;
         }
         interned->push_back(handle);

@@ -845,6 +845,12 @@ int osi_dispatch(lua_State* L) {
             return 0;
         }
 
+        // The story has this form; it was the arguments that failed.
+        if (convertible && why != "no such story function") {
+            return luaL_error(L, "Osi.%s: the story's %d-argument form could not be called: %s",
+                              wanted, argc, why.c_str());
+        }
+
         std::string counts;
         for (const osi::Function* candidate : *group) {
             const int wants = expected_inputs(*candidate);
