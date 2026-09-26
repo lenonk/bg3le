@@ -270,6 +270,18 @@ def write_atomic(path, text):
     os.replace(tmp, path)
 
 
+def configs_need_edit(configs, transform):
+    for path in configs:
+        with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
+            text = f.read()
+        try:
+            if set_launch_options(text, transform)[0] != text:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
 def edit_configs(configs, transform, dry_run):
     for path in configs:
         with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
@@ -312,14 +324,17 @@ def main():
     if not configs:
         sys.exit("install: no Steam user has a localconfig.vdf yet; start Steam once "
                  "and log in")
+    transform = remove_wrapper if args.uninstall else (lambda old: add_wrapper(old, wrapper))
+    # Only a config edit needs Steam closed; updating the files does not.
     stopped = False
-    if steam_running() and not args.dry_run:
+    if (not args.dry_run and configs_need_edit(configs, transform)
+            and steam_running()):
         stopped = ensure_steam_stopped(roots)
     restart = "\nSteam was stopped; start it again." if stopped else ""
 
     if args.uninstall:
         print("Steam launch options:")
-        edit_configs(configs, remove_wrapper, args.dry_run)
+        edit_configs(configs, transform, args.dry_run)
         # The directory is bg3le's alone: the install plus its offset caches.
         print("Removing %s" % target)
         if not args.dry_run:
@@ -342,7 +357,7 @@ def main():
         if not args.dry_run:
             copy_atomic(src, dst, mode)
     print("Steam launch options:")
-    edit_configs(configs, lambda old: add_wrapper(old, wrapper), args.dry_run)
+    edit_configs(configs, transform, args.dry_run)
     print(("Done: the next launch from Steam loads bg3le." + restart) if not args.dry_run
           else "Dry run: nothing changed.")
 

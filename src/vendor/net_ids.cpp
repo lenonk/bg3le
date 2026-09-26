@@ -123,3 +123,20 @@ extern "C" bool bg3le_entity_net_id(void* container, std::uint64_t handle, bool 
     *out = id->Id;
     return true;
 }
+
+// Upstream's NetIdToEntity: the other map in the same authority or peer.
+extern "C" bool bg3le_net_id_entity(void* container, std::uint64_t netId, bool server,
+                                    std::uint64_t* out) {
+    using A = bg3se::ecs::EntityReplicationAuthority;
+    using P = bg3se::ecs::EntityReplicationPeer;
+    auto* world = static_cast<bg3se::ecs::EntityWorld*>(bg3le_entity_world(container));
+    NetMap const* forward = server ? server_map(world) : client_map(world);
+    if (forward == nullptr) return false;
+    auto const* at = reinterpret_cast<char const*>(forward);
+    at += server ? offsetof(A, NetIdToEntity) - offsetof(A, EntityToNetId)
+                 : offsetof(P, NetIdToEntity) - offsetof(P, EntityToNetId);
+    auto const* handle = reinterpret_cast<EntityMap const*>(at)->try_get(bg3se::NetId{netId});
+    if (handle == nullptr) return false;
+    *out = handle->Handle;
+    return true;
+}

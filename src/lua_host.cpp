@@ -2401,6 +2401,19 @@ int l_entity_net_id(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.NetIdEntity(netId) -> the entity's handle, or nil
+extern "C" bool bg3le_net_id_entity(void* container, std::uint64_t netId, bool server,
+                                    std::uint64_t* out);
+int l_net_id_entity(lua_State* L) {
+    std::uint64_t handle = 0;
+    if (!bg3le_net_id_entity(world_container(), static_cast<std::uint64_t>(luaL_checkinteger(L, 1)),
+                             !in_client_state(), &handle)) {
+        return 0;
+    }
+    lua_pushinteger(L, (lua_Integer)handle);
+    return 1;
+}
+
 // Ext._Internal.UiObject(what, playerId) -> address, class; upstream's
 // GetStateMachine, GetCursorControl, GetDragDrop and GetPickingHelper.
 extern "C" void* bg3le_ls_resource_manager();
@@ -7532,6 +7545,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "UiObject");
     lua_pushcfunction(g_lua, l_entity_net_id);
     lua_setfield(g_lua, -2, "EntityNetId");
+    lua_pushcfunction(g_lua, l_net_id_entity);
+    lua_setfield(g_lua, -2, "NetIdEntity");
     lua_pushcfunction(g_lua, l_entity_component_add);
     lua_setfield(g_lua, -2, "EntityComponentAdd");
     lua_pushcfunction(g_lua, l_entity_component_remove);
@@ -7850,10 +7865,6 @@ local function identity(v, meta)
   local id = meta and meta.__bg3leIdentity
   if type(id) == "function" then return id(v) end
   if id ~= nil then return id end
-  if type(v) == "userdata" then
-    local handle = Ext._Internal.EntityProxyHandle(v)
-    if handle ~= nil then return "e:" .. handle end
-  end
   return v
 end
 
@@ -7971,7 +7982,8 @@ local function stringify_proxy(v, meta, indent, depth, ctx, out)
       out[#out + 1] = '"*DEPTH LIMIT EXCEEDED*"'
       return
     end
-    if ctx.AvoidRecursion then
+    -- Entities are values upstream, never marked: one seen twice prints twice.
+    if ctx.AvoidRecursion and Ext._Internal.EntityProxyHandle(v) == nil then
       local id = identity(v, meta)
       if ctx.Seen[id] then out[#out + 1] = '"*RECURSION*"' return end
       ctx.Seen[id] = true
@@ -10260,7 +10272,7 @@ end
 function Ext.Utils.IntegerToHandle(i)
   i = math.tointeger(i)
   if i == nil or i == 0xFFC0000000000000 then return nil end
-  return Ext.Entity.Get(i)
+  return Ext._Internal.EntityOf(i)
 end
 
 -- Upstream's: compiles text (never binary) and returns the chunk, or nil
@@ -11777,7 +11789,7 @@ local function entity_value(handle)
   if type(handle) ~= "number" or handle == NULL_ENTITY_HANDLE then
     return nil
   end
-  return Ext.Entity.Get(handle)
+  return Ext._Internal.EntityOf(handle)
 end
 Ext._Internal.EntityValue = entity_value
 
@@ -11787,24 +11799,35 @@ Ext.Entity = {}
 -- compare equal by value even raw: an entity works as a table key.
 local entity_objects = setmetatable({}, {__mode = "v"})
 
--- Accepts a UUID string, as mods do, or a raw EntityHandle.
-function Ext.Entity.Get(id)
-  local handle
-  if type(id) == "string" then
-    handle = Ext._Internal.UuidToHandle(id)
-    if handle == nil then return nil end
-  elseif type(id) == "number" then
-    handle = id
-  else
-    return nil
-  end
-
+-- The entity for a raw handle, for bg3le's own callers.
+function Ext._Internal.EntityOf(handle)
   local entity = entity_objects[handle]
   if entity == nil then
     entity = Ext._Internal.NewEntityProxy(handle, entity_meta)
     entity_objects[handle] = entity
   end
   return entity
+end
+
+-- Upstream's: a UUID string, a NetId, or an entity.
+function Ext.Entity.Get(id)
+  local t = type(id)
+  if t == "nil" then return nil end
+  local handle
+  if t == "string" then
+    handle = Ext._Internal.UuidToHandle(id)
+  elseif t == "number" then
+    handle = Ext._Internal.NetIdEntity(id)
+  elseif t == "userdata" then
+    handle = Ext._Internal.EntityProxyHandle(id)
+  end
+  if handle == nil then
+    if t == "string" or t == "number" then return nil end
+    error("Expected entity GUID, network ID or entity handle, got "
+          .. Ext.Types.GetValueType(id), 2)
+  end
+  if handle == 0xFFC0000000000000 then return nil end
+  return Ext._Internal.EntityOf(handle)
 end
 
 -- ---- Ext.Mod ----
@@ -14324,7 +14347,7 @@ end
 -- the same query works.
 local function entities_from(handles)
   local out = {}
-  for i, handle in ipairs(handles) do out[i] = Ext.Entity.Get(handle) end
+  for i, handle in ipairs(handles) do out[i] = Ext._Internal.EntityOf(handle) end
   return out
 end
 
@@ -14354,7 +14377,7 @@ function Ext.Entity.GetAllEntitiesWithUuid()
   local out = {}
   for _, handle in ipairs(handles) do
     local uuid = Ext.Entity.HandleToUuid(handle)
-    if uuid ~= nil then out[uuid] = Ext.Entity.Get(handle) end
+    if uuid ~= nil then out[uuid] = Ext._Internal.EntityOf(handle) end
   end
   return out
 end
