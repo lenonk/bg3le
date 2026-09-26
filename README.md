@@ -25,7 +25,7 @@ component's declared size with the size the engine recorded, and
 
 bg3le implements the public `Ext` API of bg3se on the native build: every
 name upstream exposes is present (`tools/api-coverage.lua`), and
-`tools/count-refusals.py` finds one function that still refuses (see below).
+`tools/count-refusals.py` finds none that refuse.
 It is checked against output captured from the Windows extender
 (`reference/`) and against upstream's own Lua tests. How each engine
 structure was found, and what was measured, is in
@@ -74,13 +74,6 @@ structure was found, and what was measured, is in
 ## Known gaps
 
 - **No installer yet.** See [Running](#running).
-- `Ext.UI.GetStateMachine` refuses: the GameUI's state machine is not
-  located on this build.
-- UI commands and routed events are delivered on the client tick, so a
-  handler cannot set `Handled` on its event.
-- `Ext.Level.FindPath` refuses a path with `IgnoreEntities` or
-  `MovedEntities`, and a pooled path whose Larian `Function` members are set
-  is not reused.
 - Two deliberate differences: a `require` after a mod has finished loading
   still works (upstream errors), and `Ext.Enums` entries are labels rather
   than `EnumValue` objects.
@@ -137,10 +130,11 @@ loaded inside the Steam runtime container cannot rely on host libraries.
 
 **There is no install or launch story yet.** bg3le is a shared library that
 has to be loaded into `bin/bg3` before the engine starts, and arranging that
-is an unsolved problem, not a documented step. It needs to work for both Steam
-and non-Steam installs, and ideally without the player editing launch options
-by hand. Until that exists, running it means knowing how to preload a library
-into a process inside the Steam runtime container.
+is an unsolved problem, not a documented step. The native build ships only
+through Steam, so that is the one install it has to serve, ideally without the
+player editing launch options by hand. Until that exists, running it means
+knowing how to preload a library into a process inside the Steam runtime
+container.
 
 `run-native.sh` is the development harness rather than that story. It runs the
 game inside the Steam runtime container by default, and `SNIPER=0` runs it

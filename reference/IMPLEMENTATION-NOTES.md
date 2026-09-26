@@ -331,10 +331,12 @@ history since, and the README has the current summary.
   through the engine's own (`image+0x2646b30`, checked before use). From the
   host to a point 4m away both routes find the goal in 2 nodes, and bg3le's
   path fields match the engine's own path for the host. A path is a live
-  view, as upstream's proxy is. Two things are left out: a pooled path whose
-  Larian `Function` members are set is not taken, since resetting it would
-  mean destroying them, and `FindPath` refuses a path with `IgnoreEntities`
-  or `MovedEntities`, which the engine marks on the grid around the search
+  view, as upstream's proxy is. A path with `IgnoreEntities` or
+  `MovedEntities` runs through the grid's own step (`image+0x2c69970`), which
+  marks and unmarks them around the search, on a `Paths` list holding only
+  that path: ignoring the host and a golem, the goal is found in 5 nodes. A
+  pooled path is reset as upstream's `Reset` does, its `Function` members
+  cleared by their storage pointer
 - **`Ext.Level.CreateSurfaceAction` and `ExecuteSurfaceAction`**, through the
   engine's own surface action factory and `SurfaceManager::AddAction`, found
   where the `CreateSurface` Osiris calls use them (each checked by its
@@ -459,10 +461,15 @@ history since, and the README has the current summary.
   `GetProperty`/`SetProperty`, `Subscribe` and the rest, over the same class
   cache and value conversions; `RegisterType` and `Instantiate` build custom
   data contexts with upstream's own builder, and a `Command` property's
-  `SetHandler` runs when the button is pressed. Commands and routed events
-  are delivered on the client tick, so a handler cannot set `Handled` on its
-  event; `WriteCallback`, `GetStateMachine` and the picking, cursor and
-  drag-and-drop managers are not there yet
+  `SetHandler` runs when the button is pressed. A routed event runs its
+  handler inside Noesis's routing, on the UI thread under the client state's
+  lock as upstream's `LuaClientPin` does, so it can set `Handled`: a
+  tunnelling `PreviewMouseDown` handled on the root stops before the child.
+  `WriteCallback` runs on the tick. `GetStateMachine` is the `ls.StateMachine`
+  component, known by its vtable (`image+0x7a0dc28`) and held by the GameUI
+  the resource manager points at; it reads `RootState` "Root", `PlayerID` 1
+  and 13 states. The picking, cursor and drag-and-drop managers are found
+  among the executable's globals
 - **Sessions, as upstream has them**: when the client unloads a session --
   back to the main menu, or loading another save -- both Lua states are
   rebuilt; the client's mods reload as the menu finishes loading, and the
