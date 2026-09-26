@@ -12,7 +12,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LIB="${1:-$HERE/../build/libbg3le.so}"
 
-missing=$(nm -D --undefined-only "$LIB" | grep -E " U (bg3le|_ZN5bg3le)" || true)
+missing=$(nm -D --undefined-only "$LIB" | grep -E " U (bg3le|_ZN5bg3le|_Z[0-9]+bg3le)" || true)
 if [ -n "$missing" ]; then
     echo "undefined bg3le symbols in $LIB:" >&2
     echo "$missing" >&2

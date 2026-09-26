@@ -15,6 +15,7 @@
 // `nm -D --undefined-only libbg3le.so | grep Noesis` must print nothing.
 #define BG3LE_NOESIS_FUNCTIONS(X) \
     X(_ZN6Noesis10BaseObjectdlEPv) \
+    X(_ZN6Noesis9UIElement10RaiseEventERKNS_15RoutedEventArgsE) \
     X(_ZN6Noesis10BaseObjectnwEm) \
     X(_ZN6Noesis10BoxedValue18StaticGetClassTypeEPNS_7TypeTagIS0_EE) \
     X(_ZN6Noesis10Reflection12RegisterTypeENS_6SymbolEPFPNS_4TypeES1_EPFvS3_E) \

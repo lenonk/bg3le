@@ -427,6 +427,19 @@ instead of dereferencing the missing manager. The bridge,
 `src/vendor/bg3le_noesis_lua.inl`, is included at the end so it can use
 upstream's class cache and custom-type builder.
 
+**`GameDefinitions/UI.h` — `UIStateMachine` has a map and a set more.** On
+this build a 0x40-byte map follows `field_130_MHM_Guid_pState` and a 0x30-byte
+set follows `field_1D0_pState`, so every field from there on sat 0x70 early:
+`PlayerID` read 21512 and `RootState` nothing. With the two in, `RootState`
+reads "Root" and `PlayerID` 1, and each map and set after them lines up with
+the live object. `UIStateInstance` is re-laid out from thirty live instances:
+`State` at +0x20 (each names its own `UIState`), `PlayerID` and the flags at
++0x28, the three strings at +0x70, the GUIDs at +0xd0 and `StateWidgets` at
++0x100; the bytes between hold nothing the declaration names, so `States`,
+`field_40` and `field_44`, not found, sit where the memory reads empty.
+`src/vendor/ui_globals.cpp` asserts the offsets; checked by
+`tools/check-vendor-patches.py`.
+
 **`Lua/Libs/ClientUI/CustomProperties.inl` — a custom property's
 `WriteCallback` goes through bg3le's UI queue.** Upstream queues it on its
 client Lua state's `DeferredUIEvents`, which bg3le does not have. Under

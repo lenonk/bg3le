@@ -21,6 +21,8 @@
 #include "../log.h"
 #include "../mem.h"
 
+extern "C" bool bg3le_with_client_lua(void (*fn)(lua_State*, void*), void* user);
+
 namespace Noesis::bg3le_ui {
 
 namespace nsui = bg3se::ecl::lua::ui;
@@ -467,16 +469,55 @@ struct Subscription
 // as upstream's DummyDelegate does.
 std::vector<Subscription> g_subscriptions;
 
+struct NowCall
+{
+    Fired Event;
+    bool Handled{ false };
+};
+
+// Ext._Internal.UiEventNow(id, sender, event, source) -> Handled
+void call_now(lua_State* L, void* user)
+{
+    auto* call = static_cast<NowCall*>(user);
+    lua_getglobal(L, "Ext");
+    lua_getfield(L, -1, "_Internal");
+    lua_getfield(L, -1, "UiEventNow");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 3);
+        return;
+    }
+    lua_pushinteger(L, call->Event.Id);
+    push_object(L, call->Event.First.GetPtr());
+    lua_pushstring(L, call->Event.Event.c_str());
+    push_object(L, call->Event.Second.GetPtr());
+    if (lua_pcall(L, 4, 1, 0) != LUA_OK) {
+        ERR("Error while dispatching UI event: %s", lua_tostring(L, -1));
+    } else {
+        call->Handled = lua_toboolean(L, -1) != 0;
+    }
+    lua_pop(L, 3);
+}
+
 struct Relay
 {
     void Handler(BaseComponent* sender, const RoutedEventArgs& args)
     {
         const auto index = (std::size_t)(uintptr_t)this;
+        NowCall call;
+        {
+            std::lock_guard<std::mutex> held(g_lock);
+            if (index == 0 || index > g_subscriptions.size()) return;
+            auto const& sub = g_subscriptions[index - 1];
+            if (!sub.Active) return;
+            call.Event = Fired{ sub.Id, Ptr<BaseComponent>(sender), Ptr<BaseComponent>(args.source), sub.Name };
+        }
+        // The handler runs inside the routing, as upstream's does.
+        if (bg3le_with_client_lua(&call_now, &call)) {
+            if (call.Handled) args.handled = true;
+            return;
+        }
         std::lock_guard<std::mutex> held(g_lock);
-        if (index == 0 || index > g_subscriptions.size()) return;
-        auto const& sub = g_subscriptions[index - 1];
-        if (!sub.Active) return;
-        g_events.push_back(Fired{ sub.Id, Ptr<BaseComponent>(sender), Ptr<BaseComponent>(args.source), sub.Name });
+        g_events.push_back(std::move(call.Event));
     }
 };
 
@@ -857,6 +898,27 @@ int l_take_write(lua_State* L)
     return 3;
 }
 
+// UiRaiseEvent(element, event) -> handled; raises a routed event on the
+// element, sourced at it, through the game's own UIElement::RaiseEvent.
+int l_raise_event(lua_State* L)
+{
+    ensure_symbols();
+    auto target = require<UIElement>(L, 1, TypeOf<UIElement>(), "UIElement");
+    std::string name = luaL_checkstring(L, 2);
+    auto event = TypeHelpers::GetRoutedEvent(target->GetClassType(), bg3se::FixedString(name.c_str()));
+    if (event == nullptr) return luaL_error(L, "UI element %s has no event named '%s'",
+                                            target->GetClassType()->GetName(), name.c_str());
+    // RoutedEventArgs' constructor is not exported; it only sets these three.
+    alignas(RoutedEventArgs) unsigned char raw[sizeof(RoutedEventArgs)] = {};
+    auto* args = reinterpret_cast<RoutedEventArgs*>(raw);
+    args->source = target;
+    args->routedEvent = event;
+    args->handled = false;
+    target->RaiseEvent(*args);
+    lua_pushboolean(L, args->handled ? 1 : 0);
+    return 1;
+}
+
 // UiTakeEvent() -> id, sender, event name, source
 int l_take_event(lua_State* L)
 {
@@ -952,6 +1014,7 @@ extern "C" void bg3le_ui_register(lua_State* L)
         {"UiSubscribe", Noesis::bg3le_ui::l_subscribe},
         {"UiUnsubscribe", Noesis::bg3le_ui::l_unsubscribe},
         {"UiTakeEvent", Noesis::bg3le_ui::l_take_event},
+        {"UiRaiseEvent", Noesis::bg3le_ui::l_raise_event},
         {"UiTakeWrite", Noesis::bg3le_ui::l_take_write},
         {nullptr, nullptr}};
     luaL_setfuncs(L, functions, 0);

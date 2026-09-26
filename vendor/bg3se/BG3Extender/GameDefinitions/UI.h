@@ -487,11 +487,14 @@ struct UIWidget : public UserControl
 
 
 
+// bg3le: laid out as this build's live instances show it. State (+0x20)
+// names each instance's UIState, PlayerID reads 1, the strings, GUIDs and
+// StateWidgets sit where every instance has them. States, field_40 and
+// field_44 were not found and sit where the memory reads empty.
 struct UIStateInstance : public ProtectedGameObject<UIStateInstance>
 {
     Array<UIWidget*> Widgets;
     Array<UIWidgetMetadata*> WidgetMetadata;
-    Array<Array<UIStateInstance*>*> States;
     UIState* State;
     PlayerId PlayerID;
     uint8_t Flags;
@@ -500,13 +503,17 @@ struct UIStateInstance : public ProtectedGameObject<UIStateInstance>
     uint8_t Owner;
     uint8_t field_3E;
     uint8_t field_3F;
+    Array<Array<UIStateInstance*>*> States;
+    [[bg3::hidden]] uint64_t field_40_bg3le;
     FixedString field_40;
     int field_44;
+    [[bg3::hidden]] uint8_t field_50_bg3le[0x20];
     String field_48;
     String field_68;
     String TutorialLayer;
     Guid StateGuid;
     Guid field_B8;
+    [[bg3::hidden]] void* field_F0_bg3le[2];
     UIElementCollection* StateWidgets;
 };
 
@@ -529,9 +536,13 @@ struct UIStateMachine : public Noesis::BaseComponent
     HashMap<Guid, uint64_t> field_B0_MHM_Guid_pStateStack; // StateStack*
     HashMap<Guid, UIStateInstance*> field_F0_MHM_Guid_pState;
     HashMap<Guid, UIStateInstance*> field_130_MHM_Guid_pState;
+    // bg3le: this build has a map and a set more (+0x70 from here); RootState
+    // reads "Root" at +0x270 and PlayerID 1 at +0x470 once they are in.
+    [[bg3::hidden]] HashMap<Guid, void*> field_170_bg3le;
     HashSet<UIStateInstance*> field_170_MHS_pState;
     HashSet<void*> field_1A0_pStateStack; // StateStack*
     HashSet<UIStateInstance*> field_1D0_pState;
+    [[bg3::hidden]] HashSet<void*> field_240_bg3le;
     String RootState;
     BaseObservableCollection* States;
     HashMap<PlayerId, Array<Guid>> field_228_MHM_short_Guid;

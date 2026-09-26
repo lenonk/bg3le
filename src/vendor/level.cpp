@@ -421,16 +421,12 @@ extern "C" std::size_t bg3le_ai_heights_at(bool client, float x, float z, float*
 
 namespace {
 
-// A Function whose implementation pointer is set, which Reset would have to
-// destroy through Larian's own function object; such a path is not taken.
-bool has_function(void const* fn) {
-    void* impl = nullptr;
-    return bg3le::safe_read(fn, &impl, sizeof(impl)) && impl != nullptr;
-}
-
-// AiPath::Reset, but for its two Function members: a released path has
-// them empty already, and only such a path is taken.
+// Upstream's AiPath::Reset. Its `DestinationFunc = {}` only clears the
+// storage pointer, leaving what it held; this does the same.
 void reset_path(bg3se::AiPath& p) {
+    void* none = nullptr;
+    std::memcpy((void*)&p.DestinationFunc, &none, sizeof(none));
+    std::memcpy((void*)&p.WeightFunc, &none, sizeof(none));
     p.SearchStarted = false;
     p.SearchComplete = false;
     p.GoalFound = false;
@@ -498,7 +494,7 @@ extern "C" void* bg3le_ai_path_create(bool client, char const** why) {
     }
     bg3se::AiPath* path = nullptr;
     for (auto* p : grid->PathPool) {
-        if (!p->InUse && !has_function(&p->DestinationFunc) && !has_function(&p->WeightFunc)) {
+        if (!p->InUse) {
             path = p;
             break;
         }
@@ -569,6 +565,18 @@ constexpr unsigned char kPathSearchHead[] = {
     0x48, 0x8b, 0x46, 0x7c, 0x48, 0x89, 0x86, 0x48, 0x01, 0x00, 0x00};
 constexpr std::size_t kPathSearchHeadAt = 0x47;
 using PathSearchProc = bool (*)(bg3se::AiGrid*, bg3se::AiPath*);
+
+// The grid update's search step, image+0x2c69970 (grid): while its Paths
+// list is not empty, it marks the head path's moved and ignored entities on
+// the grid, searches, unmarks them, and pops the path once the search is
+// done. The only caller of the search above.
+constexpr std::uintptr_t kPathStep = 0x2c69970;
+constexpr unsigned char kPathStepHead[] = {
+    0xc7, 0x87, 0xbc, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x83, 0xbf, 0x0c, 0x01, 0x00, 0x00, 0x00};
+constexpr std::size_t kPathStepHeadAt = 0x0e;
+using PathStepProc = void (*)(bg3se::AiGrid*);
+static_assert(offsetof(bg3se::AiGrid, Paths) == 0x100);
 }  // namespace
 
 // Upstream's FindPathImmediate: 1 when the goal was found, 0 when not, and
@@ -592,11 +600,30 @@ extern "C" int bg3le_ai_path_search(bool client, void* at, char const** why) {
         *why = "no level loaded";
         return -1;
     }
-    // The grid's update marks these on the grid around the search; that
-    // part is not called, so a path that needs it is not searched.
+    // Ignored or moved entities are marked on the grid around the search,
+    // which only the grid's own step does: it runs on a Paths list holding
+    // just this path, the grid's own list put back afterwards.
     if (path->IgnoreEntities.size() != 0 || path->MovedEntities.size() != 0) {
-        *why = "a path with IgnoreEntities or MovedEntities needs the grid's entity marking";
-        return -1;
+        static const bool stepUsable = [] {
+            unsigned char held[sizeof(kPathStepHead)] = {};
+            return bg3le::safe_read((void const*)(bg3le::load_bias() + kPathStep + kPathStepHeadAt),
+                                    held, sizeof(held))
+                   && std::memcmp(held, kPathStepHead, sizeof(held)) == 0;
+        }();
+        if (!stepUsable) {
+            *why = "the grid's path step is not where this build has it";
+            return -1;
+        }
+        struct { bg3se::AiPath** Buf; std::uint32_t Cap; std::uint32_t Size; } list{}, saved{};
+        static_assert(sizeof(list) == sizeof(grid->Paths));
+        bg3se::AiPath* one[1] = {path};
+        std::memcpy(&saved, &grid->Paths, sizeof(saved));
+        list = {one, 1, 1};
+        std::memcpy((void*)&grid->Paths, &list, sizeof(list));
+        auto step = reinterpret_cast<PathStepProc>(bg3le::load_bias() + kPathStep);
+        for (int i = 0; i < 64 && grid->Paths.size() != 0; ++i) step(grid);
+        std::memcpy((void*)&grid->Paths, &saved, sizeof(saved));
+        return path->GoalFound ? 1 : 0;
     }
     reinterpret_cast<PathSearchProc>(bg3le::load_bias() + kPathSearch)(grid, path);
     return path->GoalFound ? 1 : 0;

@@ -2402,7 +2402,9 @@ int l_entity_net_id(lua_State* L) {
 }
 
 // Ext._Internal.UiObject(what, playerId) -> address, class; upstream's
-// GetCursorControl, GetDragDrop and GetPickingHelper.
+// GetStateMachine, GetCursorControl, GetDragDrop and GetPickingHelper.
+extern "C" void* bg3le_ls_resource_manager();
+extern "C" void* bg3le_ui_state_machine(void* resourceManager);
 extern "C" void* bg3le_cursor_control();
 extern "C" void* bg3le_drag_drop(void* container, std::uint16_t playerId);
 extern "C" void* bg3le_picking_helper(void* system, std::uint16_t playerIndex);
@@ -2415,7 +2417,10 @@ int l_ui_object(lua_State* L) {
     const auto player = (std::uint16_t)luaL_optinteger(L, 2, 1);
     void* at = nullptr;
     char const* cls = nullptr;
-    if (what == "CursorControl") {
+    if (what == "StateMachine") {
+        at = bg3le_ui_state_machine(bg3le_ls_resource_manager());
+        cls = "ui::UIStateMachine";
+    } else if (what == "CursorControl") {
         at = bg3le_cursor_control();
         cls = "ecl::CursorControl";
     } else if (what == "DragDrop") {
@@ -10414,6 +10419,11 @@ if Ext._Internal.IsClientState() then
     return value
   end
 
+  -- For checking event routing: raises a routed event on an element.
+  function Ext._Internal.UiRaise(element, event)
+    return I.UiRaiseEvent(unwrap(element), event)
+  end
+
   local function out(value)
     if type(value) == "userdata" then return wrap(value) end
     return value
@@ -10560,10 +10570,7 @@ if Ext._Internal.IsClientState() then
   function Ext.UI.EnableErrorReporting(enable) end
 
   -- Upstream's engine getters; nil where the object is not there.
-  function Ext.UI.GetStateMachine()
-    error("bg3le: Ext.UI.GetStateMachine needs the GameUI's state machine, which is not located on this build", 2)
-  end
-  for name, what in pairs({GetPickingHelper = "PickingHelper",
+  for name, what in pairs({GetStateMachine = "StateMachine", GetPickingHelper = "PickingHelper",
                            GetCursorControl = "CursorControl", GetDragDrop = "DragDrop"}) do
     Ext.UI[name] = function(player)
       local at, cls = I.UiObject(what, player)
@@ -10577,6 +10584,16 @@ if Ext._Internal.IsClientState() then
     if not ok then
       Ext.Log.PrintError("Error while dispatching UI event: " .. tostring(err))
     end
+  end
+
+  -- Upstream calls an event handler inside Noesis's routing, so it can set
+  -- Handled; so does bg3le, on the UI thread under the client state's lock.
+  function Ext._Internal.UiEventNow(id, sender, event, source)
+    local fn = handlers[id]
+    if fn == nil then return false end
+    local args = {RoutedEvent = event, Source = wrap(source), Handled = false}
+    call(fn, wrap(sender), args)
+    return args.Handled == true
   end
 
   function Ext._Internal.UiPump()
@@ -15370,6 +15387,15 @@ bool lua_persistent_vars_to_save(
 }
 
 std::atomic<bool> g_client_ticks_itself{false};
+
+// Runs fn in the client Lua state now, from any thread, under the state's
+// lock, as upstream's LuaClientPin does; false before the client ticks.
+extern "C" bool bg3le_with_client_lua(void (*fn)(lua_State*, void*), void* user) {
+    if (g_client_lua == nullptr || !g_client_ticks_itself.load()) return false;
+    InContext client(g_client_lua);
+    fn(g_lua, user);
+    return true;
+}
 
 void lua_tick() {
     if (g_reset_pending) {

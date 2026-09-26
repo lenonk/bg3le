@@ -1,9 +1,12 @@
-// Three of the objects upstream's Ext.UI getters return. None has a symbol here:
+// The objects upstream's Ext.UI getters return. None has a symbol here:
 // - ecl::gCursorControl: the global pointing at an object whose vtable is the
 //   one with the "CursorControl" name function (image+0x79ec2a0), whose
 //   destructor frees CursorName (+0x1c) and CursorOverrides (+0x30).
 // - ls::gDragDropManager: the global pointing at an object holding the client
 //   world just after its PlayerData map.
+// - the UI state machine: the ls.StateMachine Noesis component the GameUI
+//   (a pointer in ls::gGlobalResourceManager) holds, known by the vtable its
+//   registered creator (image+0x3f63d50) gives it.
 // - the picking helpers: ecl::PickingHelperManager's PlayerHelpers.
 // Layouts are bg3se's (by Norbyte and the bg3se contributors) -- thank you.
 
@@ -123,6 +126,61 @@ extern "C" void* bg3le_drag_drop(void* container, std::uint16_t playerId) {
     auto* manager = cached_global<bg3se::ecl::DragDropManager>(slot, searched, "ls::DragDropManager", &is_drag_drop);
     if (manager == nullptr || !small_refmap((char const*)&manager->PlayerData)) return nullptr;
     return manager->PlayerData.try_get(playerId);
+}
+
+static_assert(offsetof(bg3se::ui::UIStateMachine, RootState) == 0x270);
+static_assert(offsetof(bg3se::ui::UIStateMachine, PlayerID) == 0x470);
+static_assert(offsetof(bg3se::ui::UIStateInstance, State) == 0x20
+              && offsetof(bg3se::ui::UIStateInstance, field_48) == 0x70
+              && offsetof(bg3se::ui::UIStateInstance, StateGuid) == 0xd0
+              && offsetof(bg3se::ui::UIStateInstance, StateWidgets) == 0x100);
+
+namespace {
+constexpr std::uintptr_t kStateMachineVtable = 0x7a0dc28;
+
+bool in_image(std::uintptr_t v) {
+    const std::uintptr_t bias = bg3le::load_bias();
+    return v >= bias && v < bias + 0x8000000;
+}
+}  // namespace
+
+// Upstream's GetStateMachine: ResourceManager->UI->StateMachine.StateMachineComponent,
+// found by what it is rather than by bg3se's offsets, which drift here.
+extern "C" void* bg3le_ui_state_machine(void* resourceManager) {
+    static std::ptrdiff_t uiAt = -1, machineAt = -1;
+    auto const* mgr = static_cast<char const*>(resourceManager);
+    if (mgr == nullptr) return nullptr;
+    const std::uintptr_t want = bg3le::load_bias() + kStateMachineVtable;
+    auto machine_at = [want](char const* ui, std::ptrdiff_t at) -> void* {
+        char const* m = nullptr;
+        std::uintptr_t vt = 0;
+        return bg3le::safe_read(ui + at, &m, sizeof(m)) && m != nullptr
+                       && bg3le::safe_read(m, &vt, sizeof(vt)) && vt == want
+                   ? (void*)m : nullptr;
+    };
+    if (uiAt >= 0) {
+        char const* ui = nullptr;
+        if (bg3le::safe_read(mgr + uiAt, &ui, sizeof(ui)) && ui != nullptr) {
+            if (void* m = machine_at(ui, machineAt)) return m;
+        }
+    }
+    for (std::ptrdiff_t o = 0; o < 0x1000; o += 8) {
+        char const* ui = nullptr;
+        std::uintptr_t head = 0;
+        if (!bg3le::safe_read(mgr + o, &ui, sizeof(ui)) || ui == nullptr || in_image((std::uintptr_t)ui)
+            || !bg3le::safe_read(ui, &head, sizeof(head)) || !in_image(head)) {
+            continue;
+        }
+        for (std::ptrdiff_t q = 0; q < 0x2400; q += 8) {
+            if (void* m = machine_at(ui, q)) {
+                uiAt = o;
+                machineAt = q;
+                bg3le::logf("ui: state machine at ResourceManager+%#tx -> GameUI+%#tx", o, q);
+                return m;
+            }
+        }
+    }
+    return nullptr;
 }
 
 // Upstream's GetPickingHelper: PickingHelperManager's entry for the player.

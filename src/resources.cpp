@@ -234,3 +234,12 @@ extern "C" long bg3le_resource_bank_keys(std::uint32_t type, std::uint32_t* out,
     if (out != nullptr) std::memcpy(out, index->Keys.data(), n * sizeof(std::uint32_t));
     return (long)index->Keys.size();
 }
+
+// ls::gGlobalResourceManager's object, as upstream's GetStaticSymbols reads it.
+extern "C" void* bg3le_ls_resource_manager() {
+    const std::lock_guard<std::mutex> held(bg3le::lock());
+    bg3le::current_bank();
+    std::uintptr_t mgr = 0;
+    if (bg3le::g_global == 0 || !bg3le::peek(bg3le::g_global, &mgr)) return nullptr;
+    return (void*)mgr;
+}

@@ -24,6 +24,10 @@ def grep_count(pattern, flags=0):
 CHECKS = [
     ("EntityHandleGenerator keeps ThreadStates at +0",
      lambda: "ThreadStates at +0x40 rather than +0" in text("BG3Extender/GameDefinitions/EntitySystem.h")),
+    ("UIStateMachine has this build's extra map and set",
+     lambda: "field_170_bg3le" in text("BG3Extender/GameDefinitions/UI.h")
+             and "field_240_bg3le" in text("BG3Extender/GameDefinitions/UI.h")
+             and "field_F0_bg3le" in text("BG3Extender/GameDefinitions/UI.h")),
     ("custom property WriteCallback goes through bg3le's UI queue",
      lambda: "bg3le_ui_property_written(ptr, this->GetName().Str())" in text("BG3Extender/Lua/Libs/ClientUI/CustomProperties.inl")),
     ("ModifierList::Name in the manager's tail padding",
