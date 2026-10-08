@@ -303,7 +303,10 @@ builds against that header alone. The host table it receives offers:
 - `sdl_function`: SDL's own functions by name, which a `dlopen()`ed library
   can't reach with `dlsym(RTLD_NEXT)`;
 - `add_setting`: a bool, int or float of the plugin's, readable and writable
-  from Lua.
+  from Lua;
+- `add_frame_handler`: a call once per client frame on the client's game
+  thread, after the engine's update, with the seconds since the last frame.
+  It is newer than v0.3.4, so a plugin checks `host->size` covers it first.
 
 Settings persist in `<plugin>.settings.json` beside the plugin. bg3le
 rewrites it, listing every setting, each time the plugin starts and whenever

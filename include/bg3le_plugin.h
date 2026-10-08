@@ -37,6 +37,11 @@ typedef enum bg3le_setting_type {
  * Return nonzero to keep it from the game. Runs on the game's main thread. */
 typedef int (*bg3le_event_handler)(void* user, SDL_Event* event);
 
+/* Once per client frame, on the client's game thread (not the main thread),
+ * after the engine's update and the client's Lua Tick. dt is the seconds since
+ * the previous frame. */
+typedef void (*bg3le_frame_handler)(void* user, double dt);
+
 typedef struct bg3le_host {
     uint32_t abi;          /* BG3LE_PLUGIN_ABI of this bg3le */
     uint32_t size;         /* sizeof(bg3le_host): fields past it don't exist */
@@ -63,6 +68,10 @@ typedef struct bg3le_host {
      * clamped to [min, max] for numbers when min < max. 0 on success. */
     int (*add_setting)(bg3le_plugin* self, const char* id, bg3le_setting_type type,
                        void* value, double min, double max);
+
+    /* Called once per client frame. Only from bg3le_plugin_init; 0 on success.
+     * Added after v0.3.4: check host->size covers it before calling. */
+    int (*add_frame_handler)(bg3le_plugin* self, bg3le_frame_handler handler, void* user);
 } bg3le_host;
 
 /* Exported by every plugin. Return 0 on success. Anything else reports it as

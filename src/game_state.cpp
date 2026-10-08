@@ -33,6 +33,7 @@ namespace bg3le {
 
 void translated_string_show_version(char const* suffix);
 bool note_session_ended();
+void plugins_dispatch_frame();  // src/plugins.cpp
 
 namespace {
 
@@ -140,6 +141,7 @@ std::uint64_t machine_update_hook(void* machine, void* a, void* b, void* c) {
         if (now != nullptr) last = now;
         lua_client_tick(nullptr, nullptr);
     }
+    plugins_dispatch_frame();
     return result;
 }
 

@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -60,6 +62,15 @@ struct Handler {
 };
 // Added during loading and only read afterwards, both on the main thread.
 std::vector<Handler> g_handlers;
+struct FrameHandler {
+    bg3le_plugin* owner;
+    bg3le_frame_handler fn;
+    void* user;
+};
+// Added during loading on the main thread; read on the client's game thread
+// once g_frames_ready publishes them.
+std::vector<FrameHandler> g_frame_handlers;
+std::atomic<bool> g_frames_ready{false};
 
 std::string plugins_dir() {
     if (const char* dir = std::getenv("BG3LE_PLUGINS_DIR")) return dir;
@@ -190,6 +201,13 @@ int host_add_event_handler(bg3le_plugin* self, bg3le_event_handler fn, void* use
     return 0;
 }
 
+int host_add_frame_handler(bg3le_plugin* self, bg3le_frame_handler fn, void* user) {
+    // The client thread reads the list without a lock once loading is done.
+    if (fn == nullptr || g_frames_ready.load(std::memory_order_acquire)) return -1;
+    g_frame_handlers.push_back({self, fn, user});
+    return 0;
+}
+
 // From bg3le's own object, so RTLD_NEXT is SDL's real function, past ours.
 void* host_sdl_function(const char* name) {
     if (void* next = ::dlsym(RTLD_NEXT, name)) return next;
@@ -223,6 +241,7 @@ const bg3le_host g_host = {
     host_add_event_handler,
     host_sdl_function,
     host_add_setting,
+    host_add_frame_handler,
 };
 
 bg3le_plugin* find_plugin(const char* name) {
@@ -246,6 +265,10 @@ void plugins_load() {
     static bool done = false;
     if (done) return;
     done = true;
+    // However loading ends, frame handlers are then published and closed.
+    struct Publish {
+        ~Publish() { g_frames_ready.store(true, std::memory_order_release); }
+    } publish;
 
     const std::string dir = plugins_dir();
     DIR* d = dir.empty() ? nullptr : ::opendir(dir.c_str());
@@ -292,6 +315,9 @@ void plugins_load() {
             g_handlers.erase(std::remove_if(g_handlers.begin(), g_handlers.end(),
                                             [p](Handler const& h) { return h.owner == p; }),
                              g_handlers.end());
+            g_frame_handlers.erase(std::remove_if(g_frame_handlers.begin(), g_frame_handlers.end(),
+                                                  [p](FrameHandler const& h) { return h.owner == p; }),
+                                   g_frame_handlers.end());
             statusf("WARNING: plugin %s failed to start (%s)", p->name.c_str(), p->error.c_str());
             continue;
         }
@@ -315,6 +341,16 @@ bool plugins_dispatch_event(SDL_Event* event) {
         if (h.fn(h.user, event) != 0) return true;
     }
     return false;
+}
+
+// Once per client frame, on the client's game thread.
+void plugins_dispatch_frame() {
+    if (!g_frames_ready.load(std::memory_order_acquire) || g_frame_handlers.empty()) return;
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const double dt = std::chrono::duration<double>(now - last).count();
+    last = now;
+    for (FrameHandler const& h : g_frame_handlers) h.fn(h.user, dt);
 }
 
 }  // namespace bg3le
