@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.5 (2026-10-08)
+
+- A string, number or boolean assigned to a Noesis object property, such as `widget.Tag = "Test1"`, is boxed as the
+  game boxes it and reads back as assigned. It failed with "expected a Noesis object" (bg3se issue #603).
+- The ImGui overlay keeps one descriptor pool and sampler per device instead of leaking one of each every time the
+  window is resized. Binding and unbinding a texture take the overlay's lock, so neither reaches the ImGui backend
+  while the overlay is being rebuilt (bg3se issue #597).
+- Plugins can register a frame handler with `add_frame_handler`: called once per client frame, on the client's game
+  thread, with the seconds since the previous frame. It is a new field at the end of `bg3le_host`, so the ABI stays 1;
+  check `host->size` before using it.
+
 ## v0.3.4 (2026-10-07)
 
 - `esv::Item::CreateCacheTemplate` works, as upstream's: the item's template is cloned into the server's cache,
