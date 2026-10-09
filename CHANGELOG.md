@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.8 (2026-10-09)
+
+- Reading a property a Noesis object does not have logs "Object X has no property named 'Y'" and returns `nil`,
+  as upstream does, instead of raising an error that ended the calling script. Writing one only logs too.
+
 ## v0.3.7 (2026-10-09)
 
 - A Noesis collection reached from Lua, such as an element's `Children` or a view model's list, indexes from 1,
