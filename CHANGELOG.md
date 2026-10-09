@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.7 (2026-10-09)
+
+- A Noesis collection reached from Lua, such as an element's `Children` or a view model's list, indexes from 1,
+  takes `#` and walks with `ipairs` and `pairs`, as upstream's array proxy does. Indexing one failed with "Object
+  UIElementCollection has no property named '1'", which broke Dice Roulette on every roll.
+
 ## v0.3.6 (2026-10-08)
 
 - `Ext.Template` reads the right templates after loading a save with a different mod list. That load makes the
