@@ -1,6 +1,7 @@
 // The templates Ext.Template reads, from the engine's own managers.
 //
-// Root templates come from the GlobalTemplateManager's bank, walked once.
+// Root templates come from the GlobalTemplateManager's bank, walked once per
+// client module load: the engine frees and rebuilds them when it reloads.
 // The server's others -- esv::CacheTemplateManager, and the current level's
 // LocalTemplateManager and CacheTemplateManager -- are read live on every
 // call, under the lock the engine takes, as upstream's ServerTemplate.inl
@@ -295,15 +296,17 @@ bool build_from_manager(Templates* out) {
     return true;
 }
 
-// The root templates, from the manager: cheap, so any thread may ask, and
-// a failure is retried a few seconds later rather than on every call.
+// When the last walk failed, so it is retried a few seconds later rather than
+// on every call. Under templates_lock.
+std::time_t g_last_attempt = 0;
+
+// The root templates, from the manager: cheap, so any thread may ask.
 // Called with templates_lock held.
 bool root_ready() {
     if (state().Built) return true;
-    static std::time_t lastAttempt = 0;
     const std::time_t now = std::time(nullptr);
-    if (lastAttempt != 0 && now - lastAttempt < 3) return false;
-    lastAttempt = now;
+    if (g_last_attempt != 0 && now - g_last_attempt < 3) return false;
+    g_last_attempt = now;
 
     Templates found{};
     if (!build_from_manager(&found)) return false;
@@ -523,17 +526,30 @@ extern "C" bool bg3le_templates_ready() {
     return root_ready();
 }
 
+// The client is unloading or has loaded its modules: every address walked
+// before is the engine's to free, so the next read walks again.
+extern "C" void bg3le_templates_invalidate() {
+    const std::lock_guard<std::mutex> held(templates_lock());
+    g_last_attempt = 0;
+    if (!state().Built) return;
+    state() = Templates{};
+    logf("templates: the client's modules are reloading; root templates will be read again");
+}
+
 extern "C" std::size_t bg3le_templates_count() {
     const std::lock_guard<std::mutex> held(templates_lock());
     root_ready();
     return state().Order.size();
 }
 
+// Copied out under the lock: an invalidation would free the index's own.
 extern "C" char const* bg3le_templates_id_at(std::size_t index) {
+    thread_local std::string copy;
     const std::lock_guard<std::mutex> held(templates_lock());
     root_ready();
     if (index >= state().Order.size()) return nullptr;
-    return state().Order[index].c_str();
+    copy = state().Order[index];
+    return copy.c_str();
 }
 
 extern "C" void* bg3le_templates_find(char const* id) {
@@ -548,11 +564,13 @@ extern "C" void* bg3le_templates_find(char const* id) {
 // on, from the class's static FixedString.
 extern "C" char const* bg3le_templates_type(char const* id) {
     if (id == nullptr) return nullptr;
+    thread_local std::string copy;
     const std::lock_guard<std::mutex> held(templates_lock());
     root_ready();
     Found const* found = lookup(id);
     if (found == nullptr || found->Type.empty()) return nullptr;
-    return found->Type.c_str();
+    copy = found->Type;
+    return copy.c_str();
 }
 
 // The server's esv::CacheTemplateManager, checked by content, or null.

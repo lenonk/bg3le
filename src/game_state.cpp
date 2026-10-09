@@ -25,6 +25,7 @@
 #include "stackdump.h"
 
 extern "C" void bg3le_stats_module_loaded();
+extern "C" void bg3le_templates_invalidate();
 extern "C" void bg3le_stats_load_hooked();
 extern "C" void bg3le_stats_loading(bool loading);
 #include "targets.h"
@@ -129,7 +130,12 @@ std::uint64_t machine_update_hook(void* machine, void* a, void* b, void* c) {
             logf("gamestate: session unloaded; rebuilding the Lua states");
             lua_reset(false);
         }
-        if (std::strcmp(last, "LoadModule") == 0) bg3le_stats_module_loaded();
+        if (std::strcmp(last, "LoadModule") == 0) {
+            bg3le_stats_module_loaded();
+            bg3le_templates_invalidate();
+        }
+        // The engine frees its root templates from here until the load is done.
+        if (std::strcmp(now, "UnloadModule") == 0) bg3le_templates_invalidate();
         if (std::strcmp(last, "LoadMenu") == 0) {
             show_version_number();
             lua_load_client_scripts();
