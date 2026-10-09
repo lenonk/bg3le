@@ -512,24 +512,27 @@ bool osi_is_builtin(osi::Function const& fn) {
 }
 
 void osi_helpers_for(osi::Function const& fn, std::string* out) {
-    // Which trailing parameters the engine fills in. Unknown means none, the
-    // same reading the call path takes.
+    // Which parameters the engine fills in. Unknown means none, the same
+    // reading the call path takes.
     const std::size_t total = fn.params.size();
     const std::size_t outs =
         fn.out_params >= 0 ? std::min((std::size_t)fn.out_params, total) : 0;
     const std::size_t ins = total - outs;
 
     std::string comment;
-    for (std::size_t i = 0; i < ins; ++i) {
+    std::size_t arg = 0;
+    for (std::size_t i = 0; i < total; ++i) {
+        if (fn.is_output(i, ins)) continue;
         comment += "--- @param arg";
-        comment += std::to_string(i + 1);
+        comment += std::to_string(++arg);
         comment += " ";
         comment += osi_lua_type(fn.params[i]);
         comment += "\r\n";
     }
 
     if (outs > 0) {
-        for (std::size_t i = ins; i < total; ++i) {
+        for (std::size_t i = 0; i < total; ++i) {
+            if (!fn.is_output(i, ins)) continue;
             comment += "--- @return ";
             comment += osi_lua_type(fn.params[i]);
             comment += "\r\n";

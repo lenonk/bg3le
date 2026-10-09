@@ -311,8 +311,10 @@ struct Block {
     }
 };
 
-// Bitmask is MSB-first within each byte, as bg3se's isOutParam does.
-int count_out_params(std::uintptr_t bits, std::uint32_t bytes) {
+// How many parameters are outputs, and which (bit i for parameter i). The
+// signature's bitmask is MSB-first within each byte, as bg3se's isOutParam does.
+int read_out_params(std::uintptr_t bits, std::uint32_t bytes, std::uint64_t* which) {
+    *which = 0;
     if (bits == 0 || bytes == 0 || bytes > 64) return 0;
 
     unsigned char mask[64] = {};
@@ -321,8 +323,10 @@ int count_out_params(std::uintptr_t bits, std::uint32_t bytes) {
     }
 
     int total = 0;
-    for (std::uint32_t i = 0; i < bytes; ++i) {
-        total += __builtin_popcount(mask[i]);
+    for (std::uint32_t i = 0; i < bytes * 8; ++i) {
+        if ((mask[i / 8] & (0x80 >> (i % 8))) == 0) continue;
+        ++total;
+        if (i < 64) *which |= std::uint64_t{1} << i;
     }
     return total;
 }
@@ -403,6 +407,7 @@ bool parse_osi_string(unsigned char const* bytes, std::string* out) {
 // What the walk keeps about one function in Osiris' own database.
 struct DbEntry {
     int Outs = -1;
+    std::uint64_t OutMask = 0;  // which parameters, as Function::out_mask
     std::uintptr_t Def = 0;  // the Function object behind the tree node
     std::vector<std::uint8_t> Types;
 };
@@ -490,12 +495,13 @@ void visit_tree(std::uintptr_t bucket,
             if (signature >= 0x1000) {
                 const Block<0x28> sig(signature);
                 if (sig.Ok) {
-                    const int outs = count_out_params(
+                    std::uint64_t which = 0;
+                    const int outs = read_out_params(
                         sig.at<std::uintptr_t>(0x18),
-                        sig.at<std::uint32_t>(0x20));
+                        sig.at<std::uint32_t>(0x20), &which);
                     if (outs >= 0) {
                         (*out)[key] = DbEntry{
-                            outs, def,
+                            outs, which, def,
                             read_param_types(sig.at<std::uintptr_t>(0x10))};
                     }
                 }
@@ -1751,7 +1757,10 @@ std::string cache_path(char const* story) {
     return std::string(home) + "/.local/share/bg3le/osiris-" + safe + ".txt";
 }
 
-// name/arity outs type,type,...
+// A store without this line predates out masks, and is walked again.
+constexpr char kStoreFormat[] = "# format 2\n";
+
+// name/arity outs outmask type,type,...
 bool load_cached_signatures(char const* story,
                             std::vector<Function>* functions,
                             std::size_t* applied) {
@@ -1763,6 +1772,12 @@ bool load_cached_signatures(char const* story,
 
     std::unordered_map<std::string, DbEntry> loaded;
     char line[1024];
+    if (std::fgets(line, sizeof(line), f) == nullptr
+        || std::strcmp(line, kStoreFormat) != 0) {
+        std::fclose(f);
+        logf("osiris: %s is from an older bg3le; walking again", path.c_str());
+        return false;
+    }
     while (std::fgets(line, sizeof(line), f) != nullptr) {
         std::size_t story = 0;
         if (std::sscanf(line, "# story %zu", &story) == 1) {
@@ -1782,13 +1797,15 @@ bool load_cached_signatures(char const* story,
 
         char key[512] = {};
         int outs = 0;
+        unsigned long long which = 0;
         char types[256] = {};
-        const int got = std::sscanf(line, "%511s %d %255s", key, &outs, types);
-        if (got < 2) continue;
+        const int got = std::sscanf(line, "%511s %d %llx %255s", key, &outs, &which, types);
+        if (got < 3) continue;
 
         DbEntry entry;
         entry.Outs = outs;
-        if (got == 3) {
+        entry.OutMask = which;
+        if (got == 4) {
             for (char* at = std::strtok(types, ","); at != nullptr;
                  at = std::strtok(nullptr, ",")) {
                 entry.Types.push_back((std::uint8_t)std::strtoul(at, nullptr, 10));
@@ -1804,6 +1821,7 @@ bool load_cached_signatures(char const* story,
         auto it = loaded.find(fn.name + "/" + std::to_string(fn.params.size()));
         if (it == loaded.end()) continue;
         fn.out_params = it->second.Outs;
+        fn.out_mask = it->second.OutMask;
         ++hits;
     }
     if (hits == 0) return false;
@@ -1831,6 +1849,7 @@ void save_cached_signatures(char const* story) {
     // walking, and reported on a cached run too -- otherwise the line about
     // uncallable procedures appears on the first run and vanishes on the
     // second, which reads like something changed.
+    std::fputs(kStoreFormat, f);
     std::fprintf(f, "# story %zu\n", g_story_functions);
     // The type aliases, which decide whether a stored value is a string.
     // Scanning for the engine's table costs a pass over every writable
@@ -1842,7 +1861,8 @@ void save_cached_signatures(char const* story) {
         }
     }
     for (auto const& entry : database()) {
-        std::fprintf(f, "%s %d", entry.first.c_str(), entry.second.Outs);
+        std::fprintf(f, "%s %d %llx", entry.first.c_str(), entry.second.Outs,
+                     (unsigned long long)entry.second.OutMask);
         for (std::size_t i = 0; i < entry.second.Types.size(); ++i) {
             std::fprintf(f, "%s%u", i == 0 ? " " : ",",
                          (unsigned)entry.second.Types[i]);
@@ -1952,6 +1972,7 @@ std::size_t load_out_param_counts(std::vector<Function>* functions,
         auto it = by_name.find(fn.name + "/" + std::to_string(fn.params.size()));
         if (it != by_name.end()) {
             fn.out_params = it->second.Outs;
+            fn.out_mask = it->second.OutMask;
             ++applied;
         }
     }
@@ -2152,6 +2173,7 @@ std::vector<Function> all_functions() {
         fn.id = handle != 0 ? handle : (type & 7u);
         fn.params = entry.second.Types;
         fn.out_params = entry.second.Outs;
+        fn.out_mask = entry.second.OutMask;
         out.push_back(std::move(fn));
     }
 
@@ -2204,6 +2226,7 @@ std::vector<Function> story_functions(std::vector<Function> const& known) {
         fn.id = handle;
         fn.params = entry.second.Types;
         fn.out_params = entry.second.Outs;
+        fn.out_mask = entry.second.OutMask;
         kinds[type < 9 ? type : 0]++;
         if (type == kProc && kinds[kProc] <= 3) {
             logf("osiris: procedure %s/%zu handle=%#x", fn.name.c_str(),
@@ -3330,17 +3353,20 @@ Status invoke(const Function& fn, const std::vector<Value>& inputs,
     std::memset(storage, 0, sizeof(storage));
 
     const std::size_t n = fn.params.size();
+    std::size_t next = 0;  // the next input to place
     for (std::size_t i = 0; i < n; ++i) {
         const std::uint8_t declared = fn.params[i];
-        if (i < inputs.size()) {
-            write(storage[i], wire_type(declared, inputs[i]), inputs[i]);
+        if (!fn.is_output(i, inputs.size()) && next < inputs.size()) {
+            write(storage[i], wire_type(declared, inputs[next]), inputs[next]);
+            ++next;
         } else {
-            // Trailing parameters are outputs: typed, value left cleared.
+            // An output: typed, value left cleared.
             accessors().set_type(storage[i], declared >= 6 ? kGuidString : declared);
         }
         void* nxt = (i + 1 < n) ? static_cast<void*>(storage[i + 1]) : nullptr;
         std::memcpy(storage[i], &nxt, sizeof(nxt));  // NextParam at +00
     }
+    if (next != inputs.size()) return Status::kUnavailable;
 
     Thunk6 handler = fn.is_query() ? g_query : g_call;
     long rc = handler(static_cast<long>(fn.id),
@@ -3348,7 +3374,8 @@ Status invoke(const Function& fn, const std::vector<Value>& inputs,
     if ((rc & 0xff) == 0) return Status::kRejected;
 
     if (outputs != nullptr) {
-        for (std::size_t i = inputs.size(); i < n; ++i) {
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!fn.is_output(i, inputs.size())) continue;
             const std::uint8_t declared = fn.params[i];
             outputs->push_back(read(storage[i], declared >= 6 ? kGuidString : declared));
         }

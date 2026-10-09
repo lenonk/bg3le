@@ -36,10 +36,20 @@ struct Function {
     std::uint32_t id = 0;
     std::vector<std::uint8_t> params;
 
-    // Which trailing parameters the engine fills in. Known only once the
+    // How many parameters the engine fills in. Known only once the
     // signature database has been read; -1 until then, in which case the
     // caller's argument count decides the split.
     int out_params = -1;
+
+    // Which ones, bit i for parameter i: not always the trailing ones
+    // (TemplateIsInPartyInventory's count is its third of four).
+    std::uint64_t out_mask = 0;
+
+    // Whether parameter i is an output when a caller passes `inputs`.
+    bool is_output(std::size_t i, std::size_t inputs) const {
+        if (out_params < 0) return i >= inputs;
+        return i < 64 && ((out_mask >> i) & 1) != 0;
+    }
 
     Kind kind() const { return static_cast<Kind>(id & 7); }
 
