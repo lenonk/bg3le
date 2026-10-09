@@ -11818,12 +11818,14 @@ if Ext._Internal.IsClientState() then
     if getter ~= nil then return getter(ptr) end
     local found, value = I.UiGet(ptr, key)
     if found then return out(value) end
-    error(no_property(ptr, key), 2)
+    -- Logged, then nil, as upstream's GetNamedProperty; the script carries on.
+    Ext.Log.PrintError(no_property(ptr, key))
+    return nil
   end
 
   UiObject.__newindex = function(self, key, value)
     if not I.UiSet(ptr_of[self], key, unwrap(value)) then
-      error(no_property(ptr_of[self], key), 2)
+      Ext.Log.PrintError(no_property(ptr_of[self], key))
     end
   end
 
