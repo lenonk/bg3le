@@ -11810,6 +11810,10 @@ if Ext._Internal.IsClientState() then
     local method = methods[key]
     if method ~= nil then return method end
     local ptr = ptr_of[self]
+    -- A collection indexes from 1, as upstream's array proxy does.
+    if math.type(key) == "integer" and I.UiCollectionCount(ptr) ~= nil then
+      return wrap(I.UiCollectionItem(ptr, key))
+    end
     local getter = getters[key]
     if getter ~= nil then return getter(ptr) end
     local found, value = I.UiGet(ptr, key)
@@ -11825,6 +11829,23 @@ if Ext._Internal.IsClientState() then
 
   UiObject.__tostring = function(self)
     return string.format("%s (%s)", I.UiTypeName(ptr_of[self]), tostring(ptr_of[self]))
+  end
+
+  -- # and pairs over a collection's items; other objects keep reading as empty.
+  UiObject.__len = function(self)
+    return I.UiCollectionCount(ptr_of[self]) or 0
+  end
+
+  UiObject.__pairs = function(self)
+    local ptr = ptr_of[self]
+    local n = I.UiCollectionCount(ptr)
+    if n == nil then return next, {}, nil end
+    local i = 0
+    return function()
+      i = i + 1
+      if i > n then return nil end
+      return i, wrap(I.UiCollectionItem(ptr, i))
+    end
   end
 
   function Ext.UI.GetRoot() return wrap(I.UiRoot()) end

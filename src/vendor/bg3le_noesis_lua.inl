@@ -770,6 +770,22 @@ int l_collection_item(lua_State* L)
     return luaL_error(L, "%s is not a collection", obj != nullptr ? obj->GetClassType()->GetName() : "nil");
 }
 
+// How many items a Noesis collection holds, or nil when it is not one: upstream
+// pushes a collection as an array proxy, so Lua indexes it from 1 and takes #.
+int l_collection_count(lua_State* L)
+{
+    ensure_symbols();
+    auto obj = optional_object(L, 1);
+    for (auto t = obj != nullptr ? obj->GetClassType() : nullptr; t != nullptr; t = t->GetBase()) {
+        if (std::strcmp(t->GetName(), "BaseCollection") == 0) {
+            lua_pushinteger(L, static_cast<BaseCollection*>(static_cast<BaseComponent*>(obj))->Count());
+            return 1;
+        }
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
 int l_visual_parent(lua_State* L)
 {
     ensure_symbols();
@@ -1186,6 +1202,7 @@ extern "C" void bg3le_ui_register(lua_State* L)
         {"UiVisualCount", Noesis::bg3le_ui::l_visual_count},
         {"UiVisualChild", Noesis::bg3le_ui::l_visual_child},
         {"UiCollectionItem", Noesis::bg3le_ui::l_collection_item},
+        {"UiCollectionCount", Noesis::bg3le_ui::l_collection_count},
         {"UiVisualParent", Noesis::bg3le_ui::l_visual_parent},
         {"UiChildCount", Noesis::bg3le_ui::l_child_count},
         {"UiChild", Noesis::bg3le_ui::l_child},
