@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.6 (2026-10-08)
+
+- `Ext.Template` reads the right templates after loading a save with a different mod list. That load makes the
+  game rebuild every root template, and bg3le kept reading the old ones' freed memory: EasyCheat's Spawn Items
+  showed "?" icons, filed items under the wrong filters and failed to spawn them. The templates are now read
+  again whenever the client reloads its modules.
+- Osiris functions whose outputs are not their last parameters return them. `TemplateIsInPartyInventory`, whose
+  count is its third parameter of four, always returned 0, so Wye Fey Potions' proxies stayed at one and locked;
+  `TemplateIsInUserInventory` and `StartDialog_Internal` were wrong the same way. The first level load after
+  updating reads Osiris' signatures again, once.
+
 ## v0.3.5 (2026-10-08)
 
 - A string, number or boolean assigned to a Noesis object property, such as `widget.Tag = "Test1"`, is boxed as the
