@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.9 (2026-10-09)
+
+- Arrays take a numeric string as an index, `"2"` meaning 2, and ignore a write past their end, as upstream does.
+  Appearance Edit Enhanced's Restore failed partway and left the hairstyle unrestored, and its Magic Mirror did
+  nothing for an origin whose appearance had never been edited.
+- String-typed UI properties read their value instead of `nil`: a dice style's `Name`, and the roll screen's text.
+  Dice Roulette's blacklist, weights, holidays and "avoid repeats" work again.
+
 ## v0.3.8 (2026-10-09)
 
 - Reading a property a Noesis object does not have logs "Object X has no property named 'Y'" and returns `nil`,
