@@ -6178,6 +6178,25 @@ int l_settings_flag(lua_State* L) {
     return 1;
 }
 
+// Ext._Internal.EngineTime(client) -> Time, DeltaTime, Ticks, Unknown of that
+// side's last engine update; false before the first, nil if it is not hooked.
+extern "C" int bg3le_engine_time(bool client, double* time, float* delta, int* ticks,
+                                 double* unknown);
+int l_engine_time(lua_State* L) {
+    double time = 0.0, unknown = 0.0;
+    float delta = 0.0f;
+    int ticks = 0;
+    switch (bg3le_engine_time(lua_toboolean(L, 1) != 0, &time, &delta, &ticks, &unknown)) {
+    case 0: lua_pushnil(L); return 1;
+    case 1: lua_pushboolean(L, 0); return 1;
+    }
+    lua_pushnumber(L, time);
+    lua_pushnumber(L, delta);
+    lua_pushinteger(L, ticks);
+    lua_pushnumber(L, unknown);
+    return 4;
+}
+
 // Ext._Internal.StatsCreate(name, modifierList) -> address, or nil and why
 extern "C" void* bg3le_stats_create(char const* name, char const* listName, char const** err);
 int l_stats_create(lua_State* L) {
@@ -8355,6 +8374,8 @@ void build_state(bool client) {
     lua_setfield(g_lua, -2, "StringKeySet");
     lua_pushcfunction(g_lua, l_settings_flag);
     lua_setfield(g_lua, -2, "SettingsFlag");
+    lua_pushcfunction(g_lua, l_engine_time);
+    lua_setfield(g_lua, -2, "EngineTime");
     lua_pushcfunction(g_lua, l_stats_type);
     lua_setfield(g_lua, -2, "StatsType");
     lua_pushcfunction(g_lua, l_stats_using);
@@ -12031,18 +12052,14 @@ print = Ext.Log.Print
 
 -- ---- Ext.Timer ----
 --
--- Timers are driven from the server tick, so callbacks run on the story
--- thread and may call Osiris. Delays are in milliseconds, which is
--- upstream's unit: its WaitFor divides by a thousand before handing the
--- value to the engine's timer service.
---
--- Upstream keeps two queues, one on game time and one on wall clock, so a
--- game timer stops while the game is paused. bg3le has not located the
--- engine's clock, so both run on the monotonic clock and a game timer
--- keeps counting through a pause. The queues are kept apart regardless, so
--- the distinction becomes real the moment that clock is found rather than
--- needing every caller revisited.
+-- Server timers fire on the story thread, so callbacks may call Osiris.
+-- Delays are in milliseconds, upstream's unit. As upstream's, both queues
+-- run on the GameTime the engine hands that side's update: a delay counts
+-- from the last update (0 before a state's first), and a timer fires on the
+-- first update whose time has passed it. Unhooked, the monotonic clock stands in.
 local timers, next_handle = {}, 1
+-- The last update's GameTime, and its Time in milliseconds.
+local clock = {ms = 0.0, time = nil}
 
 -- Upstream marks realtime timers with a flag in the handle and reads it
 -- back to pick a queue; the same bit is used here for the same reason.
@@ -12057,7 +12074,7 @@ local function add_timer(ms, fn, repeat_ms, realtime)
   if realtime then handle = handle | REALTIME_FLAG end
 
   timers[handle] = {
-    due = Ext.Timer.MonotonicTime() + (ms or 0),
+    due = clock.ms + (ms or 0),
     fn = fn,
     every = repeat_ms,
     paused = false,
@@ -12086,7 +12103,7 @@ function Ext.Timer.Pause(handle)
     t.paused = true
     -- Held as remaining time, so resuming does not fire immediately for a
     -- timer that was paused past its due moment.
-    t.remaining = math.max(0, t.due - Ext.Timer.MonotonicTime())
+    t.remaining = math.max(0, t.due - clock.ms)
   end
   return true
 end
@@ -12096,7 +12113,7 @@ function Ext.Timer.Resume(handle)
   if t == nil then return false end
   if t.paused then
     t.paused = false
-    t.due = Ext.Timer.MonotonicTime() + (t.remaining or 0)
+    t.due = clock.ms + (t.remaining or 0)
     t.remaining = nil
   end
   return true
@@ -12190,7 +12207,7 @@ function Ext._Internal.CollectSaveExtras()
       end
     end
   end
-  local now = Ext.Timer.MonotonicTime()
+  local now = clock.ms
   for _, t in pairs(timers) do
     if t.persistent ~= nil then
       local remaining = t.paused and (t.remaining or 0) or math.max(0, t.due - now)
@@ -12239,19 +12256,10 @@ function Ext._Internal.RestoreSaveExtras()
   end
 end
 
--- Upstream reports the engine's game clock. bg3le counts from the first
--- tick instead, which is the same thing for measuring intervals and is not
--- the same thing across a load; it is seconds either way.
-local first_tick = nil
-
+-- The Time of the last update this state saw, as upstream's.
 function Ext.Timer.GameTime()
-  if first_tick == nil then return 0.0 end
-  return (Ext.Timer.MonotonicTime() - first_tick) / 1000.0
+  return clock.time ~= nil and clock.time.Time or 0.0
 end
-
--- Upstream's Tick carries the frame's delta; bg3le's tick is the timer
--- pump, so that is what it reports.
-local last_tick = nil
 
 function Ext._Internal.RunTimers()
   -- Anything the other context sent since the last tick, first: a message is
@@ -12269,27 +12277,38 @@ function Ext._Internal.RunTimers()
     Ext._Internal.DeliverComponentEvents()
   end
 
-  -- And the pathfinding requests the engine has finished.
-  if Ext._Internal.PathfindingUpdate then Ext._Internal.PathfindingUpdate() end
-
-  local now = Ext.Utils.MonotonicTime() / 1000.0
-  local delta = last_tick ~= nil and (now - last_tick) or 0.0
-  last_tick = now
-  -- Upstream's GameTime carries the tick count too (MazzleDocs reads it).
-  -- Kept on _Internal: the prelude has no top-level locals to spare.
-  Ext._Internal.TickCount = (Ext._Internal.TickCount or 0) + 1
-  Ext._Internal.FireEvent("Tick", { Time = { DeltaTime = delta, Time = now,
-    Ticks = Ext._Internal.TickCount } })
-
-  local now = Ext.Timer.MonotonicTime()
-  if first_tick == nil then first_tick = now end
+  -- The rest is upstream's OnUpdate, which runs once per engine update of
+  -- this side, with its GameTime: timers, pathfinding, then Tick.
+  local time, delta, ticks, unknown = Ext._Internal.EngineTime(Ext.IsClient())
+  if time == nil then
+    local now = Ext.Timer.MonotonicTime() / 1000.0
+    clock.first = clock.first or now
+    time = now - clock.first
+    delta = clock.time ~= nil and (time - clock.time.Time) or 0.0
+    ticks, unknown = (clock.time ~= nil and clock.time.Ticks or 0) + 1, 0.0
+  end
+  local last = clock.time
+  if time == false or (last ~= nil and last.Time == time and last.Ticks == ticks) then
+    return
+  end
+  clock.time = {Time = time, DeltaTime = delta, Ticks = ticks, Unknown = unknown}
+  clock.ms = time * 1000.0
+  local now = clock.ms
 
   -- Collected first: a callback that starts a timer adds to the table, and
-  -- adding a key mid-pairs is "invalid key to 'next'".
+  -- adding a key mid-pairs is "invalid key to 'next'". Upstream fires its
+  -- realtime queue, then its game queue, each soonest first.
   local due = {}
   for handle, t in pairs(timers) do
     if not t.paused and now >= t.due then due[#due + 1] = handle end
   end
+  table.sort(due, function(a, b)
+    local ra, rb = (a & REALTIME_FLAG) ~= 0, (b & REALTIME_FLAG) ~= 0
+    if ra ~= rb then return ra end
+    local x, y = timers[a].due, timers[b].due
+    if x ~= y then return x < y end
+    return a < b
+  end)
   for _, handle in ipairs(due) do
     local t = timers[handle]
     if t ~= nil then
@@ -12301,6 +12320,12 @@ function Ext._Internal.RunTimers()
       end
     end
   end
+
+  -- The pathfinding requests the engine has finished.
+  if Ext._Internal.PathfindingUpdate then Ext._Internal.PathfindingUpdate() end
+
+  Ext._Internal.FireEvent("Tick", {Time = {Time = time, DeltaTime = delta, Ticks = ticks,
+                                           Unknown = unknown}})
 end
 
 

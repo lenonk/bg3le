@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 #include "hook.h"
@@ -66,6 +67,53 @@ SetTargetStateProc g_set_target_state = nullptr;
 using StateProc = std::uint64_t (*)(void*, void*, void*, void*);
 StateProc g_load_module_exit = nullptr;
 std::atomic<bool> g_left_load_module{false};
+
+// The GameTime each side's update is handed, laid out as bg3se::GameTime.
+// Upstream's timers, Tick and Ext.Timer.GameTime all run on it.
+struct EngineTime {
+    double Time;
+    float DeltaTime;
+    std::int32_t Ticks;
+    double Unknown;
+};
+static_assert(sizeof(EngineTime) == 24);
+
+struct EngineClock {
+    std::mutex lock;
+    EngineTime time{};
+    bool hooked = false;
+    bool seen = false;
+};
+EngineClock g_clocks[2];  // client, server
+
+void note_engine_time(EngineClock& clock, void const* time, char const* side) {
+    if (time == nullptr) return;
+    EngineTime now;
+    std::memcpy(&now, time, sizeof(now));
+    bool first = false;
+    {
+        const std::lock_guard<std::mutex> held(clock.lock);
+        first = !clock.seen;
+        clock.time = now;
+        clock.seen = true;
+    }
+    if (first) logf("gametime: the %s's clock reads %.3f s at tick %d", side, now.Time, now.Ticks);
+}
+
+// Upstream's client tick is a post-hook on GameStateMachine::Update, which
+// is inlined here; bg3le ticks later in this call, so the time is noted on entry.
+StateProc g_client_app_update = nullptr;
+std::uint64_t client_app_update_hook(void* app, void* time, void* c, void* d) {
+    note_engine_time(g_clocks[0], time, "client");
+    return g_client_app_update(app, time, c, d);
+}
+
+// Upstream's server tick is a pre-hook here.
+StateProc g_server_machine_update = nullptr;
+std::uint64_t server_machine_update_hook(void* machine, void* time, void* c, void* d) {
+    note_engine_time(g_clocks[1], time, "server");
+    return g_server_machine_update(machine, time, c, d);
+}
 
 char const* state_name(std::uint32_t state) {
     if (state >= kStateLimit || target::StateNames() == 0) return "Unknown";
@@ -182,6 +230,21 @@ void set_target_state_hook(void* machine, void* state) {
 
 }  // namespace
 
+// The last GameTime one side's update was handed: 0 if that update is not
+// hooked, 1 before it first runs, 2 with *time, *delta, *ticks and *unknown set.
+extern "C" int bg3le_engine_time(bool client, double* time, float* delta, int* ticks,
+                                 double* unknown) {
+    EngineClock& clock = g_clocks[client ? 0 : 1];
+    const std::lock_guard<std::mutex> held(clock.lock);
+    if (!clock.hooked) return 0;
+    if (!clock.seen) return 1;
+    *time = clock.time.Time;
+    *delta = clock.time.DeltaTime;
+    *ticks = clock.time.Ticks;
+    *unknown = clock.time.Unknown;
+    return 2;
+}
+
 char const* client_state_name() {
     char const* state = client_game_state();
     return state != nullptr ? state : "unknown";
@@ -254,6 +317,25 @@ void install_game_state_hook() {
     } else {
         logf("gamestate: ecl::GameStateMachine::Update not found; the client "
              "ticks with the server");
+    }
+
+    if (hook_slot(target::ClientAppUpdateSlot(), target::ClientAppUpdate(),
+                  reinterpret_cast<void*>(&client_app_update_hook), &original)) {
+        g_client_app_update = reinterpret_cast<StateProc>(original);
+        const std::lock_guard<std::mutex> held(g_clocks[0].lock);
+        g_clocks[0].hooked = true;
+    } else {
+        logf("gametime: ecl::EoCClient::Update not found; client timers run on the monotonic clock");
+    }
+    const std::uintptr_t server_update = target::ServerMachineUpdate();
+    if (server_update != 0
+        && hook_call_sites(server_update, reinterpret_cast<void*>(&server_machine_update_hook),
+                           &original) > 0) {
+        g_server_machine_update = reinterpret_cast<StateProc>(original);
+        const std::lock_guard<std::mutex> held(g_clocks[1].lock);
+        g_clocks[1].hooked = true;
+    } else {
+        logf("gametime: esv::GameStateMachine::Update not found; server timers run on the monotonic clock");
     }
 
     const std::uintptr_t stats_load = target::StatsLoad();

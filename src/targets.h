@@ -35,8 +35,12 @@ std::uintptr_t ParseFunctor();
 std::uintptr_t PathStep();
 // SurfaceManager::AddAction
 std::uintptr_t AddAction();
-// ecl::GameStateMachine::Update
+// the state-queue step EoCClient's update calls once a frame (bg3le's client tick)
 std::uintptr_t MachineUpdate();
+// upstream's ecl::EoCClient::Update(GameTime*), with GameStateMachine::Update inlined
+std::uintptr_t ClientAppUpdate();
+// esv::GameStateMachine::Update(GameTime*)
+std::uintptr_t ServerMachineUpdate();
 // the instruction loading the string-keys manager
 std::uintptr_t StringKeysManagerLoad();
 // stats functor set construction
@@ -61,6 +65,8 @@ std::uintptr_t LoadModuleExit();
 std::uintptr_t UpdateMessagesFunc();
 std::uintptr_t StateNames();
 std::uintptr_t LoadModuleExitSlot();
+// the vtable slot holding ClientAppUpdate
+std::uintptr_t ClientAppUpdateSlot();
 std::uintptr_t CursorControlVtable();
 std::uintptr_t WwiseVtable();
 std::uintptr_t StateMachineVtable();

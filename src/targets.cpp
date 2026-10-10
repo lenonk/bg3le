@@ -40,6 +40,10 @@ BG3LE_TARGET(AddAction,
              resolve_code(Sig{"AddAction", 0x2cc5b70, "41 56 53 50 48 8b 87 70 01 00 00 48 89 fb"}))
 BG3LE_TARGET(MachineUpdate,
              resolve_code(Sig{"MachineUpdate", 0x2d1d9f0, "41 56 53 50 80 7f 08 00 75 08 48 83 c4 08"}))
+BG3LE_TARGET(ClientAppUpdate,
+             resolve_code(Sig{"ClientAppUpdate", 0x2d1b9b0, "55 41 57 41 56 41 55 41 54 53 48 81 ec 68 01 00 00 49 89 fc 48 8b bf 30 01 00 00 49 89 f5"}))
+BG3LE_TARGET(ServerMachineUpdate,
+             resolve_code(Sig{"ServerMachineUpdate", 0x2c66a60, "55 41 57 41 56 41 55 41 54 53 48 83 ec 38 83 7f 24 00 75 1e 48 8b 7f 08 48 85 ff 74 06 48 8b 07 ff 50 28"}))
 BG3LE_TARGET(StringKeysManagerLoad,
              resolve_code(Sig{"StringKeysManagerLoad", 0x2f9bb42, "48 8b 35 ?? ?? ?? ?? 31 d2 89 c8 f7 76 18 48 c1 e2 03"}))
 BG3LE_TARGET(MakeSet,
@@ -66,6 +70,8 @@ BG3LE_TARGET(StateNames,
              resolve_rip(Sig{"StateNames", 0x2d1d0c6, "48 8d 05 ?? ?? ?? ?? 4c 8b 04 d8 e9 ?? ?? ?? ?? 48 8d 05 ?? ?? ?? ?? 4a 8b 0c e8"}, 3, 7))
 BG3LE_TARGET(LoadModuleExitSlot,
              [] { const std::uintptr_t b = resolve_rip(Sig{"LoadModuleExitSlot", 0x4013427, "4c 8d 05 ?? ?? ?? ?? 0f 57 c0 48 89 47 08 48 89 4f 10"}, 3, 7); return b == 0 ? 0 : b + 0x38; }())
+BG3LE_TARGET(ClientAppUpdateSlot,
+             [] { const std::uintptr_t b = resolve_rip(Sig{"ClientAppVtable", 0x3f619ac, "48 8d 05 ?? ?? ?? ?? 48 8d 0d ?? ?? ?? ?? 0f 57 c0 48 8d 7b 60 48 89 03 48 89 4b 08"}, 3, 7); return b == 0 ? 0 : b + 0x290; }())
 BG3LE_TARGET(CursorControlVtable,
              resolve_rip(Sig{"CursorControlVtable", 0x413daa4, "48 8d 0d ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 89 08 48 8d 0d ?? ?? ?? ??"}, 3, 7))
 BG3LE_TARGET(WwiseVtable,
