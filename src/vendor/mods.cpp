@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,8 +37,10 @@
 #include "ls_string.h"
 #include "mods.h"
 
+#include "../hook.h"
 #include "../log.h"
 #include "../mem.h"
+#include "../targets.h"
 
 extern "C" bool bg3le_scannable_region(char const* line,
                                        unsigned long long* from,
@@ -400,6 +403,50 @@ bool search_from_statics() {
     return true;
 }
 
+// Upstream's GetModManagerClient: ecl::EoCClient::ModManager. This build's
+// EoCClient drifts from the vendored one, so the member, and where the load
+// order sits in the manager, are found once by adopting what they lead to.
+bool search_from_client() {
+    static std::size_t member = 0;
+    static std::size_t delta = 0;
+    static bool logged = false;
+    if (target::EoCClient() == 0) return false;
+    void* client = nullptr;
+    if (!read_as((void const*)(load_bias() + target::EoCClient()), &client) || client == nullptr) {
+        return false;
+    }
+    auto manager_at = [&](std::size_t at) -> std::uint64_t {
+        std::uint64_t manager = 0;
+        return read_as((char const*)client + at, &manager) && manager > 0x10000 ? manager : 0;
+    };
+    if (member != 0) {
+        const std::uint64_t manager = manager_at(member);
+        return manager != 0 && adopt(manager + delta);
+    }
+    static std::chrono::steady_clock::time_point last{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::milliseconds(250)) return false;
+    last = now;
+    // ModManager sits ahead of EntityWorld (+0x1a0 here); the load order is
+    // BaseModule's 248 bytes past the manager's vtable and two signals.
+    for (std::size_t at = 0x100; at < 0x1a0; at += 8) {
+        const std::uint64_t manager = manager_at(at);
+        if (manager == 0) continue;
+        for (std::size_t d = kBaseModuleBeforeLoadOrder + 8; d < kBaseModuleBeforeLoadOrder + 0x100; d += 8) {
+            if (!adopt(manager + d)) continue;
+            member = at;
+            delta = d;
+            if (!logged) {
+                logged = true;
+                logf("mods: ecl::EoCClient keeps its ModManager at +%#zx, the load order at +%#zx in it",
+                     at, d);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 bool search() {
     std::uint8_t needle[16] = {};
     if (!bg3le_meta_parse_guid(kSharedUuid, needle)) {
@@ -687,7 +734,9 @@ bool ready() {
         return true;
     }
 
-    // Resolving a recorded pointer is not a scan, so any thread may do it.
+    // Neither reading EoCClient nor resolving a recorded pointer is a scan,
+    // so any thread may do them.
+    if (search_from_client()) return true;
     if (search_from_statics()) return true;
 
     // Only the warming thread scans; see mem.h.
