@@ -12504,6 +12504,12 @@ read_path = function(handle, comp, path)
   return value
 end
 
+-- An array index as upstream reads it, with lua_tointeger: "2" and 2.0 are 2.
+function Ext._Internal.ArrayIndex(i)
+  local n = tonumber(i)
+  return n ~= nil and math.tointeger(n) or i
+end
+
 make_array = function(handle, comp, path)
   -- Raises rather than reporting zero, for the reason in make_map below: a
   -- failure to resolve must not read as an empty array.
@@ -12537,10 +12543,12 @@ make_array = function(handle, comp, path)
     -- Out of range is nil, as upstream's ArrayProxy answers, which is also
     -- what stops ipairs.
     __index = function(_, i)
+      i = Ext._Internal.ArrayIndex(i)
       if type(i) ~= "number" or i < 1 or i > length() then return nil end
       return element(i)
     end,
     __newindex = function(_, i, v)
+      i = Ext._Internal.ArrayIndex(i)
       local n = length()
       local ok, err
       if type(i) == "number" and ((v == nil and i >= 1 and i <= n) or i == n + 1) then
@@ -12554,6 +12562,8 @@ make_array = function(handle, comp, path)
             end
           end
         end
+      elseif type(i) == "number" and (i < 1 or i > n) then
+        return  -- upstream's SetElement refuses it, and its __newindex ignores that
       else
         ok, err = Ext._Internal.SetField(handle, comp, element_path(i), v)
       end
@@ -14211,8 +14221,11 @@ end
 local function snapshot_container(items, container, write, assign)
   return Ext._Internal.NewObjectProxy({
     __bg3leContainer = container,
-    __index = items,
-    __newindex = function(_, k, v) write(k, v) end,
+    __index = container == "array"
+              and function(_, k) return items[Ext._Internal.ArrayIndex(k)] end or items,
+    __newindex = function(_, k, v)
+      write(container == "array" and Ext._Internal.ArrayIndex(k) or k, v)
+    end,
     __len = container == "map" and function() return entry_count(items) end
             or function() return #items end,
     __pairs = function() return next, items, nil end,
@@ -14286,7 +14299,9 @@ local function read_object_path(addr, class, path, kind)
     local items = read_items({})
     local function write(k, v)
       local n = #items
-      if type(k) ~= "number" or k < 1 or k > n + 1 or (k == n + 1 and v == nil) then
+      -- Out of range is ignored, as upstream's array __newindex does.
+      if type(k) == "number" and (k < 1 or k > n + 1) then return end
+      if type(k) ~= "number" or (k == n + 1 and v == nil) then
         error("bg3le: " .. class .. "." .. path .. " index " .. tostring(k)
               .. " is out of range 1.." .. n, 0)
       end
