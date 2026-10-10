@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.10 (2026-10-10)
+
+- Each mod's `BootstrapModule.lua` runs before the game loads its stats, and `ModuleLoadStarted` fires, as upstream
+  does, so path overrides a mod registers there take effect. Expansion uses one to swap its own stats file for an
+  empty one and makes the same changes from Lua; without it both applied, and Mobile and Defensive Blade Flourish
+  dealt no damage.
+- Mods' `StatsLoaded` handlers run on the first launch after a game update. bg3le found the mod list late without
+  its cache, after `StatsLoaded` had fired, so no mod's stat changes applied that session. It now reads the list
+  from the game's client, as upstream does.
+- Client Lua reads the client's entity world from the main menu on, and server Lua the server's. Mazzle_Lib's client
+  scripts failed to load with "the ECS container has not been captured yet".
+- Reading a property a UI object does not have raises upstream's "Property does not exist" error again; only
+  `:GetProperty()` logs and returns `nil`. This replaces the v0.3.8 change, which made Mazzle_Lib's per-frame UI
+  checks write thousands of "has no property named" lines to the log.
+
 ## v0.3.9 (2026-10-09)
 
 - Arrays take a numeric string as an index, `"2"` meaning 2, and ignore a write past their end, as upstream does.
