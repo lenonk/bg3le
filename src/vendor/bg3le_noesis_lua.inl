@@ -12,6 +12,7 @@
 // by Norbyte and the bg3se contributors (https://github.com/Norbyte/bg3se).
 
 #include <deque>
+#include <utility>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -724,6 +725,36 @@ int l_type_name(lua_State* L)
     return 1;
 }
 
+// The property map upstream pushes o with: its nearest type in FOR_EACH_NOESIS_TYPE.
+int l_proxy_type_name(lua_State* L)
+{
+    static constexpr std::pair<char const*, char const*> kTypes[] = {
+        {"BaseObject", "Noesis::BaseObject"}, {"BaseRefCounted", "Noesis::BaseRefCounted"},
+        {"BaseComponent", "Noesis::BaseComponent"}, {"Type", "Noesis::Type"},
+        {"TypeMeta", "Noesis::TypeMeta"}, {"TypeMetaData", "Noesis::TypeMetaData"},
+        {"TypeClass", "Noesis::TypeClass"}, {"BaseCommand", "Noesis::BaseCommand"},
+        {"LuaDelegateCommand", "Noesis::LuaDelegateCommand"},
+        {"DispatcherObject", "Noesis::DispatcherObject"},
+        {"DependencyObject", "Noesis::DependencyObject"},
+        {"DependencyData", "Noesis::DependencyData"}, {"Visual", "Noesis::Visual"},
+        {"UIElement", "Noesis::UIElement"}, {"UIElementData", "Noesis::UIElementData"},
+        {"FrameworkElement", "Noesis::FrameworkElement"}, {"Panel", "Noesis::Panel"},
+        {"ls.InitialSubstate", "ui::UIInitialSubstate"}, {"ls.StateEvent", "ui::UIStateEvent"},
+        {"ls.State", "ui::UIState"}, {"ls.UIWidget", "ui::UIWidget"}, {"ls.DCWidget", "ui::DCWidget"},
+    };
+    auto o = object_arg(L, 1);
+    for (auto t = o->GetClassType(); t != nullptr; t = t->GetBase()) {
+        for (auto const& [id, name] : kTypes) {
+            if (std::strcmp(t->GetName(), id) == 0) {
+                lua_pushstring(L, name);
+                return 1;
+            }
+        }
+    }
+    lua_pushstring(L, "Noesis::BaseObject");
+    return 1;
+}
+
 int l_to_string(lua_State* L)
 {
     auto o = object_arg(L, 1);
@@ -1203,6 +1234,7 @@ extern "C" void bg3le_ui_register(lua_State* L)
     static const luaL_Reg functions[] = {
         {"UiRoot", Noesis::bg3le_ui::l_root},
         {"UiTypeName", Noesis::bg3le_ui::l_type_name},
+        {"UiProxyTypeName", Noesis::bg3le_ui::l_proxy_type_name},
         {"UiToString", Noesis::bg3le_ui::l_to_string},
         {"UiIsA", Noesis::bg3le_ui::l_is_a},
         {"UiVisualCount", Noesis::bg3le_ui::l_visual_count},

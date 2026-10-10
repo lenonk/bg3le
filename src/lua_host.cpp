@@ -11827,14 +11827,16 @@ if Ext._Internal.IsClientState() then
     if getter ~= nil then return getter(ptr) end
     local found, value = I.UiGet(ptr, key)
     if found then return out(value) end
-    -- Logged, then nil, as upstream's GetNamedProperty; the script carries on.
-    Ext.Log.PrintError(no_property(ptr, key))
-    return nil
+    -- Raised as upstream's LightObjectProxy does; only :GetProperty logs and returns nil.
+    error(string.format("Property does not exist: %s::%s - property does not exist",
+                        I.UiProxyTypeName(ptr), tostring(key)), 0)
   end
 
   UiObject.__newindex = function(self, key, value)
-    if not I.UiSet(ptr_of[self], key, unwrap(value)) then
-      Ext.Log.PrintError(no_property(ptr_of[self], key))
+    local ptr = ptr_of[self]
+    if not I.UiSet(ptr, key, unwrap(value)) then
+      error(string.format("Cannot set property %s::%s - property does not exist",
+                          I.UiProxyTypeName(ptr), tostring(key)), 0)
     end
   end
 
