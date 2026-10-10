@@ -1523,13 +1523,22 @@ void* client_container() {
     return other != server ? other : nullptr;
 }
 
-// The world the running context reads, as upstream's client and server each
-// read their own: the client context gets the client world.
+extern "C" void* bg3le_context_container(bool client);
+
+// The world the running context reads, as upstream's GetEntityWorld(): the
+// client context the client's EntityWorld, the server context the server's,
+// each taken from its EoC object, so it is there from the main menu on. The
+// captured containers stand in only if that lookup fails.
 void* world_container() {
-    if (g_lua != nullptr && g_lua == g_client_lua) {
-        if (void* client = client_container()) return client;
+    const bool client = g_lua != nullptr && g_lua == g_client_lua;
+    if (void* own = bg3le_context_container(client)) return own;
+    static std::atomic<bool> warned[2] = {false, false};
+    void* captured = client && client_container() != nullptr ? client_container() : server_container();
+    if (captured != nullptr && !warned[client ? 1 : 0].exchange(true)) {
+        logf("ecs: the %s EntityWorld was not found from its EoC object; using a captured container",
+             client ? "client" : "server");
     }
-    return server_container();
+    return captured;
 }
 
 // Accepts either name a component goes by and yields the engine's.
@@ -4979,7 +4988,7 @@ int l_loca_keys(lua_State* L) {
 // Sized from a first pass so the second cannot overrun, which matters
 // because entities come and go between the two on a live world.
 int l_all_entities(lua_State* L) {
-    // The server world, which is the one every other read here uses.
+    // The calling context's world, the one every other read here uses.
     // Enumerating ecs::container() instead handed back handles from
     // whichever world was captured first -- valid there, rejected by the
     // component readers, and so entirely unreadable.

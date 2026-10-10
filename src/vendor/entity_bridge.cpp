@@ -25,8 +25,11 @@
 #include <GameDefinitions/Components/All.h>
 
 #include "../log.h"
+#include "../hook.h"
+#include "../targets.h"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <unordered_map>
 #include <pthread.h>
@@ -308,6 +311,111 @@ bg3se::ecs::EntityWorld* world_from_container(void* container) {
 // written from Lua is paired with when it has no world of its own.
 extern "C" void* bg3le_entity_world(void* container) {
     return world_from_container(container);
+}
+
+namespace {
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+constexpr std::size_t kWorldStorageOffset = offsetof(bg3se::ecs::EntityWorld, Storage);
+constexpr std::size_t kStorageRegistryOffset =
+    offsetof(bg3se::ecs::EntityStorageContainer, ComponentRegistry);
+#pragma clang diagnostic pop
+
+// `world`'s own container, if it is an EntityWorld: its Storage, whose registry
+// leads back to it. Read without trusting the pointer.
+void* container_of_world(std::uintptr_t world) {
+    std::uintptr_t storage = 0;
+    std::uintptr_t registry = 0;
+    if (world < 0x10000 || (world & 7) != 0
+        || !bg3le::safe_read(reinterpret_cast<void const*>(world + kWorldStorageOffset), &storage, sizeof(storage))
+        || storage < 0x10000
+        || !bg3le::safe_read(reinterpret_cast<void const*>(storage + kStorageRegistryOffset), &registry,
+                             sizeof(registry))
+        || registry != world + kComponentRegistryOffset) {
+        return nullptr;
+    }
+    return reinterpret_cast<void*>(storage);
+}
+
+// Where one of ecl::EoCClient and esv::EoCServer keeps its EntityWorld: bg3se's
+// offset first, then a window around it, searched for the pointer that
+// round-trips as a world.
+struct WorldField {
+    char const* Name;
+    std::uintptr_t (*Global)();
+    std::size_t Expected, From, To;
+    std::atomic<long> Offset{-1};
+    // The last world and storage that checked out, so the check runs once per change.
+    std::atomic<std::uintptr_t> World{0}, Storage{0};
+    std::atomic<std::int64_t> NextSearch{0};
+};
+
+WorldField g_client_world_field{"ecl::EoCClient", &bg3le::target::EoCClient, 0x1a0, 0x100, 0x260};
+WorldField g_server_world_field{"esv::EoCServer", &bg3le::target::EoCServer, 0x288, 0x200, 0x300};
+
+std::uintptr_t plain_load(std::uintptr_t at) { return *reinterpret_cast<std::uintptr_t const*>(at); }
+
+std::int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Called on every component read: once the field is known, three plain loads
+// (the global is in the image, its object lives as long as the game), and the
+// round-trip check only when the world or its storage changes.
+void* world_container_of(WorldField& field) {
+    if (field.Global() == 0) return nullptr;
+    const std::uintptr_t eoc = plain_load(bg3le::load_bias() + field.Global());
+    if (eoc == 0) return nullptr;
+
+    const long known = field.Offset.load(std::memory_order_acquire);
+    if (known >= 0) {
+        const std::uintptr_t world = plain_load(eoc + (std::size_t)known);
+        if (world == 0) return nullptr;
+        const std::uintptr_t storage = plain_load(world + kWorldStorageOffset);
+        if (world == field.World.load(std::memory_order_acquire)
+            && storage == field.Storage.load(std::memory_order_acquire)) {
+            return reinterpret_cast<void*>(storage);
+        }
+        void* checked = container_of_world(world);
+        if (checked == nullptr) return nullptr;
+        field.Storage.store(reinterpret_cast<std::uintptr_t>(checked), std::memory_order_release);
+        field.World.store(world, std::memory_order_release);
+        return checked;
+    }
+
+    // Not found yet: the object may be up before its world, so search again, at
+    // most once a second.
+    const std::int64_t now = now_ms();
+    if (now < field.NextSearch.load(std::memory_order_relaxed)) return nullptr;
+    field.NextSearch.store(now + 1000, std::memory_order_relaxed);
+    auto at = [&](std::size_t offset) -> void* {
+        std::uintptr_t world = 0;
+        if (!bg3le::safe_read(reinterpret_cast<void const*>(eoc + offset), &world, sizeof(world))) return nullptr;
+        return container_of_world(world);
+    };
+    void* container = at(field.Expected);
+    std::size_t found = field.Expected;
+    for (std::size_t offset = field.From; container == nullptr && offset < field.To; offset += 8) {
+        container = at(offset);
+        found = offset;
+    }
+    if (container != nullptr) {
+        field.Offset.store((long)found, std::memory_order_release);
+        bg3le::logf("ecs: %s keeps its EntityWorld at +%#zx%s", field.Name, found,
+                    found == field.Expected ? "" : " (not where bg3se has it)");
+    }
+    return container;
+}
+
+}  // namespace
+
+// The calling context's own world, as upstream's GetEntitySystemHelpers()
+// ->GetEntityWorld() gives it: the client's for client Lua, the server's for
+// server Lua. Null while that world does not exist.
+extern "C" void* bg3le_context_container(bool client) {
+    return world_container_of(client ? g_client_world_field : g_server_world_field);
 }
 
 // Reports everything needed to judge whether the recovered world is real: the
