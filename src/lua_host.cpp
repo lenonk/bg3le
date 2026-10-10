@@ -6149,7 +6149,6 @@ int l_stats_extra_all(lua_State* L) {
 // PathOverrideGet(path) -> the absolute override, or nil
 extern "C" bool bg3le_path_override_add(char const* path, char const* overridePath);
 extern "C" char const* bg3le_path_override_get(char const* path);
-extern "C" void bg3le_path_override_clear();
 int l_path_override_add(lua_State* L) {
     lua_pushboolean(L, bg3le_path_override_add(luaL_checkstring(L, 1), luaL_checkstring(L, 2)));
     return 1;
@@ -14876,11 +14875,15 @@ local function create_mod_ext(moduleUuid, require_fn)
   return ext
 end
 
-local function load_mod_from(name, uuid, read, report)
+local function load_mod_from(name, uuid, read, report, boot)
+  -- boot is BootstrapModule.lua for the module-load state, else nil.
+  local preinit = boot ~= nil
   local config = read("Config.json")
   if not config then
-    Ext.Log.PrintWarning(string.format(
-      "bg3le: %s has no readable ScriptExtender/Config.json; skipped", name))
+    if not preinit then
+      Ext.Log.PrintWarning(string.format(
+        "bg3le: %s has no readable ScriptExtender/Config.json; skipped", name))
+    end
     return
   end
 
@@ -14894,8 +14897,10 @@ local function load_mod_from(name, uuid, read, report)
 
   local table_name = mod_table_name(config)
   if not table_name then
-    Ext.Log.PrintWarning(string.format(
-      "bg3le: %s has no ModTable in Config.json; skipping", name))
+    if not preinit then
+      Ext.Log.PrintWarning(string.format(
+        "bg3le: %s has no ModTable in Config.json; skipping", name))
+    end
     return
   end
   if uuid ~= nil then
@@ -14907,14 +14912,14 @@ local function load_mod_from(name, uuid, read, report)
   -- Each context runs its own bootstrap, as upstream does: the server
   -- state loads BootstrapServer.lua and the client state
   -- BootstrapClient.lua, and a mod that ships only one runs only there.
-  local boot = Ext.IsClient() and "BootstrapClient.lua" or "BootstrapServer.lua"
+  boot = boot or (Ext.IsClient() and "BootstrapClient.lua" or "BootstrapServer.lua")
   local source = read("Lua/" .. boot)
   if not source then return end
 
   -- Upstream names the script it is about to run, which is what tells you
   -- the order mods actually loaded in.
-  Ext.Log.Print(string.format(
-    "Loading bootstrap script: Mods/%s/ScriptExtender/Lua/%s", name, boot))
+  Ext.Log.Print(string.format("Loading %sbootstrap script: Mods/%s/ScriptExtender/Lua/%s",
+                              preinit and "preinit " or "", name, boot))
   local started = Ext.Utils.MonotonicTime()
 
   -- A mod's globals live in its own table, as upstream's do: writing
@@ -15197,9 +15202,12 @@ end
 -- (src/game_state.cpp) and for the server once Osiris is bound.
 local scripts_loaded = false
 
-function Ext._Internal.LoadModScripts()
-  if scripts_loaded then return end
-  scripts_loaded = true
+-- boot names another bootstrap to run instead (BootstrapModule.lua).
+function Ext._Internal.LoadModScripts(boot)
+  if boot == nil then
+    if scripts_loaded then return end
+    scripts_loaded = true
+  end
 
   for _, root in ipairs(mod_roots()) do
     local names = Ext._Internal.ListDir(root .. "/Mods")
@@ -15211,7 +15219,7 @@ function Ext._Internal.LoadModScripts()
         local uuid = string.match(meta,
           'id="UUID"%s+type="[%w]+"%s+value="([^"]+)"')
         load_mod_from(name, uuid,
-          function(path) return read_file(dir .. "/" .. path) end, nil)
+          function(path) return read_file(dir .. "/" .. path) end, nil, boot)
       end
     end
   end
@@ -15232,6 +15240,20 @@ function Ext._Internal.LoadModScripts()
     return a.Name < b.Name
   end)
 
+  local readers = {}
+  for _, module in ipairs(packed) do
+    local prefix = "Mods/" .. module.Name .. "/ScriptExtender/"
+    readers[module.Name] = function(path)
+      return Ext._Internal.PakRead(module.Pak, prefix .. path)
+    end
+  end
+  if boot ~= nil then
+    for _, module in ipairs(packed) do
+      load_mod_from(module.Name, module.Uuid, readers[module.Name], nil, boot)
+    end
+    return
+  end
+
   Ext.Log.Print(string.format(
     "bg3le: %d of %d packed script modules will load",
     #packed, #modules))
@@ -15239,12 +15261,7 @@ function Ext._Internal.LoadModScripts()
   -- Upstream lists what every mod asks of the extender before it runs any
   -- of them, then the merged view. Collected on a first pass so the list
   -- comes out whole rather than interleaved with the loading.
-  local readers = {}
   for _, module in ipairs(packed) do
-    local prefix = "Mods/" .. module.Name .. "/ScriptExtender/"
-    readers[module.Name] = function(path)
-      return Ext._Internal.PakRead(module.Pak, prefix .. path)
-    end
     local config = readers[module.Name]("Config.json")
     if config ~= nil then
       configs[#configs + 1] = {
@@ -15280,6 +15297,12 @@ function Ext._Internal.LoadModScripts()
     load_mod_from(module.Name, module.Uuid, readers[module.Name], nil)
   end
   mods_loaded = true
+end
+
+-- Upstream's LuaLoadPreinitBootstrap: each mod's BootstrapModule.lua, in the
+-- state the client builds just before the stats load.
+function Ext._Internal.LoadModuleBootstraps()
+  Ext._Internal.LoadModScripts("BootstrapModule.lua")
 end
 
 -- A session coming up, in two halves so that both contexts finish the first
@@ -16704,7 +16727,6 @@ end
         lua_pop(g_lua, 1);
     }
     run_sandbox();
-    bg3le_path_override_clear();
     statusf("LUA VM initialised (%s)", LUA_RELEASE);
 }
 
@@ -16863,8 +16885,24 @@ void lua_reset_client() {
     logf("lua: client context rebuilt");
 }
 
-// ModuleLoadStarted is not fired: upstream throws it only into the
-// BootstrapModule.lua state it discards here, which bg3le does not run.
+// Upstream's LoadExtensionState(Load) before RPGStats::Load: a fresh client
+// state runs each mod's BootstrapModule.lua, then ModuleLoadStarted.
+void lua_module_load_started() {
+    if (g_client_lua == nullptr) return;
+    lua_reset_client();
+    if (bg3le_mods_count() == 0) {
+        logf("lua: no module list yet; BootstrapModule.lua not run");
+        return;
+    }
+    {
+        InContext client(Side::Client);
+        if (!client) return;
+        call_internal("LoadModuleBootstraps");
+    }
+    fire_client_event("ModuleLoadStarted");
+}
+
+// The module-load state is discarded here for the game one, as upstream's is.
 void lua_stats_loaded() {
     if (g_client_lua == nullptr) return;
     lua_reset_client();

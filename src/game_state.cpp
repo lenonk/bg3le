@@ -28,6 +28,7 @@ extern "C" void bg3le_stats_module_loaded();
 extern "C" void bg3le_templates_invalidate();
 extern "C" void bg3le_stats_load_hooked();
 extern "C" void bg3le_stats_loading(bool loading);
+extern "C" void bg3le_path_override_clear();
 #include "targets.h"
 
 namespace bg3le {
@@ -126,6 +127,8 @@ std::uint64_t machine_update_hook(void* machine, void* a, void* b, void* c) {
         // Upstream's client resets on UnloadSession and loads again leaving
         // LoadMenu; its server resets there too and loads at the next
         // LoadSession, which is the story work here.
+        // Upstream's client ResetExtensionState drops the path overrides here.
+        if (std::strcmp(now, "UnloadSession") == 0) bg3le_path_override_clear();
         if (std::strcmp(now, "UnloadSession") == 0 && note_session_ended()) {
             logf("gamestate: session unloaded; rebuilding the Lua states");
             lua_reset(false);
@@ -157,6 +160,7 @@ StatsLoadProc g_stats_load = nullptr;
 // RPGStats::Load(paths), on the worker the client schedules it on.
 std::uint64_t stats_load_hook(void* paths, void* a, void* b, void* c) {
     logf("stats: RPGStats::Load starts");
+    lua_module_load_started();
     bg3le_stats_loading(true);
     const std::uint64_t result = g_stats_load(paths, a, b, c);
     logf("stats: RPGStats::Load done");

@@ -38,7 +38,9 @@ structure was found, and what was measured, is in
 
 - **Mods run.** Script Extender mods load straight out of their `.pak`s (or
   from loose directories via `BG3LE_MOD_PATH`) with upstream's mod
-  environment, bootstraps, `Ext.Require` and `require`. `PersistentVars`
+  environment, bootstraps (`BootstrapModule.lua` and `ModuleLoadStarted`
+  before the stats load, then each context's own), `Ext.Require` and
+  `require`. `PersistentVars`
   and persistent variables are saved in the savegame in bg3se's format, so a
   save moves between the two. Mod Configuration Menu works, menu and all.
 - **Two Lua contexts**, server and client, each on its own thread and
