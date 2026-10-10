@@ -12324,6 +12324,7 @@ function Ext._Internal.RunTimers()
   -- The pathfinding requests the engine has finished.
   if Ext._Internal.PathfindingUpdate then Ext._Internal.PathfindingUpdate() end
 
+  -- TODO: Ticks and Unknown are upstream's misreading; see EngineTime in src/game_state.cpp.
   Ext._Internal.FireEvent("Tick", {Time = {Time = time, DeltaTime = delta, Ticks = ticks,
                                            Unknown = unknown}})
 end

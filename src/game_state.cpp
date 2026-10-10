@@ -70,6 +70,9 @@ std::atomic<bool> g_left_load_module{false};
 
 // The GameTime each side's update is handed, laid out as bg3se::GameTime.
 // Upstream's timers, Tick and Ext.Timer.GameTime all run on it.
+// TODO: both builds lay it out {double Time; float DeltaTime; float DeltaTime2;
+// int32 Ticks}, so upstream's Ticks is +0x0c's float bits and its Unknown holds
+// the real tick count. Kept as upstream reads it until bg3se fixes the struct.
 struct EngineTime {
     double Time;
     float DeltaTime;
@@ -97,7 +100,7 @@ void note_engine_time(EngineClock& clock, void const* time, char const* side) {
         clock.time = now;
         clock.seen = true;
     }
-    if (first) logf("gametime: the %s's clock reads %.3f s at tick %d", side, now.Time, now.Ticks);
+    if (first) logf("gametime: the %s's clock reads %.3f s, delta %.4f s", side, now.Time, now.DeltaTime);
 }
 
 // Upstream's client tick is a post-hook on GameStateMachine::Update, which
