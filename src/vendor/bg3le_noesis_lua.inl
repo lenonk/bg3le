@@ -347,8 +347,14 @@ void push_property(lua_State* L, BaseObject const* obj, TypeProperty const* prop
     auto objType = obj->GetClassType();
     auto ref = [&]() { return const_cast<void*>(property_address(prop, obj)); };
 
-    // A write-only property has nothing to read, through either accessor.
-    if (getter_missing(prop, 6) || getter_missing(prop, 7)) {
+    // Only the accessor this type is read through has to exist: a string property
+    // (ls.VMDiceStyle.Name) has its address getter and no copying one.
+    const bool byAddress = typeOfType == types.TypePtr.Type
+        || type == types.Color.Type || type == types.Rect.Type || type == types.Thickness.Type
+        || type == types.CornerRadius.Type || type == types.Vector2.Type || type == types.Point.Type
+        || type == types.Vector3.Type || type == types.ICommand.Type || type == types.String.Type
+        || type == types.Uri.Type || type == types.LocaString.Type;
+    if (getter_missing(prop, byAddress ? 6 : 7)) {
         lua_pushnil(L);
         return;
     }
