@@ -27,6 +27,7 @@
 #include <mutex>
 
 #include "../log.h"
+#include "../sdl_input_ownership.h"
 
 namespace bg3le {
 void imgui_apply_injected_input();
@@ -178,7 +179,9 @@ int SDLManager::OnPollEvent(SDLPollEventProc* wrapped, SDL_Event* event)
                 || event->type == SDL_MOUSEBUTTONDOWN
                 || event->type == SDL_MOUSEBUTTONUP
                 || event->type == SDL_MOUSEWHEEL);
-        if (!text && !mouse) return 1;
+        // Capture may begin while a game key/button is already held. ImGui has
+        // processed this release too; keep the game's input state balanced.
+        if ((!text && !mouse) || bg3le::sdl_preserve_game_release(event)) return 1;
         // A bound on a stream that never ends; the next call carries on.
         if (skipped >= 256) return 0;
     }

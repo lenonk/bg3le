@@ -22,6 +22,7 @@
 
 #include "log.h"
 #include "lua_host.h"
+#include "sdl_input_ownership.h"
 
 namespace bg3le {
 
@@ -71,6 +72,15 @@ namespace {
 // SDLManager::InjectEvent does; like upstream's, they skip the input events.
 std::mutex g_inject_mutex;
 std::deque<SDL_Event> g_injected;
+bg3le::GameInputOwnership g_game_input;
+struct PollInputScope;
+thread_local PollInputScope* g_poll_input = nullptr;
+struct PollInputScope {
+    bool preservedRelease = false;
+    PollInputScope* previous = g_poll_input;
+    PollInputScope() { g_poll_input = this; }
+    ~PollInputScope() { g_poll_input = previous; }
+};
 std::atomic<bool> g_have_injected{false};
 
 bool take_injected(SDL_Event* event) {
@@ -129,6 +139,12 @@ bool dispatch_input(SDL_Event const* e) {
 
 }  // namespace
 
+bool bg3le::sdl_preserve_game_release(SDL_Event const* event) {
+    if (g_poll_input == nullptr || event == nullptr || !g_game_input.OwnsRelease(*event)) return false;
+    g_poll_input->preservedRelease = true;
+    return true;
+}
+
 extern "C" SDL_Window* SDL_CreateWindow(char const* title, int x, int y,
                                         int w, int h, Uint32 flags) {
     using Fn = SDL_Window* (*)(char const*, int, int, int, int, Uint32);
@@ -148,16 +164,22 @@ extern "C" int SDL_PollEvent(SDL_Event* event) {
     using Fn = int (*)(SDL_Event*);
     static const Fn next = real<Fn>("SDL_PollEvent");
     if (next == nullptr) return 0;
+    PollInputScope poll;
     // Native plugins start with the game's event loop, once the engine is up.
     bg3le::plugins_load();
-    if (event != nullptr && take_injected(event)) return 1;
+    if (event != nullptr && take_injected(event)) {
+        g_game_input.Delivered(*event);
+        return 1;
+    }
 
     int result = bg3le::imgui_overlay_wanted()
         ? bg3le::sdl_on_poll_event(next, event) : next(event);
     // After the overlay has had it, as upstream orders them.
-    if (result == 1 && dispatch_input(event)) result = 0;
+    const bool ownedRelease = result == 1 && poll.preservedRelease;
+    if (result == 1 && event != nullptr && dispatch_input(event) && !ownedRelease) result = 0;
     // Plugins see what is left for the game.
-    if (result == 1 && event != nullptr && bg3le::plugins_dispatch_event(event)) result = 0;
+    if (result == 1 && event != nullptr && bg3le::plugins_dispatch_event(event) && !ownedRelease) result = 0;
+    if (result == 1 && event != nullptr) g_game_input.Delivered(*event);
     return result;
 }
 
