@@ -119,11 +119,14 @@ private:
     IMGUIObjectManager* objects_{ nullptr };
 
     bool reducedFontAtlas_{ false };
+    STDString fontLanguage_; // bg3le: the language the built-in fonts were built for
     bool initialized_{ false };
     bool enableUI_{ false };
     unsigned frameNo_{ 0 };
 
     bool LoadFont(FontData& request);
+    void LoadLanguageFonts();
+    void RefreshFontLanguage();
     void OnViewportUpdated();
     void UpdateStyle();
 };

@@ -172,6 +172,10 @@ CHECKS = [
     ("icon atlases register their resident texture",
      lambda: "reinterpret_cast<TextureDescriptor*>(atlas->Texture)" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")
              and "bool Resident{ false };" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.h")),
+    ("the IMGUI built-in fonts are rebuilt when the language turns up",
+     lambda: "RefreshFontLanguage(); // bg3le" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")
+             and "fontLanguage_ = language;" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")
+             and "STDString fontLanguage_;" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.h")),
     ("GlobalSwitches has this build's SoundSetting size and tail padding",
      lambda: "uint64_t field_58_bg3le;" in text("BG3Extender/GameDefinitions/Misc.h")
              and "uint64_t field_12F0_bg3le;" in text("BG3Extender/GameDefinitions/Misc.h")),

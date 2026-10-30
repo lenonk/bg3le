@@ -29,6 +29,14 @@ void extender_set_global_switches(void* engineSwitches);
 
 namespace {
 
+// The overlay looks again every second until the object is up; say each reason once.
+int g_said = 0;
+bool first_time(int reason) {
+    if (g_said == reason) return false;
+    g_said = reason;
+    return true;
+}
+
 // `mov rsi, [rip+disp]` loading it in the settings registration.
 constexpr unsigned char kLoadBytes[] = {0x48, 0x8b, 0x35};
 
@@ -42,20 +50,25 @@ void* find() {
     unsigned char code[7] = {};
     if (!safe_read((void const*)(bias + bg3le::target::GlobalSwitchesLoad()), code, sizeof(code))
         || std::memcmp(code, kLoadBytes, sizeof(kLoadBytes)) != 0) {
-        logf("global switches: the loading instruction is not at image+%#lx",
-             (unsigned long)bg3le::target::GlobalSwitchesLoad());
+        if (first_time(1)) {
+            logf("global switches: the loading instruction is not at image+%#lx",
+                 (unsigned long)bg3le::target::GlobalSwitchesLoad());
+        }
         return nullptr;
     }
     std::int32_t disp = 0;
     std::memcpy(&disp, code + 3, sizeof(disp));
     if (bg3le::target::GlobalSwitchesLoad() + sizeof(code) + disp != bg3le::target::GlobalSwitches()) {
-        logf("global switches: image+%#lx no longer loads image+%#lx",
-             (unsigned long)bg3le::target::GlobalSwitchesLoad(), (unsigned long)bg3le::target::GlobalSwitches());
+        if (first_time(2)) {
+            logf("global switches: image+%#lx no longer loads image+%#lx",
+                 (unsigned long)bg3le::target::GlobalSwitchesLoad(), (unsigned long)bg3le::target::GlobalSwitches());
+        }
         return nullptr;
     }
 
     char* object = nullptr;
     if (!safe_read((void const*)(bias + bg3le::target::GlobalSwitches()), &object, sizeof(object)) || object == nullptr) {
+        if (first_time(3)) logf("global switches: not created yet");
         return nullptr;
     }
     // Language, "English" on an English install: inline or on the heap, read
@@ -68,7 +81,7 @@ void* find() {
     char language[64] = {};
     const std::size_t n = copy->size();
     if (n == 0 || n >= sizeof(language) || !safe_read(copy->data(), language, n)) {
-        logf("global switches: no language where it is declared");
+        if (first_time(4)) logf("global switches: no language where it is declared");
         return nullptr;
     }
     for (std::size_t i = 0; i < n; ++i) {

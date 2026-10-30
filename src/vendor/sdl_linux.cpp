@@ -32,6 +32,7 @@ namespace bg3le {
 void imgui_apply_injected_input();
 void imgui_overlay_tick();
 }
+extern "C" void* bg3le_global_switches();
 
 BEGIN_SE()
 
@@ -54,6 +55,9 @@ void SDLManager::DisableHooks() {}
 
 void SDLManager::InitializeUI()
 {
+    // IMGUIManager::InitializeUI picks its fonts by language right after this.
+    bg3le_global_switches();
+
     if (enableUI_) return;
 
     if (window_ == nullptr) {

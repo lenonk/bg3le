@@ -49,6 +49,7 @@
 #include "../log.h"
 
 extern "C" bool bg3le_game_allocator_ready();
+extern "C" void* bg3le_global_switches();
 
 namespace bg3le {
 
@@ -412,6 +413,14 @@ void imgui_overlay_tick() {
         bool* Flag;
         ~Leave() { *Flag = false; }
     } leave{&inside};
+
+    // Until the engine's settings are found the fonts are built for no language; Update rebuilds them once they are.
+    static bool switches = false;
+    static auto next_look = std::chrono::steady_clock::time_point{};
+    if (!switches && std::chrono::steady_clock::now() >= next_look) {
+        switches = bg3le_global_switches() != nullptr;
+        next_look = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    }
 
     try {
         const std::lock_guard<std::mutex> held(frame_lock());

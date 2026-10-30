@@ -1900,28 +1900,61 @@ void IMGUIManager::InitializeUI()
     GImGui->PlatformIO.Platform_SetClipboardTextFn = setClipboardText;
 
     UpdateStyle();
+    LoadLanguageFonts();
 
+    initialized_ = true;
+}
+
+// bg3le: InitializeUI's built-in fonts, also rebuilt by RefreshFontLanguage.
+void IMGUIManager::LoadLanguageFonts()
+{
     auto const& language = GetStaticSymbols().GetGlobalSwitches()->Language;
+    fontLanguage_ = language;
     // Disable very small font sizes for fonts with small glyphs
     reducedFontAtlas_ =
         language == "Japanese"
         || language == "Chinese"
         || language == "ChineseTraditional";
 
+    // A font a mod loaded under a built-in name is kept.
+    auto load = [this](FixedString const& name, float size) {
+        if (fonts_.find(name) == fonts_.end()) LoadFont(name, "", size);
+    };
+
     if (reducedFontAtlas_) {
-        LoadFont(GFS.strMedium, "", 32.0f);
-        LoadFont(GFS.strDefault, "", 36.0f);
-        LoadFont(GFS.strLarge, "", 40.0f);
+        load(GFS.strMedium, 32.0f);
+        load(GFS.strDefault, 36.0f);
+        load(GFS.strLarge, 40.0f);
     } else {
-        LoadFont(GFS.strTiny, "", 24.0f);
-        LoadFont(GFS.strSmall, "", 28.0f);
-        LoadFont(GFS.strMedium, "", 32.0f);
-        LoadFont(GFS.strDefault, "", 36.0f);
-        LoadFont(GFS.strLarge, "", 40.0f);
-        LoadFont(GFS.strBig, "", 44.0f);
+        load(GFS.strTiny, 24.0f);
+        load(GFS.strSmall, 28.0f);
+        load(GFS.strMedium, 32.0f);
+        load(GFS.strDefault, 36.0f);
+        load(GFS.strLarge, 40.0f);
+        load(GFS.strBig, 44.0f);
+    }
+}
+
+// bg3le: the overlay can start before bg3le finds the engine's settings, on a default with no language.
+// When the language changes, the fonts without a file of their own are rebuilt for it.
+void IMGUIManager::RefreshFontLanguage()
+{
+    if (GetStaticSymbols().GetGlobalSwitches()->Language == fontLanguage_) return;
+
+    for (auto const& name : { GFS.strTiny, GFS.strSmall, GFS.strMedium, GFS.strDefault, GFS.strLarge, GFS.strBig }) {
+        auto font = fonts_.find(name);
+        if (font != fonts_.end() && font->Value().Path.empty()) {
+            fonts_.remove(name);
+        }
     }
 
-    initialized_ = true;
+    ImGui::GetIO().Fonts->Clear();
+    for (auto& font : fonts_) {
+        font->Value().Font = nullptr;
+        LoadFont(font->Value());
+    }
+    LoadLanguageFonts();
+    renderer_->ReloadFonts();
 }
 
 void IMGUIManager::DestroyUI()
@@ -2219,6 +2252,7 @@ void IMGUIManager::Update()
         || fontScaleMultiplier_ != requestedFontScaleMultiplier_) {
         UpdateStyle();
     }
+    RefreshFontLanguage(); // bg3le
 
     {
         OPTICK_EVENT("SDL New Frame", Optick::Category::Rendering);

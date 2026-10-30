@@ -169,12 +169,8 @@ void extender_globals_init() {
          "engine's is confirmed)");
 }
 
-// Points GetGlobalSwitches() at the engine's own object.
-//
-// Nothing calls this yet -- the search in src/vendor/global_switches.cpp
-// refuses, because bg3se's declared layout is not this build's. It is here so
-// that locating the object is the only work left, rather than locating it and
-// then finding out where it has to be plumbed.
+// Points GetGlobalSwitches() at the engine's own object, once
+// src/vendor/global_switches.cpp has found it.
 void extender_set_global_switches(void* engineSwitches) {
     const std::lock_guard<std::mutex> held(lock());
     g_switches = engineSwitches != nullptr

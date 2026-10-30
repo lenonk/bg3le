@@ -412,6 +412,17 @@ atlas's texture as upstream does, so the engine keeps it while ImGui draws
 it. Only a texture the engine does not track is registered as it is, marked
 resident so no reference is dropped for it.
 
+**`Extender/Client/IMGUI/IMGUI.{h,cpp}` — the built-in fonts follow the
+game's language.** Upstream picks the font file and glyph ranges once, in
+`InitializeUI`, from `GlobalSwitches::Language`. bg3le can reach that point
+before it has found the engine's settings, on its own default with no
+language, which gave Russian players Latin-only fonts (MCM drew `????`).
+`InitializeUI`'s font block is now `LoadLanguageFonts`, which records the
+language it built for, and `Update` calls `RefreshFontLanguage`: when the
+language has changed, the built-in sizes without a font file of their own are
+dropped, the atlas is rebuilt as `UpdateStyle` rebuilds it, and the sizes for
+the new language are loaded. A font a mod loaded under a built-in name stays.
+
 **`Lua/Libs/ClientUI/Builtins.inl` and `GameDefinitions/UI.h` — the Noesis
 functions go to the game's own copies.** Upstream links no Noesis library, so
 these reimplement `Reflection`, `SymbolManager`, `TypeClass`, `BaseCommand`
