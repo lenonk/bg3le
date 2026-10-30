@@ -31,6 +31,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../game_files.h"
 #include "../log.h"
 #include "../mem.h"
 #include "../pak.h"
@@ -63,33 +64,19 @@ Strings& state() {
     return s;
 }
 
-// The language the install is configured for, from
-// Data/Localization/language.lsx. Read rather than assumed so a
-// non-English install resolves its own strings.
-std::string configured_language(std::string const& dataRoot) {
-    const std::string path = dataRoot + "/Localization/language.lsx";
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (f == nullptr) return "English";
-
-    std::string contents;
-    char block[8192];
-    std::size_t got = 0;
-    while ((got = std::fread(block, 1, sizeof(block), f)) > 0) {
-        contents.append(block, got);
+// Whether a .loca file is the base text, and not one of the gendered variants
+// the engine selects between: Gender/ holds some, and <language>_to_F.loca,
+// <language>_M_to_X.loca and the like sit beside the base file. English ships
+// those empty; Russian's rewrite thousands of lines ("обманул" -> "обманула").
+bool base_text(std::string_view path) {
+    if (path.find("/Gender/") != std::string_view::npos) return false;
+    for (std::string_view variant : {"_to_F.loca", "_to_M.loca", "_to_X.loca"}) {
+        if (path.size() >= variant.size()
+            && path.compare(path.size() - variant.size(), variant.size(), variant) == 0) {
+            return false;
+        }
     }
-    std::fclose(f);
-
-    // <attribute id="Value" value="English" type="20" />, the entry whose
-    // MapKey is Language.
-    const std::size_t key = contents.find("\"Language\"");
-    if (key == std::string::npos) return "English";
-    const std::size_t value = contents.find("id=\"Value\" value=\"", key);
-    if (value == std::string::npos) return "English";
-
-    const std::size_t from = value + std::strlen("id=\"Value\" value=\"");
-    const std::size_t to = contents.find('"', from);
-    if (to == std::string::npos || to <= from) return "English";
-    return contents.substr(from, to - from);
+    return path.size() > 5 && path.compare(path.size() - 5, 5, ".loca") == 0;
 }
 
 // Indexes one .loca file. Later files override earlier ones, which is the
@@ -178,14 +165,15 @@ bool build() {
     const std::string root = data_root();
     if (root.empty()) return false;
 
-    const std::string language = configured_language(root);
-    // Localization/<Language>/, and not the Gender subdirectories: those
-    // are per-pronoun overrides the engine keeps in separate pools and
-    // selects between, not part of the base text.
+    const std::string& language = game_language();
     const std::string prefix = "Localization/" + language + "/";
 
     Strings found{};
     std::vector<std::string> archives = paks_in(root + "/Localization");
+    // Every language but English keeps its text in a folder of its own.
+    for (std::string const& pak : paks_in(root + "/Localization/" + language)) {
+        archives.push_back(pak);
+    }
     for (std::string const& pak : paks_in(root)) archives.push_back(pak);
     for (std::string const& pak : paks_in(user_mods_directory())) {
         archives.push_back(pak);
@@ -199,11 +187,7 @@ bool build() {
             [&](char const* name) {
                 std::string_view path(name);
                 if (path.find(prefix) == std::string_view::npos) return false;
-                if (path.find("/Gender/") != std::string_view::npos) {
-                    return false;
-                }
-                return path.size() > 5
-                       && path.compare(path.size() - 5, 5, ".loca") == 0;
+                return base_text(path);
             },
             [&](char const*, char const* data, std::size_t size) {
                 found.Blobs.emplace_back(data, size);

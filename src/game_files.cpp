@@ -64,6 +64,9 @@ std::vector<std::string> archives() {
     for (std::string const& pak : paks_in(root + "/Localization")) {
         all.push_back(pak);
     }
+    for (std::string const& pak : paks_in(root + "/Localization/" + game_language())) {
+        all.push_back(pak);
+    }
 
     // Stable, so two archives of equal priority keep their name order.
     std::stable_sort(all.begin(), all.end(),
@@ -138,6 +141,34 @@ std::string const& game_data_root() {
         return path.substr(0, bin) + "/Data";
     }();
     return root;
+}
+
+std::string const& game_language() {
+    static std::string const language = [] {
+        const std::string path = game_data_root() + "/Localization/language.lsx";
+        std::FILE* f = std::fopen(path.c_str(), "rb");
+        if (f == nullptr) return std::string("English");
+
+        std::string contents;
+        char block[8192];
+        while (const std::size_t got = std::fread(block, 1, sizeof(block), f)) {
+            contents.append(block, got);
+        }
+        std::fclose(f);
+
+        // <attribute id="Value" value="English" type="20" />, the entry whose
+        // MapKey is Language.
+        const std::size_t key = contents.find("\"Language\"");
+        if (key == std::string::npos) return std::string("English");
+        const std::size_t value = contents.find("id=\"Value\" value=\"", key);
+        if (value == std::string::npos) return std::string("English");
+
+        const std::size_t from = value + std::strlen("id=\"Value\" value=\"");
+        const std::size_t to = contents.find('"', from);
+        if (to == std::string::npos || to <= from) return std::string("English");
+        return contents.substr(from, to - from);
+    }();
+    return language;
 }
 
 bool game_file_read(char const* relative, std::string* out) {

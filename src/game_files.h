@@ -17,6 +17,11 @@ namespace bg3le {
 // The install's Data directory, derived from the running executable.
 std::string const& game_data_root();
 
+// The language the install is configured for, from
+// Data/Localization/language.lsx; "English" when that cannot be read. Its
+// archives are in Data/Localization/<Language>/, except English's.
+std::string const& game_language();
+
 // The contents of a Data-relative path, e.g.
 // "Public/Game/GUI/Assets/Fonts/QuadraatOffcPro/QuadraatOffcPro.ttf".
 //
