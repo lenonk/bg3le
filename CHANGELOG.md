@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.0-beta2 (2026-10-30)
+
+- The overlay's fonts are built for the game's language. They were built a few seconds after launch, before bg3le
+  had found the game's settings, so they held Latin letters only: Russian MCM text drew as `????`, and Korean,
+  Japanese and Chinese lost their fonts the same way. bg3le now finds the settings first, and rebuilds the fonts
+  if the language turns up later (#7, thanks to breitzer).
+- A font a mod loads from its own file, such as MCM's Inter, gets Cyrillic for Russian and Ukrainian and the
+  Turkish letters for Turkish. Upstream gives such fonts Latin only, so this goes beyond what Windows does.
+- A non-English install's own text is read. Steam keeps every language but English in a folder of its own
+  (`Data/Localization/Russian/Russian.pak`), which bg3le did not look in, so `Ext.Loca` had only the strings mods
+  ship. The gendered variants beside the base text (`russian_to_F.loca` and the like) are left out, as the engine
+  chooses between them.
+
 ## v0.4.0-beta1 (2026-10-27)
 
 - Script Extender API v33. The vendored bg3se is upstream's v33, and what upstream changed in it is followed:
