@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.4.0-beta2 (2026-10-30)
+## v0.4.1 (2026-10-30)
 
 - The overlay's fonts are built for the game's language. They were built a few seconds after launch, before bg3le
   had found the game's settings, so they held Latin letters only: Russian MCM text drew as `????`, and Korean,
