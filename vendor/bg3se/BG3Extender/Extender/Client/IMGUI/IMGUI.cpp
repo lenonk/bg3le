@@ -2027,8 +2027,8 @@ bool IMGUIManager::LoadFont(FontData& request)
 {
     auto path = request.Path;
     auto glyphRanges = ImGui::GetIO().Fonts->GetGlyphRangesDefault();
+    auto const& language = GetStaticSymbols().GetGlobalSwitches()->Language;
     if (path.empty()) {
-        auto const& language = GetStaticSymbols().GetGlobalSwitches()->Language;
         if (language == "Korean") {
             path = "Public/Game/GUI/Assets/Fonts/NotoSerifKR-Regular.otf";
             glyphRanges = ImGui::GetIO().Fonts->GetGlyphRangesKorean();
@@ -2051,6 +2051,11 @@ bool IMGUIManager::LoadFont(FontData& request)
 
             path = "Public/Game/GUI/Assets/Fonts/QuadraatOffcPro/QuadraatOffcPro.ttf";
         }
+    // bg3le: a mod's own font gets its language's alphabet too; upstream gave it Latin only.
+    } else if (language == "Russian" || language == "Ukrainian") {
+        glyphRanges = ImGui::GetIO().Fonts->GetGlyphRangesCyrillic();
+    } else if (language == "Turkish") {
+        glyphRanges = GetGlyphRangesTurkish();
     }
 
     auto blob = script::LoadExternalFile(path, PathRootType::Data);

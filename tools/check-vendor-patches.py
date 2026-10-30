@@ -176,6 +176,8 @@ CHECKS = [
      lambda: "RefreshFontLanguage(); // bg3le" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")
              and "fontLanguage_ = language;" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")
              and "STDString fontLanguage_;" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.h")),
+    ("a mod's own IMGUI font gets its language's alphabet",
+     lambda: "// bg3le: a mod's own font gets its language's alphabet too" in text("BG3Extender/Extender/Client/IMGUI/IMGUI.cpp")),
     ("GlobalSwitches has this build's SoundSetting size and tail padding",
      lambda: "uint64_t field_58_bg3le;" in text("BG3Extender/GameDefinitions/Misc.h")
              and "uint64_t field_12F0_bg3le;" in text("BG3Extender/GameDefinitions/Misc.h")),

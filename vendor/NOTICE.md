@@ -423,6 +423,14 @@ language has changed, the built-in sizes without a font file of their own are
 dropped, the atlas is rebuilt as `UpdateStyle` rebuilds it, and the sizes for
 the new language are loaded. A font a mod loaded under a built-in name stays.
 
+**`Extender/Client/IMGUI/IMGUI.cpp` — a mod's own font gets its language's
+alphabet.** Upstream's `LoadFont` picks glyph ranges by language only for the
+built-in fonts; a font loaded from a file gets Latin only. MCM's Inter is such
+a font, so Russian MCM text drew as `????` once Inter was chosen. Russian and
+Ukrainian now add Cyrillic and Turkish adds its letters to every font; a font
+without those glyphs simply has none to add. CJK is left as upstream has it:
+its ranges are tens of thousands of glyphs per size.
+
 **`Lua/Libs/ClientUI/Builtins.inl` and `GameDefinitions/UI.h` — the Noesis
 functions go to the game's own copies.** Upstream links no Noesis library, so
 these reimplement `Reflection`, `SymbolManager`, `TypeClass`, `BaseCommand`
