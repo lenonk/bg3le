@@ -62,7 +62,7 @@ namespace {
 // mean two managers, one drawing and one being written to. This drives the
 // one the widgets can see.
 bool g_started = false;
-bool g_waiting_said = false;
+unsigned g_waiting_said = 0;
 
 bg3se::extui::IMGUIManager* manager() {
     if (bg3se::gExtender == nullptr) return nullptr;
@@ -94,15 +94,22 @@ void imgui_flush_events();
 void imgui_overlay_start() {
     if (g_started || !imgui_overlay_wanted()) return;
 
+    // The first call is the library constructor's and always waits; the
+    // ones that matter are vkCreateInstance's, and one of those finding no
+    // heap means the instance is created without the overlay's hooks.
     if (!bg3le_game_allocator_ready()) {
-        if (!g_waiting_said) {
-            g_waiting_said = true;
+        if (g_waiting_said == 0) {
             logf("imgui: waiting for the engine heap before building the "
                  "overlay");
+        } else if (g_waiting_said < 4) {
+            logf("imgui: still no engine heap at this Vulkan instance; it "
+                 "will be created without the overlay");
         }
+        ++g_waiting_said;
         return;
     }
     g_started = true;
+    logf("imgui: engine heap ready; building the overlay");
 
     try {
         extender_globals_init();

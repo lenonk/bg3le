@@ -30,6 +30,10 @@
 // (https://github.com/Norbyte/bg3se); the forwarding is ours.
 
 #include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 
 #include <atomic>
@@ -115,6 +119,12 @@ extern "C" VkResult vkCreateInstance(VkInstanceCreateInfo const* info,
     using Fn = VkResult (*)(VkInstanceCreateInfo const*,
                             VkAllocationCallbacks const*, VkInstance*);
     static const Fn next = real<Fn>("vkCreateInstance");
+    static std::atomic<unsigned> calls{0};
+
+    const unsigned n = ++calls;
+    if (n <= 4) {
+        bg3le::logf("vulkan: vkCreateInstance #%u reached bg3le", n);
+    }
 
     bg3le::vulkan_register_forwarders();
     bg3le::imgui_overlay_start();
@@ -480,6 +490,154 @@ void vulkan_register_forwarders() {
     }
     logf("imgui: registered %zu Vulkan forwarders",
          sizeof(kEntries) / sizeof(kEntries[0]));
+}
+
+}  // namespace bg3le
+
+// The game's own dlsym, so that its Vulkan loader lands on ours.
+//
+// Everything above assumes the game reaches vkGetInstanceProcAddr through the
+// dynamic linker's global scope, where libbg3le.so is preloaded ahead of the
+// loader. Game v4.76 does not: bg3 has no NEEDED entry for libvulkan, and
+// opens it itself --
+//
+//     h = dlopen("libvulkan.so", RTLD_NOW);       // bg3+0x36b5eca
+//     gipa = dlsym(h, "vkGetInstanceProcAddr");    // bg3+0x36b5ee6
+//
+// A handle-scoped dlsym searches only that library and its dependencies, so
+// it returns the loader's function and nothing exported here is ever called:
+// no vkCreateInstance, so the overlay never got past "waiting for the engine
+// heap", and no memory steering either.
+//
+// So the executable's own GOT slot for dlsym is pointed here, and a lookup of
+// vkGetInstanceProcAddr is answered with ours, which chains to the loader's
+// through RTLD_NEXT exactly as before. Only the executable's slot: exporting
+// dlsym from the library would make every other library's dlsym(RTLD_NEXT)
+// resolve relative to us instead of to its caller.
+namespace {
+
+// The game makes one dlsym(RTLD_NEXT, ...) call, for pthread_create, and
+// glibc resolves RTLD_NEXT against the return address -- which is now in
+// this library, not the executable. The executable is always first in the
+// global scope, so "next after the executable" is the global scope without
+// it: RTLD_DEFAULT, unless the executable defines the name itself, in which
+// case ours (RTLD_NEXT from here) is the closest stand-in.
+ElfW(Addr) g_main_base = 0;
+
+void* game_next(char const* name) {
+    void* found = ::dlsym(RTLD_DEFAULT, name);
+    Dl_info info{};
+    if (found != nullptr && ::dladdr(found, &info) != 0
+        && (ElfW(Addr))info.dli_fbase == g_main_base) {
+        return ::dlsym(RTLD_NEXT, name);
+    }
+    return found;
+}
+
+void* game_dlsym(void* handle, char const* name) {
+    void* found = handle == RTLD_NEXT ? game_next(name)
+                                      : ::dlsym(handle, name);
+    if (found == nullptr || name == nullptr
+        || std::strcmp(name, "vkGetInstanceProcAddr") != 0) {
+        return found;
+    }
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true)) {
+        bg3le::logf("vulkan: the game asked dlsym for vkGetInstanceProcAddr; "
+                    "answering with bg3le's (loader's is %p)", found);
+    }
+    return (void*)&vkGetInstanceProcAddr;
+}
+
+struct MainObject {
+    ElfW(Addr) Bias = 0;
+    ElfW(Dyn) const* Dynamic = nullptr;
+    ElfW(Addr) RelroStart = 0;
+    ElfW(Addr) RelroEnd = 0;
+};
+
+int find_main(struct dl_phdr_info* info, std::size_t, void* data) {
+    auto* out = static_cast<MainObject*>(data);
+    for (int i = 0; i < info->dlpi_phnum; ++i) {
+        ElfW(Phdr) const& ph = info->dlpi_phdr[i];
+        if (ph.p_type == PT_DYNAMIC) {
+            out->Dynamic = (ElfW(Dyn) const*)(info->dlpi_addr + ph.p_vaddr);
+        } else if (ph.p_type == PT_GNU_RELRO) {
+            out->RelroStart = info->dlpi_addr + ph.p_vaddr;
+            out->RelroEnd = out->RelroStart + ph.p_memsz;
+        }
+    }
+    out->Bias = info->dlpi_addr;
+    return 1;  // the first object is the executable
+}
+
+}  // namespace
+
+namespace bg3le {
+
+// Points the executable's dlsym slot at game_dlsym. From the library
+// constructor: before main, so before the game opens the loader, and while
+// there is one thread.
+void vulkan_redirect_game_dlsym() {
+    MainObject main;
+    ::dl_iterate_phdr(find_main, &main);
+    if (main.Dynamic == nullptr) {
+        logf("vulkan: no dynamic section in the executable; leaving dlsym alone");
+        return;
+    }
+
+    // glibc relocates these in place for the main object; allow for either.
+    auto at = [&](ElfW(Addr) v) { return v < main.Bias ? main.Bias + v : v; };
+    ElfW(Addr) jmprel = 0, symtab = 0, strtab = 0;
+    std::size_t pltrelsz = 0;
+    for (ElfW(Dyn) const* d = main.Dynamic; d->d_tag != DT_NULL; ++d) {
+        switch (d->d_tag) {
+            case DT_JMPREL: jmprel = at(d->d_un.d_ptr); break;
+            case DT_PLTRELSZ: pltrelsz = d->d_un.d_val; break;
+            case DT_SYMTAB: symtab = at(d->d_un.d_ptr); break;
+            case DT_STRTAB: strtab = at(d->d_un.d_ptr); break;
+        }
+    }
+    if (jmprel == 0 || symtab == 0 || strtab == 0) {
+        logf("vulkan: the executable has no PLT relocations; leaving dlsym alone");
+        return;
+    }
+
+    auto const* rel = (ElfW(Rela) const*)jmprel;
+    auto const* syms = (ElfW(Sym) const*)symtab;
+    auto const* names = (char const*)strtab;
+    void** slot = nullptr;
+    for (std::size_t i = 0; i < pltrelsz / sizeof(ElfW(Rela)); ++i) {
+        if (ELF64_R_TYPE(rel[i].r_info) != R_X86_64_JUMP_SLOT) continue;
+        if (std::strcmp(names + syms[ELF64_R_SYM(rel[i].r_info)].st_name, "dlsym") != 0) {
+            continue;
+        }
+        slot = (void**)(main.Bias + rel[i].r_offset);
+        break;
+    }
+    if (slot == nullptr) {
+        // An executable that links libvulkan needs none of this: the
+        // exports are reached through the global scope.
+        logf("vulkan: the executable does not import dlsym; leaving it alone");
+        return;
+    }
+
+    // Lazily bound, as v4.76 is, .got.plt is writable and must stay so: the
+    // resolver writes the other slots on that page as they are first called.
+    // Only a slot under RELRO (BIND_NOW) needs unprotecting and putting back.
+    const auto addr = (ElfW(Addr))slot;
+    const bool relro = addr >= main.RelroStart && addr < main.RelroEnd;
+    const auto page = (ElfW(Addr))::sysconf(_SC_PAGESIZE);
+    void* page_at = (void*)(addr & ~(page - 1));
+    if (relro && ::mprotect(page_at, page, PROT_READ | PROT_WRITE) != 0) {
+        logf("vulkan: could not unprotect the dlsym slot; leaving it alone");
+        return;
+    }
+    g_main_base = main.Bias;
+    void* was = __atomic_exchange_n(slot, (void*)&game_dlsym, __ATOMIC_SEQ_CST);
+    if (relro) ::mprotect(page_at, page, PROT_READ);
+    logf("vulkan: the game's dlsym slot %#lx -> bg3le (was %p%s)",
+         (unsigned long)(addr - main.Bias), was, relro ? ", RELRO" : "");
 }
 
 }  // namespace bg3le

@@ -55,6 +55,8 @@ namespace bg3le {
 // Defined in src/vendor/imgui_overlay.cpp, which needs bg3se headers this
 // file does not include.
 void imgui_overlay_start();
+// Defined in src/vulkan_forward.cpp.
+void vulkan_redirect_game_dlsym();
 
 
 namespace {
@@ -1394,6 +1396,10 @@ __attribute__((constructor)) static void bg3le_init() {
     if (const char* at = std::getenv("BG3LE_STACKDUMP_AT")) {
         bg3le::schedule_stack_dump(std::atof(at), "BG3LE_STACKDUMP_AT");
     }
+
+    // Before main, so before the game opens the Vulkan loader itself and
+    // asks it -- not the global scope -- for vkGetInstanceProcAddr.
+    bg3le::vulkan_redirect_game_dlsym();
 
     // Before the game creates its Vulkan instance, which is what the
     // overlay's first hook is on. Off with BG3LE_IMGUI=0.
