@@ -15172,6 +15172,15 @@ local STAT_KIND_UNWRITABLE = {
   [11] = "deprecated upstream and reported as nil",
 }
 
+-- Stats objects are userdata, as upstream's are, so a mod's type(stat) checks
+-- take bg3se's path; each one's name, address and cache are kept here.
+local stat_proxy = {}
+stat_proxy.__bg3leState = setmetatable({}, {__mode = "k"})
+function stat_proxy.__bg3leField(self, key)
+  local state = stat_proxy.__bg3leState[self]
+  return state and state[key]
+end
+
 local sync_warning_shown = false
 
 local function stat_write(self, key, value, raw)
@@ -15181,7 +15190,7 @@ local function stat_write(self, key, value, raw)
       .. "manually; make sure that you call Sync() on it when you're finished!")
   end
 
-  local addr = rawget(self, "__addr")
+  local addr = stat_proxy.__bg3leField(self, "__addr")
   if addr == nil then
     error("bg3le: this stat was not read from the engine, so there is "
           .. "nothing to write to", 3)
@@ -15207,7 +15216,7 @@ local function stat_write(self, key, value, raw)
   local index, kind, typeName = Ext._Internal.StatsAttrFind(addr, key)
   if index == nil and not raw then
     -- Upstream's LuaStatSetAttribute: logged, then NoSuchProperty.
-    Ext.Log.PrintError("Object '" .. tostring(rawget(self, "__name")) .. "' has no attribute named '"
+    Ext.Log.PrintError("Object '" .. tostring(stat_proxy.__bg3leField(self, "__name")) .. "' has no attribute named '"
                        .. tostring(key) .. "'")
     Ext._Internal.RaiseOutside("Cannot set property stats::Object::" .. tostring(key)
                                .. " - property does not exist")
@@ -15223,7 +15232,7 @@ local function stat_write(self, key, value, raw)
     if not Ext._Internal.StatsAIFlagsSet(addr, tostring(value or "")) then
       error(string.format("bg3le could not write %s", key), 3)
     end
-    rawget(self, "__cache")[key] = nil
+    stat_proxy.__bg3leField(self, "__cache")[key] = nil
     return true
   end
 
@@ -15233,10 +15242,10 @@ local function stat_write(self, key, value, raw)
     if raw then
       local ok, why = Ext._Internal.StatsSetFunctors(addr, key, tostring(value or ""))
       if not ok then error("bg3le: " .. tostring(why), 3) end
-      rawget(self, "__cache")[key] = nil
+      stat_proxy.__bg3leField(self, "__cache")[key] = nil
       return true
     end
-    local name = rawget(self, "__name") or "?"
+    local name = stat_proxy.__bg3leField(self, "__name") or "?"
     if type(value) == "table" then
       Ext.Log.PrintError(string.format("Cannot use table value for stat property %s of type StatsFunctors!", key))
     elseif value == nil then
@@ -15250,7 +15259,7 @@ local function stat_write(self, key, value, raw)
   -- MemorizationRequirements is deprecated: upstream's TrySetValue logs why per
   -- value type and fails.
   if slot.kind == 11 and not raw then
-    local name, t = rawget(self, "__name") or "?", type(value)
+    local name, t = stat_proxy.__bg3leField(self, "__name") or "?", type(value)
     if t == "nil" or t == "table" then
       Ext.Log.PrintError(string.format("Cannot use %s value for stat property %s of type %s!", t, key, slot.typeName))
     elseif t == "string" or t == "number" then
@@ -15287,7 +15296,7 @@ local function stat_write(self, key, value, raw)
         local negate, name, param = part:match("^%s*(!?)%s*([%w_]+)%s*(%S*)%s*$")
         if name == nil then
           error(string.format("Couldn't set %s.%s: \"%s\" is not a requirement",
-                              rawget(self, "__name"), key, part), 3)
+                              stat_proxy.__bg3leField(self, "__name"), key, part), 3)
         end
         list[#list + 1] = {Requirement = name, Not = negate == "!",
                            Param = param ~= "" and (tonumber(param) or param) or -1}
@@ -15340,7 +15349,7 @@ local function stat_write(self, key, value, raw)
     raw, why = Ext._Internal.StatsGuidIntern(tostring(value))
     if raw == nil and why == "not a GUID" then
       error(string.format("Couldn't set %s.%s: Value (\"%s\") is not a "
-                          .. "valid GUID", rawget(self, "__name"), key,
+                          .. "valid GUID", stat_proxy.__bg3leField(self, "__name"), key,
                           tostring(value)), 3)
     elseif raw == nil then
       error(string.format("bg3le could not write %s: %s", key, why), 3)
@@ -15368,7 +15377,7 @@ local function stat_write(self, key, value, raw)
     if not ok then
       error(string.format("bg3le could not write %s: %s", key, why), 3)
     end
-    rawget(self, "__cache")[key] = nil
+    stat_proxy.__bg3leField(self, "__cache")[key] = nil
     return true
   elseif writable == "roll" then
     -- Not an indexed property: the stat's own RollConditions map.
@@ -15377,7 +15386,7 @@ local function stat_write(self, key, value, raw)
     if not ok then
       error(string.format("bg3le could not write %s: %s", key, why), 3)
     end
-    rawget(self, "__cache")[key] = nil
+    stat_proxy.__bg3leField(self, "__cache")[key] = nil
     return true
   elseif writable == "flags" then
     -- Upstream's Object::SetFlags: each label's index sets bit index - 1.
@@ -15391,7 +15400,7 @@ local function stat_write(self, key, value, raw)
       local index = Ext._Internal.StatsEnumIndex(slot.typeName, tostring(label))
       if index == nil then
         error(string.format("Couldn't set %s.%s: Value (\"%s\") is not a "
-                            .. "valid enum label", rawget(self, "__name"), key,
+                            .. "valid enum label", stat_proxy.__bg3leField(self, "__name"), key,
                             tostring(label)), 3)
       end
       if index > 0 then mask = mask | (1 << (index - 1)) end
@@ -15435,7 +15444,7 @@ local function stat_write(self, key, value, raw)
   -- out as upstream's reads it: a float rounded to 32 bits, a GUID in its
   -- canonical form, a flag set in the enumeration's order, a translated
   -- string without its version.
-  rawget(self, "__cache")[key] = nil
+  stat_proxy.__bg3leField(self, "__cache")[key] = nil
   return true
 end
 
@@ -15472,10 +15481,10 @@ local STAT_METHODS = {
     if type(from) ~= "string" then
       error("stat:CopyFrom(name) takes a stat name", 2)
     end
-    if from == rawget(self, "__name") then return true end
+    if from == stat_proxy.__bg3leField(self, "__name") then return true end
 
     local carried, total = Ext._Internal.StatsCopyFrom(
-      rawget(self, "__addr"), from)
+      stat_proxy.__bg3leField(self, "__addr"), from)
     if carried == nil then
       local source = Ext.Stats.Get(from)
       if source == nil then
@@ -15490,8 +15499,8 @@ local STAT_METHODS = {
     end
 
     -- The proxy's cache holds what it read before the copy.
-    for k in pairs(rawget(self, "__cache")) do
-      rawget(self, "__cache")[k] = nil
+    for k in pairs(stat_proxy.__bg3leField(self, "__cache")) do
+      stat_proxy.__bg3leField(self, "__cache")[k] = nil
     end
     return true
   end,
@@ -15524,30 +15533,30 @@ local STAT_NIL = setmetatable({}, {__tostring = function() return "nil" end})
 -- The fields upstream puts alongside the attributes, computed when asked
 -- for. Names and shapes follow reference/stats-weapon.txt.
 local STAT_EXTRAS = {
-  Name = function(self) return rawget(self, "__name") end,
+  Name = function(self) return stat_proxy.__bg3leField(self, "__name") end,
   -- An empty string when no mod is known, as upstream's empty FixedString.
   ModId = function(self)
-    local modId = Ext._Internal.StatOrigin(rawget(self, "__name"))
+    local modId = Ext._Internal.StatOrigin(stat_proxy.__bg3leField(self, "__name"))
     return modId or ""
   end,
   OriginalModId = function(self)
-    local _, original = Ext._Internal.StatOrigin(rawget(self, "__name"))
+    local _, original = Ext._Internal.StatOrigin(stat_proxy.__bg3leField(self, "__name"))
     return original or ""
   end,
   ModifierList = function(self)
-    return Ext._Internal.StatsType(rawget(self, "__addr"))
+    return Ext._Internal.StatsType(stat_proxy.__bg3leField(self, "__addr"))
   end,
   ModifierListIndex = function(self)
-    return Ext._Internal.StatsListIndex(rawget(self, "__addr"))
+    return Ext._Internal.StatsListIndex(stat_proxy.__bg3leField(self, "__addr"))
   end,
   Using = function(self)
-    return Ext._Internal.StatsUsing(rawget(self, "__addr")) or ""
+    return Ext._Internal.StatsUsing(stat_proxy.__bg3leField(self, "__addr")) or ""
   end,
   ComboProperties = function(self)
-    return Ext._Internal.StatsComboGet(rawget(self, "__addr"), 0)
+    return Ext._Internal.StatsComboGet(stat_proxy.__bg3leField(self, "__addr"), 0)
   end,
   ComboCategories = function(self)
-    return Ext._Internal.StatsComboGet(rawget(self, "__addr"), 1)
+    return Ext._Internal.StatsComboGet(stat_proxy.__bg3leField(self, "__addr"), 1)
   end,
 
   -- An empty attribute set means the discovery did not land, which is
@@ -15559,7 +15568,7 @@ local STAT_EXTRAS = {
   -- key a mod iterating a stat would see and upstream does not have --
   -- caught by tools/check-reference.sh against the real extender's capture.
   AttributesUnavailable = function(self)
-    if Ext._Internal.StatsAttrCount(rawget(self, "__addr")) > 0 then
+    if Ext._Internal.StatsAttrCount(stat_proxy.__bg3leField(self, "__addr")) > 0 then
       return nil
     end
     return "no attributes readable; see the stats lines in the extender log"
@@ -15571,7 +15580,6 @@ local STAT_EXTRAS = {
 -- and the rest -- is reported either way, because upstream reports those.
 local STAT_DIAGNOSTICS = {AttributesUnavailable = true}
 
-local stat_proxy = {}
 
 -- Read when asked for, not when the stat is fetched.
 --
@@ -15589,7 +15597,7 @@ stat_proxy.__index = function(self, key)
   local m = STAT_METHODS[key]
   if m ~= nil then return m end
 
-  local cache = rawget(self, "__cache")
+  local cache = stat_proxy.__bg3leField(self, "__cache")
   local hit = cache[key]
   if hit ~= nil then
     if hit == STAT_NIL then return nil end
@@ -15603,10 +15611,10 @@ stat_proxy.__index = function(self, key)
     return value
   end
 
-  local addr = rawget(self, "__addr")
+  local addr = stat_proxy.__bg3leField(self, "__addr")
   local index = Ext._Internal.StatsAttrFind(addr, key)
   if index == nil then
-    Ext.Log.PrintError("Stat object '" .. tostring(rawget(self, "__name")) .. "' has no attribute named '"
+    Ext.Log.PrintError("Stat object '" .. tostring(stat_proxy.__bg3leField(self, "__name")) .. "' has no attribute named '"
                        .. tostring(key) .. "'")
     Ext._Internal.RaiseOutside("Property does not exist: stats::Object::" .. tostring(key) .. " - property does not exist")
   end
@@ -15642,8 +15650,8 @@ end
 -- upstream's: it prints Sync, SetPersistence, SetRawAttribute and CopyFrom
 -- as function entries next to them.
 stat_proxy.__pairs = function(self)
-  local addr = rawget(self, "__addr")
-  local cache = rawget(self, "__cache")
+  local addr = stat_proxy.__bg3leField(self, "__addr")
+  local cache = stat_proxy.__bg3leField(self, "__cache")
 
   -- Upstream's order: the object's own members and methods by name, then
   -- the attributes in the modifier list's order.
@@ -15691,18 +15699,19 @@ end
 
 stat_proxy.__name = "stats::Object"
 stat_proxy.__tostring = function(self)
-  return string.format("stats::Object (%016X)", rawget(self, "__addr") or 0)
+  return string.format("stats::Object (%016X)", stat_proxy.__bg3leField(self, "__addr") or 0)
 end
 -- Its __pairs order is upstream's, so a dump keeps it.
 stat_proxy.__bg3leOrdered = true
 
 stat_proxy.__bg3leIdentity = function(self)
-  return "s:" .. tostring(rawget(self, "__addr"))
+  return "s:" .. tostring(stat_proxy.__bg3leField(self, "__addr"))
 end
 
 local function make_stat(name, addr)
-  return setmetatable({__name = name, __addr = addr, __cache = {}},
-                      stat_proxy)
+  local stat = Ext._Internal.NewObjectProxy(stat_proxy)
+  stat_proxy.__bg3leState[stat] = {__name = name, __addr = addr, __cache = {}}
+  return stat
 end
 
 -- Ext.Stats.Get(name) -> stat object, or nil plus a reason
