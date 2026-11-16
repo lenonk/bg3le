@@ -107,8 +107,8 @@ structure was found, and what was measured, is in
   with `Ext._Internal.NetForceRemote(true)`), not yet against a second
   machine or a Windows player running bg3se. Reports welcome.
 - Where bg3le still differs from v33:
-  - `Ext.Stats.Get` returns a table with a metatable, so `type()` says
-    `table` where upstream's says `userdata`.
+  - `Ext.Mod.GetMod` returns a table, so `type()` says `table` where
+    upstream's says `userdata`.
   - A `GenomeVariant` with no type yet, such as one a resize appends, cannot
     be given a value: upstream looks the type up in an engine registry
     bg3le has not found. Typed ones read and write as upstream's do.

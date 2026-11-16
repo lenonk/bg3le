@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.6 (2026-11-16)
+
+- `Ext.Stats.Get` returns userdata, as upstream's does, so a mod that checks `type(stat) == "table"` takes the same
+  path it takes under bg3se. Post-Combat Cleanup failed at the end of every combat in which a character was
+  concentrating, with "Property does not exist: stats::Object::ParentPrototype", and its wild shape and sneak cleanup
+  were lost with it (#11, thanks to Hud). It reads optional fields only when the stat is a table, which upstream's
+  never is; bg3le's was a table, so the read ran and raised.
+
 ## v0.4.5 (2026-11-10)
 
 - The IMGUI overlay, and so MCM, works on Ubuntu 26.04 and wherever else the Vulkan loader binds its own functions.
