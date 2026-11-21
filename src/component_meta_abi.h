@@ -207,6 +207,9 @@ struct FieldDesc {
     // P_RENAMED's old name: found by name, left out of listings, as
     // upstream's is. Last, as above.
     bool Legacy;
+    // P_RO: upstream's setter refuses the property (Unserialize skips it);
+    // what it holds stays writable through it. Last, as above.
+    bool PropertyReadOnly;
 };
 
 }  // namespace bg3le

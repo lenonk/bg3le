@@ -59,7 +59,8 @@ structure was found, and what was measured, is in
   upstream's own type registry, including its IDE helper generator.
 - **Osiris**: the engine's functions, the story's own procedures, databases
   and queries, and `RegisterListener`.
-- **Entities**: every component field bg3se describes reads and writes;
+- **Entities**: every component field bg3se describes reads, and writes
+  unless bg3se marks it read-only;
   entities and components can be created and removed; `OnCreate`,
   `OnChange` and system-update subscriptions fire; replication, NetIds and
   tracing work.

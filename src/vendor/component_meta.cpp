@@ -1299,6 +1299,14 @@ constexpr FieldDesc make_legacy_field(char const* name, std::size_t offset) {
     return f;
 }
 
+// P_RO: a property upstream reads but never assigns.
+template <class T>
+constexpr FieldDesc make_ro_field(char const* name, std::size_t offset) {
+    FieldDesc f = make_field<T>(name, offset);
+    f.PropertyReadOnly = true;
+    return f;
+}
+
 template <class T>
 constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
     FieldDesc f{};
@@ -1691,8 +1699,10 @@ struct EnumTable;
             #name, offsetof(ObjectType, prop)),
 
 #define P(prop) PN(prop, prop)
-#define P_RO(prop) PN(prop, prop)
-#define PN_RO(name, prop) PN(name, prop)
+#define PN_RO(name, prop)                                                     \
+        make_ro_field<decltype(ObjectType::prop)>(                            \
+            #name, offsetof(ObjectType, prop)),
+#define P_RO(prop) PN_RO(prop, prop)
 #define P_NOTIFY(prop, notify) PN(prop, prop)
 // The old name too, as upstream keeps it: mods still use field_1 and the like.
 #define P_RENAMED(prop, oldName)                                              \
@@ -2955,6 +2965,37 @@ extern "C" std::size_t bg3le_meta_legacy_at(void const* handle,
             names[n] = f->Name;
             kinds[n] = reportable_kind(*f);
             ++n;
+        }
+    }
+    return n;
+}
+
+// The P_RO names of a class or of the struct at path, base classes included.
+extern "C" std::size_t bg3le_meta_readonly_at(void const* handle,
+                                              char const* path,
+                                              char const** names,
+                                              std::size_t capacity) {
+    if (handle == nullptr) return 0;
+    auto const* cls = static_cast<ClassFields const*>(handle);
+    if (path != nullptr && path[0] != '\0') {
+        const auto r = resolve_path(cls, path, nullptr);
+        if (!r.Ok) return 0;
+        cls = struct_type_of(&r.Field);
+        if (cls == nullptr) return 0;
+    }
+
+    std::size_t n = 0;
+    std::vector<ClassFields const*> pending{cls};
+    while (!pending.empty() && n < capacity) {
+        auto const* c = pending.back();
+        pending.pop_back();
+        for (auto const* f = c->Fields; f->Name != nullptr && n < capacity; ++f) {
+            if (f->Kind == FieldKind::Inherit) {
+                auto it = by_class_name().find(f->Name);
+                if (it != by_class_name().end()) pending.push_back(it->second);
+                continue;
+            }
+            if (f->PropertyReadOnly) names[n++] = f->Name;
         }
     }
     return n;

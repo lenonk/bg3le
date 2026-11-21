@@ -1544,6 +1544,10 @@ extern "C" std::size_t bg3le_meta_legacy_at(void const* handle,
                                             char const** names,
                                             std::uint8_t* kinds,
                                             std::size_t capacity);
+extern "C" std::size_t bg3le_meta_readonly_at(void const* handle,
+                                              char const* path,
+                                              char const** names,
+                                              std::size_t capacity);
 extern "C" std::size_t bg3le_meta_fields_at(void const* handle,
                                             const char* path,
                                             const char** names,
@@ -3585,20 +3589,34 @@ bool subject_from_object(lua_State* L, int addressIdx, int classIdx,
 extern "C" bool bg3le_meta_path_is_struct(void const* handle, char const* path);
 
 // Gives the field table on top a metatable answering upstream's legacy names
-// (field_1 for Controller): indexing finds them, pairs and next do not.
+// (field_1 for Controller): indexing finds them, pairs and next do not. Its
+// __bg3leReadOnly lists the P_RO names.
 void attach_legacy_names(lua_State* L, void const* meta, const char* path) {
     constexpr std::size_t kMax = 64;
     const char* names[kMax];
     std::uint8_t kinds[kMax];
     const std::size_t n = bg3le_meta_legacy_at(meta, path, names, kinds, kMax);
-    if (n == 0) return;
-    lua_createtable(L, 0, 1);
-    lua_createtable(L, 0, (int)n);
-    for (std::size_t i = 0; i < n; ++i) {
-        lua_pushstring(L, field_kind_name((FieldKind)kinds[i]));
-        lua_setfield(L, -2, names[i]);
+    constexpr std::size_t kMaxRo = 256;
+    const char* roNames[kMaxRo];
+    const std::size_t ro = bg3le_meta_readonly_at(meta, path, roNames, kMaxRo);
+    if (n == 0 && ro == 0) return;
+    lua_createtable(L, 0, 2);
+    if (n != 0) {
+        lua_createtable(L, 0, (int)n);
+        for (std::size_t i = 0; i < n; ++i) {
+            lua_pushstring(L, field_kind_name((FieldKind)kinds[i]));
+            lua_setfield(L, -2, names[i]);
+        }
+        lua_setfield(L, -2, "__index");
     }
-    lua_setfield(L, -2, "__index");
+    if (ro != 0) {
+        lua_createtable(L, 0, (int)ro);
+        for (std::size_t i = 0; i < ro; ++i) {
+            lua_pushboolean(L, 1);
+            lua_setfield(L, -2, roNames[i]);
+        }
+        lua_setfield(L, -2, "__bg3leReadOnly");
+    }
     lua_setmetatable(L, -2);
 }
 
@@ -9504,6 +9522,12 @@ do
   end
 end
 
+-- A field table's P_RO names (upstream's read-only properties), or nil.
+function Ext._Internal.ReadOnlyNames(fields)
+  local m = Ext._Internal.RawGetMetatable(fields)
+  return type(m) == "table" and m.__bg3leReadOnly or nil
+end
+
 -- A class's field table is fixed when bg3le is built, so it is made once:
 -- building it per object was most of a template's cost (33,806 of them in
 -- GetAllRootTemplates). Callers only read it.
@@ -10935,8 +10959,11 @@ local function unserialize_into(object, values)
   -- Upstream walks the struct's properties, so a key it lacks is ignored.
   local typeName = Ext.Types.GetObjectType(object)
   local members = typeName ~= nil and Ext._Internal.TypeMemberSet(typeName) or nil
+  -- A P_RO property's setter refuses, and upstream ignores that.
+  local readOnly = type(meta) == "table" and meta.__bg3leReadOnly or nil
   for k, v in pairs(values) do
     if members ~= nil and members[k] == nil then goto continue end
+    if readOnly ~= nil and readOnly[k] then goto continue end
     -- Getters and custom members are not among upstream's Unserialize properties.
     if typeName ~= nil and Ext._Internal.CustomMember(typeName, k) ~= nil then goto continue end
     local cur
@@ -14131,10 +14158,12 @@ make_fields = function(handle, comp, prefix, fields, identity)
     return prefix .. "." .. key
   end
 
+  local readOnly = Ext._Internal.ReadOnlyNames(fields)
   return Ext._Internal.NewObjectProxy({
     -- What Ext.Types.GetObjectType reports, and what a custom member is
     -- registered against.
     __name = type_of_view(comp, prefix),
+    __bg3leReadOnly = readOnly,
     -- A pointed-at object is one object however it was reached, which is
     -- what lets AvoidRecursion stop a walk through a pointer graph.
     __bg3leIdentity = identity or function()
@@ -14169,6 +14198,9 @@ make_fields = function(handle, comp, prefix, fields, identity)
       return read_path(handle, comp, path_to(key))
     end,
     __newindex = function(self, key, value)
+      if readOnly ~= nil and readOnly[key] then
+        Ext._Internal.ProxySetFailed(type_of_view(comp, prefix) or comp, key, "is read-only")
+      end
       if fields[key] == nil then
         local extra = Ext._Internal.CustomMember(type_of_view(comp, prefix),
                                                  key)
@@ -16052,10 +16084,12 @@ function read_object(addr, class, prefix, out)
   -- The type this view is of, for Ext.Types.GetObjectType and for the members
   -- a mod may have grafted on with Ext.Types.AddCustomFunction.
   local viewType = Ext._Internal.ViewTypeName(class, prefix, true)
+  local readOnly = Ext._Internal.ReadOnlyNames(fields)
 
   return Ext._Internal.NewObjectProxy({
     __bg3leIdentity = function() return "o:" .. addr .. ":" .. prefix end,
     __name = viewType,
+    __bg3leReadOnly = readOnly,
     __index = function(self, key)
       local held = value_of(key)
       if held ~= nil then return held end
@@ -16072,6 +16106,9 @@ function read_object(addr, class, prefix, out)
       return nil
     end,
     __newindex = function(self, key, value)
+      if readOnly ~= nil and readOnly[key] then
+        Ext._Internal.ProxySetFailed(viewType, key, "is read-only")
+      end
       local kind = fields[key]
       if kind == nil then
         local extra = Ext._Internal.CustomMember(viewType, key)
