@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.7 (2026-11-24)
+
+- Transmog Enhanced works. bg3le let a mod write the properties upstream marks read-only, so its copy of a worn item
+  took the original's handle, and equipping the copy acted on the wrong item. Those writes are refused with upstream's
+  message now, and `Ext.Types.Unserialize` skips them as upstream's does.
+- `std::variant` fields can be written: a value goes to the first alternative that takes it, as upstream's does.
+  MazzleLib's reactions failed with "SoundRoutingSystem.PostEvent[0].Event is not writable (variant)", so it could
+  not mute or replay a character's bark (thanks to MeLikeChoco).
+
 ## v0.4.6 (2026-11-16)
 
 - `Ext.Stats.Get` returns userdata, as upstream's does, so a mod that checks `type(stat) == "table"` takes the same
