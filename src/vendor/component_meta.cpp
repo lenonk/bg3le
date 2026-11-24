@@ -814,6 +814,38 @@ void* variant_payload_thunk(void const* v) {
     return const_cast<void*>(v);
 }
 
+// Alternative N built in place at the engine's layout, as upstream's assignment
+// of another alternative does, except that the old payload is abandoned rather
+// than destroyed: bg3le cannot know who allocated it.
+template <class V, std::size_t N = 0>
+void* variant_select_at(void* v, std::size_t index) {
+    if constexpr (N >= std::variant_size_v<V>) {
+        return nullptr;
+    } else {
+        using T = std::variant_alternative_t<N, V>;
+        if (index != N) return variant_select_at<V, N + 1>(v, index);
+        // Only where this build lays the alternative out as the engine does.
+        if constexpr (std::is_default_constructible_v<T>
+                      && EngineLayout<T>::Size == sizeof(T)) {
+            const auto held = (std::uint8_t)N;
+            std::uint8_t now = 0;
+            std::memcpy(&now, (char const*)v + EngineLayout<V>::IndexAt, 1);
+            if (now != held) {
+                new (v) T();
+                std::memcpy((char*)v + EngineLayout<V>::IndexAt, &held, 1);
+            }
+            return v;
+        } else {
+            return nullptr;
+        }
+    }
+}
+
+template <class V>
+void* variant_select_thunk(void* v, std::size_t index) {
+    return variant_select_at<V>(v, index);
+}
+
 template <class V>
 std::size_t variant_index_thunk(void const* v) {
     auto const* var = static_cast<V const*>(v);
@@ -1415,6 +1447,7 @@ constexpr FieldDesc make_plain_field(char const* name, std::size_t offset) {
         // libc++'s, and a nested variant is laid out differently by it.
         f.ActiveIndex = &variant_index_at_thunk<T>;
         f.Data = &variant_payload_thunk<T>;
+        f.Select = &variant_select_thunk<T>;
     } else if constexpr (MapTraits<T>::kIsMap) {
         using K = typename MapTraits<T>::Key;
         using V = typename MapTraits<T>::Value;
@@ -2779,6 +2812,38 @@ extern "C" bool bg3le_meta_variant_index(void const* handle, char const* path,
     return true;
 }
 
+// The kind of a variant's alternative index; false past the last one.
+extern "C" bool bg3le_meta_variant_kind(void const* handle, char const* path,
+                                        void* component, std::size_t index,
+                                        std::uint8_t* kind) {
+    if (handle == nullptr || path == nullptr || component == nullptr) return false;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
+                                component);
+    if (!r.Ok || r.Field.Kind != FieldKind::Variant || r.Field.Alternatives == nullptr) {
+        return false;
+    }
+    for (std::size_t i = 0; i <= index; ++i) {
+        if (r.Field.Alternatives[i] == nullptr) return false;
+    }
+    *kind = reportable_kind(*r.Field.Alternatives[index]);
+    return true;
+}
+
+// Makes alternative index the live one (see FieldDesc::Select) and gives its
+// payload; false where it cannot be built or the field is read-only.
+extern "C" bool bg3le_meta_variant_select(void const* handle, char const* path,
+                                          void* component, std::size_t index,
+                                          void** payload) {
+    *payload = nullptr;
+    if (handle == nullptr || path == nullptr || component == nullptr) return false;
+    const auto r = resolve_path(static_cast<ClassFields const*>(handle), path,
+                                component);
+    if (!r.Ok || r.Address == nullptr || r.Field.ReadOnly) return false;
+    if (r.Field.Kind != FieldKind::Variant || r.Field.Select == nullptr) return false;
+    *payload = r.Field.Select(r.Address, index);
+    return *payload != nullptr;
+}
+
 // The key of one slot of a map.
 //
 // Keys are read by slot rather than looked up, because a lookup would mean
@@ -3425,6 +3490,27 @@ extern "C" int bg3le_meta_selftest() {
         if (bg3le_meta_resolve(lifeMeta, "Lifetime[2]", &lifetime, &address,
                                &kind, &size, &readOnly)) {
             fail("an alternative past the end resolved");
+        }
+
+        // Writing: the kinds, then a switch back to the uint8, default-built.
+        std::uint8_t altKind = 0;
+        if (!bg3le_meta_variant_kind(lifeMeta, "Lifetime", &lifetime, 1, &altKind)
+            || (FieldKind)altKind != FieldKind::Float) {
+            fail("the second alternative is not reported as a float");
+        }
+        if (bg3le_meta_variant_kind(lifeMeta, "Lifetime", &lifetime, 2, &altKind)) {
+            fail("a kind past the last alternative was reported");
+        }
+        void* payload = nullptr;
+        if (!bg3le_meta_variant_select(lifeMeta, "Lifetime", &lifetime, 1, &payload)
+            || *(float*)payload != 2.5f) {
+            fail("selecting the live alternative did not keep its value");
+        }
+        if (!bg3le_meta_variant_select(lifeMeta, "Lifetime", &lifetime, 0, &payload)) {
+            fail("the uint8 alternative could not be selected");
+        } else {
+            if (lifetime.Lifetime.index() != 0) fail("the select did not move the index");
+            if (*(std::uint8_t*)payload != 0) fail("the selected alternative is not default-built");
         }
     }
 

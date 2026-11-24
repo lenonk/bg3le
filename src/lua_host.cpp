@@ -1565,6 +1565,12 @@ extern "C" bool bg3le_meta_variant_index(void const* handle,
                                          const char* path, void* component,
                                          std::size_t* active,
                                          std::size_t* count);
+extern "C" bool bg3le_meta_variant_kind(void const* handle, const char* path,
+                                        void* component, std::size_t index,
+                                        std::uint8_t* kind);
+extern "C" bool bg3le_meta_variant_select(void const* handle, const char* path,
+                                          void* component, std::size_t index,
+                                          void** payload);
 extern "C" bool bg3le_meta_map_key(void const* handle, const char* path,
                                    void* component, std::size_t index,
                                    void** address, std::uint8_t* kind,
@@ -2920,6 +2926,42 @@ bool write_optional(lua_State* L, int index, void const* meta,
                        (FieldKind)elemKind, elemCount);
 }
 
+// Upstream's typecheck<T> for the alternatives bg3le can write.
+bool variant_accepts(lua_State* L, int index, FieldKind kind) {
+    switch (kind) {
+        case FieldKind::Bool: return lua_type(L, index) == LUA_TBOOLEAN;
+        case FieldKind::Int8: case FieldKind::Uint8: case FieldKind::Int16:
+        case FieldKind::Uint16: case FieldKind::Int32: case FieldKind::Uint32:
+        case FieldKind::Int64: case FieldKind::Uint64:
+        case FieldKind::ComponentHandle:
+            return lua_isinteger(L, index) != 0;
+        case FieldKind::Float: case FieldKind::Double:
+            return lua_isnumber(L, index) != 0;
+        case FieldKind::FixedString: case FieldKind::LSString:
+        case FieldKind::Guid:
+            return lua_type(L, index) == LUA_TSTRING;
+        case FieldKind::Entity: {
+            std::uint64_t handle = 0;
+            return lua_isnil(L, index) || entity_proxy_handle(L, index, &handle);
+        }
+        default: return false;
+    }
+}
+
+// Upstream's UnserializeVariant: the first alternative whose typecheck takes
+// the value is built and assigned. False if none bg3le can write takes it.
+bool write_variant(lua_State* L, int index, void const* meta, char const* path,
+                   void* base) {
+    std::uint8_t kind = 0;
+    for (std::size_t i = 0; bg3le_meta_variant_kind(meta, path, base, i, &kind); ++i) {
+        if (!variant_accepts(L, index, (FieldKind)kind)) continue;
+        void* payload = nullptr;
+        if (!bg3le_meta_variant_select(meta, path, base, i, &payload)) return false;
+        return write_field(L, index, payload, (FieldKind)kind);
+    }
+    return false;
+}
+
 // Ext._Internal.SetField(handle, component, path, value)
 int l_set_field(lua_State* L) {
     const auto handle = static_cast<std::uint64_t>(luaL_checkinteger(L, 1));
@@ -2979,6 +3021,17 @@ int l_set_field(lua_State* L) {
         if (!write_optional(L, 4, meta, path, component)) {
             lua_pushnil(L);
             lua_pushfstring(L, "%s.%s is an optional bg3le cannot write",
+                            name, path);
+            return 2;
+        }
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    if ((FieldKind)kind == FieldKind::Variant) {
+        if (!write_variant(L, 4, meta, path, component)) {
+            lua_pushnil(L);
+            lua_pushfstring(L, "%s.%s: the value matches no alternative of the variant bg3le can write",
                             name, path);
             return 2;
         }
@@ -3994,6 +4047,17 @@ int l_object_set_field(lua_State* L) {
         if (!write_optional(L, 4, subject.Meta, path, subject.Base)) {
             lua_pushnil(L);
             lua_pushfstring(L, "%s.%s is an optional bg3le cannot write",
+                            className, path);
+            return 2;
+        }
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    if ((FieldKind)kind == FieldKind::Variant) {
+        if (!write_variant(L, 4, subject.Meta, path, subject.Base)) {
+            lua_pushnil(L);
+            lua_pushfstring(L, "%s.%s: the value matches no alternative of the variant bg3le can write",
                             className, path);
             return 2;
         }

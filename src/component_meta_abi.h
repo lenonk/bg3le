@@ -210,6 +210,10 @@ struct FieldDesc {
     // P_RO: upstream's setter refuses the property (Unserialize skips it);
     // what it holds stays writable through it. Last, as above.
     bool PropertyReadOnly;
+    // Variant only: makes alternative index the live one, default-constructed
+    // over the old payload (abandoned, not destroyed), and returns where it is.
+    // Null result where that alternative cannot be built here. Last, as above.
+    void* (*Select)(void* variant, std::size_t index);
 };
 
 }  // namespace bg3le
